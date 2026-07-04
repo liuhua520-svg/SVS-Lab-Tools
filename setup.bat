@@ -124,6 +124,27 @@ echo [✓] MFA 环境已准备
 echo.
 
 REM ─────────────────────────────────────────────────────────────────
+REM Step 2.5: 用 conda 只装 kaldi 这个二进制依赖
+REM ─────────────────────────────────────────────────────────────────
+REM 注意：这里故意不用 `conda install -c conda-forge montreal-forced-aligner`
+REM （官方 conda 完整包），因为那个包在 Windows 上会连带装上一堆 GDK/pango/
+REM cairo 之类的图形渲染依赖（通常是给 fstdraw 之类的可视化子命令用的），
+REM 且经常在这一步因为 post-link 脚本（gdk-pixbuf-query-loaders 等）报错
+REM 装不上。MFA 官方文档也说明支持"conda 只装 kaldi/pynini 这些二进制，
+REM MFA 本体走 pip"的混合安装方式，二者效果一致，且不会碰 GDK 组件。
+REM MFA 核心的强制对齐流程只依赖 kaldi 可执行文件本身，装不装 GDK 完全
+REM 不影响对齐结果，只是不能用可视化调试命令而已。
+echo [*] 通过 conda 安装 kaldi (纯二进制，不含图形/GDK 依赖)...
+call "%CONDA_BAT%" install -y -p "%ENV_PREFIX%" -c conda-forge kaldi
+if errorlevel 1 (
+    echo [✗] kaldi 安装失败，请检查上方报错信息（网络问题居多，可重跑本脚本）。
+    pause
+    exit /b 1
+)
+echo [✓] kaldi 已安装
+echo.
+
+REM ─────────────────────────────────────────────────────────────────
 REM Step 3: 安装依赖 (通过 requirements.txt)
 REM ─────────────────────────────────────────────────────────────────
 cls
@@ -142,7 +163,10 @@ if not exist "%REQUIREMENTS_FILE%" (
 echo [*] 升级 pip/setuptools/wheel...
 call "%CONDA_BAT%" run -p "%ENV_PREFIX%" python -m pip install --upgrade pip setuptools wheel >nul 2>&1
 
-echo [*] 根据 requirements.txt 安装所有依赖 (包含 MFA 等核心包)...
+echo [*] 根据 requirements.txt 安装所有依赖 (含 pip 版 montreal-forced-aligner)...
+echo   requirements.txt 里的 montreal-forced-aligner 这里走 pip 安装（纯 Python
+echo   胶水代码，运行时调用上一步 conda 装好的 kaldi 可执行文件），而不是走
+echo   conda 的完整包，因此不会再触发 GDK 组件安装。
 echo   请耐心等待，这可能需要较长时间...
 call "%CONDA_BAT%" run -p "%ENV_PREFIX%" python -m pip install -r "%REQUIREMENTS_FILE%"
 if errorlevel 1 (

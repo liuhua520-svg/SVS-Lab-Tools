@@ -153,6 +153,39 @@ source "$VENV_DIR/bin/activate"
 log_ok "虚拟环境已激活"
 
 # ─────────────────────────────────────────────────────────────────────────
+# Step 2.5: 安装 kaldi (MFA 强制对齐的二进制依赖)
+# ─────────────────────────────────────────────────────────────────────────
+# requirements.txt 里的 montreal-forced-aligner 走的是 pip 安装（见下面
+# Step 3），pip 版只是纯 Python 胶水代码，运行时需要调用 kaldi 的编译
+# 二进制。这里不用 `conda install -c conda-forge montreal-forced-aligner`
+# 这个官方完整包，是因为它在部分平台上会连带装一堆图形渲染相关依赖
+# (pango/cairo/gdk-pixbuf，通常是给 fstdraw 之类的可视化子命令用的)，
+# 装起来体积更大也更容易因为环境问题报错；而只装 kaldi 本身就是纯二进制，
+# 不含任何图形依赖，装不装图形组件完全不影响核心对齐流程。
+log_section "Step 2.5: 安装 kaldi"
+
+if command_exists conda; then
+    log_step "检测到 conda，通过 conda-forge 安装 kaldi 到 .kaldi_env..."
+    KALDI_ENV_DIR="$SCRIPT_DIR/.kaldi_env"
+    if [ ! -d "$KALDI_ENV_DIR" ]; then
+        conda create -y -p "$KALDI_ENV_DIR" -c conda-forge kaldi
+    else
+        log_info "kaldi 环境已存在，跳过创建: $KALDI_ENV_DIR"
+    fi
+    KALDI_BIN_DIR="$KALDI_ENV_DIR/bin"
+    if [ -d "$KALDI_BIN_DIR" ]; then
+        export PATH="$KALDI_BIN_DIR:$PATH"
+        log_ok "kaldi 已安装，并已加入 PATH: $KALDI_BIN_DIR"
+        log_info "提示：run.sh / 启动脚本里也需要把这个路径加入 PATH，否则 MFA 运行时找不到 kaldi"
+    else
+        log_warn "kaldi 环境创建后未找到 bin 目录，请手动检查 $KALDI_ENV_DIR"
+    fi
+else
+    log_warn "未检测到 conda，无法自动安装 kaldi。"
+    log_info "请先安装 Miniconda/Miniforge 后重跑本脚本，或手动通过发行版包管理器安装 kaldi 并确保其在 PATH 中"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────
 # Step 3: 安装所有 Python 依赖
 # ─────────────────────────────────────────────────────────────────────────
 log_section "Step 3: 安装 Python 依赖"
@@ -166,7 +199,7 @@ log_step "升级 pip/setuptools/wheel..."
 pip install --upgrade pip setuptools wheel > /dev/null 2>&1
 log_ok "已升级"
 
-log_step "根据 requirements.txt 安装核心依赖..."
+log_step "根据 requirements.txt 安装核心依赖 (含 pip 版 montreal-forced-aligner)..."
 log_info "这可能需要几分钟，取决于您的网络环境..."
 
 if pip install -r "$REQ_FILE"; then
