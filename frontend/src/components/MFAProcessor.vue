@@ -500,7 +500,7 @@
                   <el-input-number
                     v-model="advancedConfig.f0_smooth_window"
                     :min="1"
-                    :max="21"
+                    :max="99"
                     :step="2"
                     controls-position="right"
                     :disabled="!advancedConfig.export_pitch_line"
@@ -514,7 +514,7 @@
                   <el-input-number
                     v-model="advancedConfig.vsqx_pitch_smooth_window"
                     :min="1"
-                    :max="21"
+                    :max="99"
                     :step="2"
                     controls-position="right"
                     :disabled="!advancedConfig.export_pitch_line"
