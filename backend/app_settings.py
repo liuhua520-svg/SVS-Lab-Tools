@@ -78,6 +78,16 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "ctc_max_cjk_particle_sec": 0.35,
     "ctc_max_en_word_sec": 1.20,
     "ctc_min_sp_sec": 0.15,
+
+    # Qwen3-ForcedAligner 长音频分段对齐（详见 alt_aligners.py 里
+    # Qwen3ForcedAligner._align_chunked() 的说明）。
+    # 音频总时长超过该阈值（秒）时，自动切分成多段分别对齐，避免长音频
+    # 一次性喂给模型导致时间戳随时长推进逐渐漂移/错位。
+    "qwen3_fa_chunk_threshold_sec": 30.0,
+    # 每段的目标长度（秒）。实际切点会在 [目标长度×0.5, 目标长度×1.5]
+    # 区间内自动吸附到音频能量最低（最可能是真实停顿）的位置，不会严格
+    # 等于这个数值。
+    "qwen3_fa_chunk_target_sec": 20.0,
 }
 
 # 对齐调优参数的合法取值范围（秒），用于 save_settings() 里的边界钳制。
@@ -91,6 +101,9 @@ _TUNING_RANGES: Dict[str, tuple] = {
     "ctc_max_cjk_particle_sec": (0.05, 5.0),
     "ctc_max_en_word_sec": (0.05, 5.0),
     "ctc_min_sp_sec": (0.0, 2.0),
+    # 0 表示禁用分段（即使音频再长也整段单次对齐，等同于改造前的行为）。
+    "qwen3_fa_chunk_threshold_sec": (0.0, 3600.0),
+    "qwen3_fa_chunk_target_sec": (0.0, 300.0),
 }
 
 # alt_aligners.get_alignment_tuning() 使用的轻量缓存：避免每次对齐调用都
@@ -254,7 +267,7 @@ def get_alignment_tuning() -> Dict[str, float]:
 
     Returns
     -------
-    Dict[str, float]，键固定为 _TUNING_RANGES 中的 8 个参数名。
+    Dict[str, float]，键固定为 _TUNING_RANGES 中的 10 个参数名。
     """
     global _tuning_cache, _tuning_cache_mtime
 

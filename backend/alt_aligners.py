@@ -481,6 +481,14 @@ def _get_alignment_tuning() -> Dict[str, float]:
         "ctc_max_cjk_particle_sec": _CTC_MAX_CJK_PARTICLE_SEC,
         "ctc_max_en_word_sec": _CTC_MAX_EN_WORD_SEC,
         "ctc_min_sp_sec": _CTC_MIN_SP_SEC,
+        # 【修复】此前这里漏了这两项，导致 app_settings.get_alignment_tuning()
+        # 实际返回的 qwen3_fa_chunk_threshold_sec / qwen3_fa_chunk_target_sec
+        # 被下面 `if k in fallback` 的过滤条件直接丢弃——设置页面里改这两个
+        # 值保存后，_align_chunked 调用方 (Qwen3ForcedAligner.align()) 读到
+        # 的 tuning.get(...) 永远只会命中调用处自己写的字面量默认值
+        # （30.0 / 20.0），保存设置完全不生效，且没有任何报错或警告。
+        "qwen3_fa_chunk_threshold_sec": 30.0,
+        "qwen3_fa_chunk_target_sec": 20.0,
     }
     try:
         import app_settings
@@ -2407,6 +2415,709 @@ def _apply_qwen3_fa_onset_delay(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# 6c. Qwen3-ForcedAligner 长音频分段处理
+#
+#     问题背景：Qwen3-ForcedAligner-0.6B 是基于 Transformer 的强制对齐模型，
+#     训练时见过的音频长度通常远短于一整首歌（几分钟）。把长音频整体一次性
+#     喂给模型对齐时，时间戳会随着音频推进逐渐失准，实测在几分钟量级的
+#     音频上会出现音节整体错位、越往后偏差越大的现象（用户反馈：QWEN3-FA
+#     处理 5 分钟音频导致音标错位）。
+#
+#     解决思路：参考 WhisperXAligner.align() 已经验证过的"隔离对齐"思路
+#     （见该函数顶部说明：逐句裁剪音频 → 在极短时序空间内单独对齐 → 全局
+#     偏移拼回），把长音频切成若干个足够短的物理片段，分别调用模型对齐，
+#     再把每段的局部时间戳加上该段起始时间偏移，拼接成完整的时间轴。
+#
+#     【v2 修正】旧版实现分两步独立决策，彼此互不知情：
+#       1. 音频切点：用短时能量曲线找"能量最低"的位置（_plan_audio_chunks）。
+#       2. 文本切点：按各段时长占比、用最大余数法把参考文本按字符数比例
+#          分配（_split_text_by_duration_quota）。
+#     这两步各自为政——音频切在能量最低处，文本切在字符比例算出来的位置，
+#     二者对不上时，就会把同一个句子从中间硬生生切开，分别喂给两次独立的
+#     模型调用。被腰斩的那半句在各自的短音频片段里既没有完整语义、也没有
+#     完整韵律上下文，模型对齐出来的时间戳会系统性跑偏，表现正是用户反馈
+#     的"每隔 ~20 秒的分段处音标错位"——本质上是"按固定时长硬切"的效果，
+#     而不是真正按句子停顿切分。
+#
+#     新策略反过来做：先按标点把参考文本切成完整的句子，永远不在句子内部
+#     下刀；再用句子的可发音字符数占比，粗略估算每个句子在全曲时间轴上的
+#     大致位置，把连续整句分组到目标长度附近；最后只在"句子与句子之间"
+#     这个天然停顿点上，用短时能量曲线在估算位置附近的一个小窗口内寻找
+#     真实的安静区间，去微调物理切点该落在哪一帧——这一步只影响"喂给模型
+#     的音频从哪里剪断"，参考文本的句子边界本身不会再被这一步改变。
+#     由 _plan_sentence_aligned_chunks() 实现；_plan_audio_chunks() 与
+#     _split_text_by_duration_quota() 保留作为参考文本完全没有句末标点
+#     （无法按句切分）时的最终兜底路径。
+#
+#     该机制默认开启（音频超过 qwen3_fa_chunk_threshold_sec 秒时自动分段），
+#     阈值和目标分段长度均可在设置页面调整，见 app_settings.py 的
+#     qwen3_fa_chunk_threshold_sec / qwen3_fa_chunk_target_sec。
+#     音频时长未超过阈值时行为与改造前完全一致（不引入任何变化）。
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _compute_rms_curve(
+    audio,
+    sr: int,
+    frame_sec: float = 0.04,
+    hop_sec: float = 0.02,
+) -> Tuple["object", float]:
+    """
+    计算整段音频的短时 RMS 能量曲线，用于长音频分段切点搜索。
+
+    与 _refine_sil_boundaries_by_energy() 里逐句、逐帧 Python 循环的实现
+    不同——这里处理的是整首歌（可能几分钟，几万帧），用卷积一次性向量化
+    算完，避免 Python 循环带来的明显延迟。
+
+    Returns
+    -------
+    (rms, hop_sec)：rms 是 numpy 数组（float64），下标 i 对应时间
+    i * hop_sec 秒；hop_sec 原样返回，方便调用方把下标换算回秒。
+    """
+    import numpy as np
+
+    frame_n = max(1, int(round(frame_sec * sr)))
+    hop_n = max(1, int(round(hop_sec * sr)))
+
+    audio64 = np.asarray(audio, dtype=np.float64)
+    if audio64.size == 0:
+        return np.zeros(1, dtype=np.float64), hop_sec
+
+    power = audio64 * audio64
+    kernel = np.ones(frame_n, dtype=np.float64) / frame_n
+    smoothed = np.convolve(power, kernel, mode="same")
+    rms_full = np.sqrt(np.maximum(smoothed, 0.0))
+    rms = rms_full[::hop_n]
+    if rms.size == 0:
+        rms = np.array([float(np.sqrt(np.mean(power)))], dtype=np.float64)
+    return rms, hop_sec
+
+
+def _plan_audio_chunks(
+    total_sec: float,
+    rms,
+    hop_sec: float,
+    target_chunk_sec: float,
+    rel_threshold: float = 0.06,
+    abs_floor: float = 0.0008,
+    abs_ceiling: float = 0.003,
+    min_pause_sec: float = 0.12,
+) -> List[Tuple[float, float]]:
+    """
+    根据目标分段长度和能量曲线，把 [0, total_sec] 切成若干段
+    [(start_sec, end_sec), ...]，切点优先落在"真实停顿"（持续足够长的
+    安静区间，典型是句末换气）上；即便完全找不到这样的安静区，也会保证
+    任何一段都不超过一个硬上限（target_chunk_sec 的 1.5 倍），不会退化回
+    "整段不切"。
+
+    【历史问题】旧实现只在搜索窗口内取能量最低的单帧作为切点。这在语速
+    较快、辅音密集的中文人声念白里并不可靠——爆破音/塞音的短暂闭塞
+    （通常只有 1～2 个能量采样点）本身能量也很低，会被误判成"停顿"，
+    于是切点经常落在句子中间的辅音闭塞处，而不是句末真正的换气停顿，
+    观感上表现为"看起来像是按固定时长硬切"，而不是按句末静音切分。
+
+    【现改法】不再看单帧最小值，而是用与 _refine_sil_boundaries_by_energy()
+    一致的自适应阈值（本曲 70 分位能量 × rel_threshold，并钳制到
+    [abs_floor, abs_ceiling]）先把搜索窗口内的帧二值化为"安静/不安静"，
+    再找出所有连续安静的区间（run），只保留时长 >= min_pause_sec（默认
+    120ms，明显长于普通塞音闭塞、但短于绝大多数句末换气）的候选，从中
+    选取中心点离"理想切分位置"（cur + target_chunk_sec）最近的一段，取
+    其中点作为切分点。找不到任何满足最短时长的安静区间时（比如整段语速
+    极快、几乎没有停顿），才退回旧逻辑：直接取窗口内能量最低的单帧，
+    保证算法永远不会因为找不到"完美"停顿而放弃分段。
+
+    Parameters
+    ----------
+    total_sec : 音频总时长（秒）
+    rms       : _compute_rms_curve() 得到的能量曲线
+    hop_sec   : 能量曲线每个采样点对应的时间步长（秒）
+    target_chunk_sec : 目标分段长度（秒）。实际每段长度落在
+        [target_chunk_sec * 0.5, target_chunk_sec * 1.5] 区间内。
+    rel_threshold, abs_floor, abs_ceiling : 安静阈值 = clip(rel_threshold ×
+        全曲 70 分位能量, abs_floor, abs_ceiling)，含义与
+        _refine_sil_boundaries_by_energy() 中同名参数一致，取值也沿用
+        该函数已验证过的默认值，保持全文件"何为安静"判定标准统一。
+    min_pause_sec : 判定为"真实停顿"所需的最短持续安静时长（秒）。低于
+        此时长的安静区间（通常是辅音闭塞）不会被当作候选切点。
+
+    Returns
+    -------
+    [(start_sec, end_sec), ...]，按时间顺序首尾相接，覆盖整个
+    [0, total_sec] 区间；total_sec <= 0 时返回单个覆盖全部（可能为空）
+    区间的列表。
+    """
+    import numpy as np
+
+    if total_sec <= 0 or target_chunk_sec <= 0:
+        return [(0.0, max(total_sec, 0.0))]
+
+    max_chunk_sec = target_chunk_sec * 1.5
+    min_search_sec = target_chunk_sec * 0.5
+    rms = np.asarray(rms, dtype=np.float64)
+    n_frames = len(rms)
+
+    # 与 _refine_sil_boundaries_by_energy() 同一套自适应阈值公式：用整曲
+    # 70 分位能量代表"正常发声电平"，阈值取其一个比例并钳制到合理的绝对
+    # 区间，避免整段偏响/偏轻的素材导致阈值失真。
+    voiced_level = float(np.percentile(rms, 70)) if n_frames else 0.0
+    silence_threshold = max(abs_floor, min(rel_threshold * voiced_level, abs_ceiling))
+    min_pause_frames = max(1, int(round(min_pause_sec / hop_sec)))
+
+    def _find_silence_split(search_start: float, search_end: float, ideal_t: float) -> Optional[float]:
+        """在 [search_start, search_end] 内找时长 >= min_pause_frames 的
+        连续安静区间，返回离 ideal_t 最近的一段的中点；找不到则返回 None。
+        """
+        start_idx = max(0, min(int(search_start / hop_sec), n_frames - 1))
+        end_idx = max(start_idx + 1, min(int(search_end / hop_sec), n_frames))
+        window = rms[start_idx:end_idx]
+        if window.size == 0:
+            return None
+
+        is_quiet = window < silence_threshold
+        best_center_t: Optional[float] = None
+        best_dist = None
+        run_start = None
+        for i in range(len(is_quiet) + 1):
+            quiet_here = bool(is_quiet[i]) if i < len(is_quiet) else False
+            if quiet_here and run_start is None:
+                run_start = i
+            elif not quiet_here and run_start is not None:
+                run_len = i - run_start
+                if run_len >= min_pause_frames:
+                    center_idx = start_idx + (run_start + i) / 2.0
+                    center_t = center_idx * hop_sec
+                    dist = abs(center_t - ideal_t)
+                    if best_dist is None or dist < best_dist:
+                        best_dist = dist
+                        best_center_t = center_t
+                run_start = None
+        return best_center_t
+
+    boundaries: List[float] = [0.0]
+    cur = 0.0
+    # 安全阀，避免异常数据（如 hop_sec 极小）导致循环次数失控。
+    max_iterations = int(total_sec / max(min_search_sec, 1e-3)) + 4
+    iterations = 0
+
+    while total_sec - cur > max_chunk_sec and iterations < max_iterations:
+        iterations += 1
+        search_start = cur + min_search_sec
+        search_end = min(total_sec, cur + max_chunk_sec)
+        ideal_t = cur + target_chunk_sec
+
+        split_t = None
+        if search_end > search_start and n_frames > 0:
+            split_t = _find_silence_split(search_start, search_end, ideal_t)
+
+        if split_t is None:
+            # 回退：窗口内没有任何满足最短时长的真实安静区（比如整段
+            # 语速很快、几乎不停顿）。退回旧逻辑——直接取窗口内能量最低
+            # 的单帧，保证任何情况下都不会放弃分段。
+            if search_end <= search_start or n_frames == 0:
+                split_t = cur + target_chunk_sec
+            else:
+                start_idx = max(0, min(int(search_start / hop_sec), n_frames - 1))
+                end_idx = max(start_idx + 1, min(int(search_end / hop_sec), n_frames))
+                window = rms[start_idx:end_idx]
+                rel_idx = int(np.argmin(window))
+                split_t = (start_idx + rel_idx) * hop_sec
+
+        # 防御：确保切点严格前进，避免浮点/取整问题导致原地踏步死循环。
+        split_t = max(split_t, cur + min_search_sec * 0.5)
+        split_t = min(split_t, total_sec)
+        boundaries.append(split_t)
+        cur = split_t
+
+    boundaries.append(total_sec)
+
+    # 合并过短的收尾分段（< 目标长度的 25%）到前一段，避免出现几秒钟的
+    # 畸零小段——对齐模型在极短音频上，误差占比会明显被放大。
+    while len(boundaries) >= 3 and (boundaries[-1] - boundaries[-2]) < target_chunk_sec * 0.25:
+        boundaries.pop(-2)
+
+    spans = list(zip(boundaries[:-1], boundaries[1:]))
+    return [(s, e) for s, e in spans if e > s] or [(0.0, total_sec)]
+
+
+# ── 句末标点 / 句内软停顿标点：用于按句切分参考文本 ─────────────────────────
+# 与 WhisperXAligner.align() 里 `_re.split(r'[。！？；\n…!?]+', ...)` 使用
+# 同一套句末标点定义，保持全文件"何为一句话"标准统一；这里用捕获组
+# 保留标点本身（归属前一句），而不是像 WhisperX 那样直接丢弃。
+_SENTENCE_END_RE = _re.compile(r'([。！？；\n…!?]+)')
+# 句内软停顿（逗号/顿号）：只在单个句子本身长到超过硬上限时，才退一步
+# 用它在句子内部再切一刀（仍然是标点位置，不是任意字符位置）。
+_SOFT_PAUSE_RE = _re.compile(r'([，、,]+)')
+
+
+def _split_text_by_delims(text: str, delim_re: "_re.Pattern") -> List[str]:
+    """
+    通用"保留分隔符"切分：delim_re 匹配到的分隔符始终归属于它前面那一段，
+    返回的所有子串按顺序拼接后与原始 text 完全一致（不丢一个字符，含
+    标点和空白）；结尾没有分隔符收尾的剩余文本并入最后一个单元，不会
+    单独产生一个"裸文本"分段。
+
+    text 为空返回 []；没有匹配到任何分隔符返回 [text]。
+    """
+    if not text:
+        return []
+    parts = delim_re.split(text)
+    units: List[str] = []
+    buf = ""
+    for i, p in enumerate(parts):
+        if p is None:
+            continue
+        if i % 2 == 1:
+            buf += p
+            units.append(buf)
+            buf = ""
+        else:
+            buf += p
+    if buf:
+        if units:
+            units[-1] += buf
+        else:
+            units.append(buf)
+    return [u for u in units if u]
+
+
+def _count_spoken_units(text_unit: str, int_lang: str) -> int:
+    """
+    统计一段文本里的"可发音单元"个数，计数标准与 _split_text_by_duration_quota()
+    保持一致：中/粤/日/韩按字符计（连续拉丁字母合并成一个单元），其他
+    语言按空白分隔的词计。用于按字符数比例粗略估算某句话在全曲时间轴上
+    的位置。
+    """
+    if not text_unit:
+        return 0
+    if int_lang in ("zh", "yue", "ja", "ko"):
+        units = _re.findall(r"[A-Za-z']+|.", text_unit, flags=_re.S)
+        return sum(1 for u in units if not _is_cjk_punct(u) and not u.isspace())
+    return sum(1 for u in text_unit.split() if u.strip())
+
+
+def _compute_silence_threshold(
+    rms,
+    rel_threshold: float = 0.06,
+    abs_floor: float = 0.0008,
+    abs_ceiling: float = 0.003,
+) -> float:
+    """
+    与 _plan_audio_chunks() 内部使用的自适应安静阈值公式完全一致（本曲
+    70 分位能量 × rel_threshold，钳制到 [abs_floor, abs_ceiling]），抽出
+    为独立函数供 _plan_sentence_aligned_chunks() 复用，确保全文件"何为
+    安静"判定标准统一，不会出现两套切点用两个不同阈值的情况。
+    """
+    import numpy as np
+
+    rms = np.asarray(rms, dtype=np.float64)
+    n = len(rms)
+    voiced_level = float(np.percentile(rms, 70)) if n else 0.0
+    return max(abs_floor, min(rel_threshold * voiced_level, abs_ceiling))
+
+
+def _find_quiet_run_center(
+    rms,
+    hop_sec: float,
+    search_start: float,
+    search_end: float,
+    ideal_t: float,
+    silence_threshold: float,
+    min_pause_frames: int,
+    prefer_longest: bool = False,
+) -> Optional[float]:
+    """
+    在 [search_start, search_end] 内寻找时长 >= min_pause_frames 的连续
+    安静区间，返回其中一段的中点秒数；找不到满足条件的安静区间则返回 None。
+
+    prefer_longest=False（默认）：返回离 ideal_t 最近的一段——适合窗口
+    较窄、ideal_t 本身已经比较可信的场景。
+    prefer_longest=True：优先返回时长最长的一段（时长相同再比离 ideal_t
+    的远近）——适合窗口较宽、ideal_t 本身可能有较大误差（如歌唱场景，
+    音符时值/旋律拖长会让"按字符数比例估算时间"明显失准）的场景：真正
+    的换气停顿通常比偶发的辅音闭塞/字间空隙明显更长，"最长" 比"离估算
+    位置最近"更能定位到真实停顿。
+
+    从 _plan_audio_chunks() 内部的同名逻辑抽出为独立函数，供
+    _plan_sentence_aligned_chunks() 在句子边界附近微调物理切点时复用。
+    """
+    import numpy as np
+
+    rms = np.asarray(rms, dtype=np.float64)
+    n_frames = len(rms)
+    if n_frames == 0:
+        return None
+
+    start_idx = max(0, min(int(search_start / hop_sec), n_frames - 1))
+    end_idx = max(start_idx + 1, min(int(search_end / hop_sec), n_frames))
+    window = rms[start_idx:end_idx]
+    if window.size == 0:
+        return None
+
+    is_quiet = window < silence_threshold
+    best_center_t: Optional[float] = None
+    best_score: Optional[Tuple[float, float]] = None   # (排序主键, 排序次键)
+    run_start: Optional[int] = None
+    for i in range(len(is_quiet) + 1):
+        quiet_here = bool(is_quiet[i]) if i < len(is_quiet) else False
+        if quiet_here and run_start is None:
+            run_start = i
+        elif not quiet_here and run_start is not None:
+            run_len = i - run_start
+            if run_len >= min_pause_frames:
+                center_idx = start_idx + (run_start + i) / 2.0
+                center_t = center_idx * hop_sec
+                dist = abs(center_t - ideal_t)
+                score = (float(run_len), -dist) if prefer_longest else (-dist, float(run_len))
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_center_t = center_t
+            run_start = None
+    return best_center_t
+
+
+def _find_quietest_point(
+    rms, hop_sec: float, search_start: float, search_end: float,
+) -> Optional[float]:
+    """
+    在 [search_start, search_end] 内直接返回能量最低的单帧对应时间——
+    不要求形成"连续安静区间"，用作找不到任何合格安静区间时的最终兜底，
+    保证任何情况下都能给出一个比"完全不看音频、直接用估算位置"更接近
+    真实停顿的物理切点。
+    """
+    import numpy as np
+
+    rms = np.asarray(rms, dtype=np.float64)
+    n_frames = len(rms)
+    if n_frames == 0:
+        return None
+    start_idx = max(0, min(int(search_start / hop_sec), n_frames - 1))
+    end_idx = max(start_idx + 1, min(int(search_end / hop_sec), n_frames))
+    window = rms[start_idx:end_idx]
+    if window.size == 0:
+        return None
+    rel_idx = int(np.argmin(window))
+    return (start_idx + rel_idx) * hop_sec
+
+
+def _plan_sentence_aligned_chunks(
+    total_sec: float,
+    rms,
+    hop_sec: float,
+    text: str,
+    int_lang: str,
+    target_chunk_sec: float,
+) -> Tuple[List[Tuple[float, float]], List[str]]:
+    """
+    按句子边界规划长音频分段（替代"先切音频、再按比例切文本"的旧方案）。
+
+    步骤：
+      1. 按句末标点（_SENTENCE_END_RE）把参考文本切成完整的句子，标点
+         归属前一句，切分结果拼接后与原文本完全一致。
+      2. 若某个句子自身的估算时长就已经超过硬上限（target_chunk_sec 的
+         1.5 倍），退一步用句内逗号/顿号（_SOFT_PAUSE_RE）再切一刀——
+         仍然是标点位置，不会切在任意字符中间。
+      3. 用各句可发音字符数占比，粗略估算每句结束时刻在全曲时间轴上的
+         位置（假设语速大致均匀；与旧版 _split_text_by_duration_quota()
+         的比例假设一致，只是这里用来定位"句子边界"而不是直接切文本）。
+      4. 按估算时长，把连续的整句分组到 target_chunk_sec 附近，分组永远
+         发生在句子与句子之间，不会拆开某一句。
+      5. 只在组与组的分界点（两个完整句子之间的天然停顿）上，用短时能量
+         曲线在估算位置附近的小窗口内搜索真实安静区间，微调物理切点；
+         找不到明显安静区间时退回估算位置本身。
+
+    退化路径：如果参考文本完全没有可用的句末标点（无法按句切分，比如
+    整段是一句话到底的口水文本），退回旧版 _plan_audio_chunks() +
+    _split_text_by_duration_quota() 的纯能量/比例切分，并打印警告——
+    这种情况下确实没有"句子边界"可以依据，只能接受可能在句中切分。
+
+    Returns
+    -------
+    (spans, chunk_texts)：spans 为 [(start_sec, end_sec), ...]，按时间顺序
+    首尾相接覆盖 [0, total_sec]；chunk_texts 与 spans 等长，每个元素都是
+    原始 text 的一段连续子串（含标点/空白），按顺序拼接后与原始 text
+    完全相同。
+    """
+    sentences = _split_text_by_delims(text, _SENTENCE_END_RE)
+    if len(sentences) <= 1:
+        # 整段没有句末标点（比如通篇到最后才有一个句号，或完全没有），
+        # 句末标点这一级切不出多句——退一步整体按逗号/顿号切分，仍然是
+        # 标点位置，只是粒度更细。只有连逗号都没有时，才真正放弃"按标点
+        # 切分"，回退到纯音频能量分段。
+        soft_sentences = _split_text_by_delims(text, _SOFT_PAUSE_RE)
+        if len(soft_sentences) > 1:
+            logger.info(
+                "[Qwen3-FA] 参考文本未检测到句末标点，退一步按逗号/顿号切分"
+                f"（{len(soft_sentences)} 段）"
+            )
+            sentences = soft_sentences
+        else:
+            logger.warning(
+                "[Qwen3-FA] 参考文本未检测到任何可用的标点（句末/逗号/顿号），"
+                "无法按标点切分，退回纯音频能量分段（分段处可能切在句子中间）"
+            )
+            spans = _plan_audio_chunks(total_sec, rms, hop_sec, target_chunk_sec)
+            chunk_durations = [e - s for s, e in spans]
+            chunk_texts = _split_text_by_duration_quota(text, chunk_durations, int_lang)
+            return spans, chunk_texts
+
+    # 单句本身过长（估算时长超过硬上限）时，先用句内软停顿标点再切一刀，
+    # 避免后续分组时出现"整组被迫超长"的情况。
+    max_chunk_sec = target_chunk_sec * 1.5
+    probe_counts = [_count_spoken_units(s, int_lang) for s in sentences]
+    total_probe = sum(probe_counts) or 1
+    expanded: List[str] = []
+    for s, c in zip(sentences, probe_counts):
+        est_dur = total_sec * c / total_probe
+        if est_dur > max_chunk_sec:
+            sub_units = _split_text_by_delims(s, _SOFT_PAUSE_RE)
+            if len(sub_units) > 1:
+                expanded.extend(sub_units)
+                continue
+        expanded.append(s)
+    sentences = expanded
+
+    counts = [_count_spoken_units(s, int_lang) for s in sentences]
+    total_units = sum(counts) or 1
+    cum = 0
+    est_boundaries: List[float] = []
+    for c in counts:
+        cum += c
+        est_boundaries.append(total_sec * cum / total_units)
+    if est_boundaries:
+        est_boundaries[-1] = total_sec
+
+    # ── 按估算时长，把连续整句分组到目标长度附近 ────────────────────────
+    n = len(sentences)
+    groups: List[Tuple[int, int]] = []   # [(start_idx, end_idx_exclusive), ...]
+    start_idx = 0
+    group_start_t = 0.0
+    for i in range(n):
+        cur_dur = est_boundaries[i] - group_start_t
+        if cur_dur >= target_chunk_sec or i == n - 1:
+            groups.append((start_idx, i + 1))
+            group_start_t = est_boundaries[i]
+            start_idx = i + 1
+
+    # 合并过短的收尾分组（< 目标长度的 25%），阈值与 _plan_audio_chunks()
+    # 的尾段合并逻辑保持一致。
+    while len(groups) >= 2:
+        s0, e0 = groups[-1]
+        prev_end_t = est_boundaries[s0 - 1] if s0 > 0 else 0.0
+        dur_last = est_boundaries[e0 - 1] - prev_end_t
+        if dur_last < target_chunk_sec * 0.25:
+            s_prev, _e_prev = groups[-2]
+            groups[-2] = (s_prev, e0)
+            groups.pop()
+        else:
+            break
+
+    if len(groups) <= 1:
+        return [(0.0, total_sec)], ["".join(sentences)]
+
+    # ── 只在"组与组之间"（两个完整句子之间的天然停顿）微调物理切点 ──────
+    # 三级回退搜索，而不是原来的单一窄窗口 + 离估算位置最近：
+    #
+    #   【背景】实测发现，即使 target/threshold 两个设置项本身已经正确
+    #   生效，长音频（尤其是歌唱/演唱场景，也包括语速拖长、大量拖腔的
+    #   Talkloid 素材）里仍会出现切点落空、导致相邻两段各自吃掉对方半个
+    #   字/音节的错位。
+    #
+    #   【第一次修复的遗留问题】上一版把窗口半径改成了
+    #   max(0.6, min(6.0, neighbor_gap * 0.7))——虽然把绝对上限从 3.0s
+    #   放宽到了 6.0s，但下限只有 0.6s，一旦 neighbor_gap（当前句子与
+    #   相邻句子的估算时长）本身就很小，radius 会直接被压到 0.6s 的
+    #   地板值。用真实歌曲音频实测验证过：两处实际报错的边界
+    #   （132.3s 应为 133.5~134.2s 之间的真实换气段；255.0s 应为
+    #   255.8~256.5s 之间的真实换气段）之所以没找到正确的安静区间，
+    #   都是因为算出来的 radius 刚好卡在 0.6s 上下，宽窗口的边缘只
+    #   差 0.2~1s 就能盖住真正的停顿，结果因为差这一点点全军覆没，
+    #   要么退回估算位置本身，要么误抓了估算位置附近一个明显更短、
+    #   但恰好够着 250ms 门槛的假停顿（辅音间隙）。
+    #
+    #   【这次的修复】把窗口半径的下限从 0.6s 大幅提高到 2.5s（上限
+    #   从 6.0s 提高到 8.0s）——理由：character-count 比例估算在歌唱
+    #   场景下的系统性误差，实测经常达到 1~2 秒量级，0.6s 的地板值
+    #   在数学上就不可能覆盖这个误差范围，无论"最短停顿判定"或
+    #   "优先最长"这些策略层面的改进多么精细都无济于事，必须先保证
+    #   窗口本身够大。2.5s 的地板值以本曲验证过的两个失败案例为下限
+    #   （分别需要约 1.55s / 1.15s 的偏移量）并留出安全余量。
+    #
+    #   同时把原来"宽窗口找不到就切换到一个更窄的窗口"的第二级回退，
+    #   改成"复用同一个宽窗口、只放宽停顿门槛"——窄窗口在这次实测中
+    #   被验证并不能提供任何额外价值：真正有用的从来是"窗口是否够大
+    #   到能覆盖真实停顿"，而不是"要不要缩小窗口"。缩小窗口只会让
+    #   本来就该被第一级宽窗口覆盖到的正确停顿，在第二级里重新变得
+    #   够不着。
+    #
+    #   第一级（严格 + 宽窗口）：最短停顿判定 250ms（明显长于辅音闭塞，
+    #     更接近真实换气/乐句间隔时长），prefer_longest=True——宁可要
+    #     "这个宽窗口里最长的一段安静"，也不要"离一个可能不准的估算
+    #     位置最近的一小段安静"。
+    #   第二级（宽松，复用同一宽窗口）：第一级没有任何一段安静区间
+    #     达到 250ms 时，把门槛放宽到 120ms，改为离 ideal_t 最近优先——
+    #     用于这段真的没有明显长停顿、只有短促字间空隙的场景。
+    #   第三级（兜底）：前两级都没有搜到任何"连续安静区间"时，退而
+    #     求其次，在同一个宽窗口内直接取能量最低的单帧——即使算不上
+    #     一段持续静音，大概率也比"完全不看音频、盲切在估算位置"更
+    #     接近真实停顿。
+    #   只有宽窗口本身退化为空（比如两个估算边界几乎重合的极端情况）时，
+    #     才真正用 ideal_t 兜底。
+    silence_threshold = _compute_silence_threshold(rms)
+    strong_min_pause_frames = max(1, int(round(0.25 / hop_sec)))
+    loose_min_pause_frames = max(1, int(round(0.12 / hop_sec)))
+
+    cut_times: List[float] = [0.0]
+    for gi in range(len(groups) - 1):
+        _, end_idx = groups[gi]
+        boundary_idx = end_idx - 1
+        ideal_t = est_boundaries[boundary_idx]
+
+        prev_t = est_boundaries[boundary_idx - 1] if boundary_idx > 0 else 0.0
+        next_t = (
+            est_boundaries[boundary_idx + 1]
+            if boundary_idx + 1 < len(est_boundaries)
+            else total_sec
+        )
+        neighbor_gap = min(ideal_t - prev_t, next_t - ideal_t)
+
+        # 窗口半径：下限从 0.6s 提高到 2.5s，上限从 6.0s 提高到 8.0s
+        # （详见上方注释里两个实测失败案例的具体数字）。
+        wide_radius = max(2.5, min(8.0, neighbor_gap))
+        wide_start = max(cut_times[-1], ideal_t - wide_radius)
+        wide_end = min(total_sec, ideal_t + wide_radius)
+
+        split_t = None
+        if wide_end > wide_start:
+            split_t = _find_quiet_run_center(
+                rms, hop_sec, wide_start, wide_end, ideal_t,
+                silence_threshold, strong_min_pause_frames,
+                prefer_longest=True,
+            )
+        if split_t is None and wide_end > wide_start:
+            split_t = _find_quiet_run_center(
+                rms, hop_sec, wide_start, wide_end, ideal_t,
+                silence_threshold, loose_min_pause_frames,
+                prefer_longest=False,
+            )
+        if split_t is None and wide_end > wide_start:
+            split_t = _find_quietest_point(rms, hop_sec, wide_start, wide_end)
+        if split_t is None:
+            # 窗口本身退化为空，才真正使用估算位置兜底——句子边界本身
+            # 通常就是天然的换气点。
+            split_t = ideal_t
+
+        split_t = max(split_t, cut_times[-1] + 0.05)
+        split_t = min(split_t, total_sec)
+        cut_times.append(split_t)
+
+    cut_times.append(total_sec)
+    spans = list(zip(cut_times[:-1], cut_times[1:]))
+    chunk_texts = ["".join(sentences[s:e]) for s, e in groups]
+    return spans, chunk_texts
+
+
+def _split_text_by_duration_quota(
+    text: str,
+    chunk_durations: List[float],
+    int_lang: str,
+) -> List[str]:
+    """
+    把完整参考文本（保留原始标点/空白）按各分段时长比例，依次切给对应
+    分段，供长音频分段对齐时每段独立喂给 Qwen3-ForcedAligner。
+
+    做法与 _bind_ref_text_by_asr_count() 一致（最大余数法，把各段配额
+    总和精确钳制为参考文本总的可发音单元数），区别在于这里没有 ASR
+    识别结果可作为更精确的配额来源（Qwen3-FA 是纯强制对齐器，不会先跑
+    一遍 ASR），只能退而求其次按分段时长占比分配——精度不如"按 ASR
+    识别字数分配"，但仍然远好于完全不切分。
+
+    可发音单元定义：
+      - 中/粤/日/韩 → 逐字符（与 Qwen3-FA 输出粒度一致）
+      - 其他语言（如英语）→ 逐个空白分隔的词
+
+    Returns
+    -------
+    与 chunk_durations 等长的字符串列表，各元素首尾已 strip()。
+    调用方拿到的这些子串按顺序拼接（去掉 strip 产生的空白差异后）
+    等价于原始 text，因此后续把所有分段的对齐结果合并后，仍可以用
+    完整的原始 text 一次性调用 _word_entries_to_lab()，字符数校验
+    不会因为分段而失败。
+    """
+    n = len(chunk_durations)
+    if not text:
+        return ["" for _ in range(n)]
+    if n <= 1:
+        return [text]
+
+    is_cjk_char_lang = int_lang in ("zh", "yue", "ja", "ko")
+
+    if is_cjk_char_lang:
+        # 逐字符切分，但把连续的拉丁字母/撇号（歌词中夹杂的英文单词，如
+        # "Vocaloid"）合并成一个整体单元，避免被从中间切开分到两个不同
+        # 分段——那样会导致该单词在两段各自的参考文本里都只剩半个词，
+        # 降低这半个词所在片段的对齐质量（虽然最终仍会被
+        # _merge_latin_letter_chars 之类的下游逻辑正确处理，但源头上能
+        # 避免更好）。
+        units = _re.findall(r"[A-Za-z']+|.", text, flags=_re.S)
+
+        def _is_spoken(u: str) -> bool:
+            return not _is_cjk_punct(u) and not u.isspace()
+    else:
+        # \S+ / \s+ 交替切分：spoken 单元是"词"，空白原样保留、附着在
+        # 前一个词所在的分段（不单独占配额，也不会被丢弃）。
+        units = _re.findall(r"\S+|\s+", text)
+
+        def _is_spoken(u: str) -> bool:
+            return not u.isspace()
+
+    spoken_total = sum(1 for u in units if _is_spoken(u))
+    if spoken_total == 0:
+        result = ["" for _ in range(n)]
+        result[0] = text
+        return result
+
+    total_dur = sum(chunk_durations) or 1.0
+    raw_quota = [spoken_total * (d / total_dur) for d in chunk_durations]
+    int_quota = [int(q) for q in raw_quota]
+    remainder = spoken_total - sum(int_quota)
+    if remainder > 0:
+        order = sorted(
+            range(len(raw_quota)), key=lambda i: raw_quota[i] - int_quota[i], reverse=True
+        )
+        for i in order[:remainder]:
+            int_quota[i] += 1
+
+    # 确保每个分段至少分到 1 个可发音单元（前提是总单元数够分），避免
+    # 出现完全空文本的分段导致该段对齐直接失败。
+    if spoken_total >= n:
+        for i, q in enumerate(int_quota):
+            if q > 0:
+                continue
+            donor = max(range(n), key=lambda k: int_quota[k])
+            if int_quota[donor] <= 1:
+                break
+            int_quota[donor] -= 1
+            int_quota[i] = 1
+
+    cum_quota: List[int] = []
+    acc = 0
+    for q in int_quota:
+        acc += q
+        cum_quota.append(acc)
+
+    chunks_text = ["" for _ in range(n)]
+    spoken_seen = 0
+    idx = 0
+    for u in units:
+        if _is_spoken(u):
+            spoken_seen += 1
+            while idx < len(cum_quota) - 1 and spoken_seen > cum_quota[idx]:
+                idx += 1
+        chunks_text[idx] += u
+
+    return [c.strip() for c in chunks_text]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # 7. Qwen3ForcedAligner
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -2470,21 +3181,28 @@ class Qwen3ForcedAligner(AltAlignerBase):
                     "processing_time": int((time.time() - t0) * 1000),
                 }
 
-            results = self._model.align(
-                audio=audio_path,
-                text=text,
-                language=lang_name,
-            )
+            int_lang = _normalize_lang(language)
+            total_sec = self._get_audio_duration_100ns(audio_path) / 1e7
 
-            # 官方示例里 results[0][0].text / start_time / end_time
-            word_entries = []
-            for item in (results[0] if results else []):
-                tok = (getattr(item, "text", "") or "").strip()
-                if not tok or _is_cjk_punct(tok):
-                    continue
-                word_entries.append(
-                    (float(item.start_time), float(item.end_time), tok)
+            tuning = _get_alignment_tuning()
+            chunk_threshold_sec = float(tuning.get("qwen3_fa_chunk_threshold_sec", 30.0))
+            chunk_target_sec = float(tuning.get("qwen3_fa_chunk_target_sec", 20.0))
+
+            # 【长音频分段处理】详见本文件"6c. Qwen3-ForcedAligner 长音频
+            # 分段处理"一节的说明：音频超过阈值时先切成若干短片段分别对齐，
+            # 避免整段喂给模型导致时间戳随时长推进逐渐漂移/错位。
+            # chunk_target_sec <= 0 视为用户主动关闭该功能，保持旧行为。
+            if chunk_target_sec > 0 and total_sec > max(chunk_threshold_sec, 0.0):
+                logger.info(
+                    f"[Qwen3-FA] 音频时长 {total_sec:.1f}s 超过分段阈值 "
+                    f"{chunk_threshold_sec:.1f}s，启用长音频分段对齐"
+                    f"（目标分段长度 {chunk_target_sec:.1f}s）"
                 )
+                word_entries = self._align_chunked(
+                    audio_path, text, lang_name, int_lang, total_sec, chunk_target_sec,
+                )
+            else:
+                word_entries = self._align_single_chunk(audio_path, text, lang_name)
 
             if not word_entries:
                 return {
@@ -2498,6 +3216,9 @@ class Qwen3ForcedAligner(AltAlignerBase):
             # 判定整体偏早而非速度差异。这里把每个音节起点统一向后推
             # QWEN3_FA_ONSET_DELAY_SEC 秒（时长不变），让视觉/听感上的
             # 音节位置更接近 WhisperX。详见 _apply_qwen3_fa_onset_delay()。
+            # 分段场景下这里在合并后的全局 entries 上统一做一次即可
+            # （而不是每段各做一次）：约束 1（不早于上一段终点）在段与段
+            # 的拼接处同样成立，效果与整段单次对齐时完全一致。
             word_entries = _apply_qwen3_fa_onset_delay(word_entries)
 
             # 同上：Qwen3-ForcedAligner 同样不输出标点的时间戳，停顿只能
@@ -2525,6 +3246,171 @@ class Qwen3ForcedAligner(AltAlignerBase):
                 "error": str(e),
                 "processing_time": int((time.time() - t0) * 1000),
             }
+
+    def _align_single_chunk(
+        self, audio_path: str, text: str, lang_name: str,
+    ) -> List[Tuple[float, float, str]]:
+        """
+        对单个音频片段（可以是完整音频，也可以是分段切出的短片段）调用
+        Qwen3-FA 模型做一次强制对齐，返回该片段自身时间轴（从 0 开始）上
+        的 [(start_sec, end_sec, token), ...]。
+
+        分段场景下，调用方（_align_chunked）负责把这里返回的局部时间戳
+        加上该段在整段音频里的起始偏移，换算成全局时间戳。
+        """
+        results = self._model.align(
+            audio=audio_path,
+            text=text,
+            language=lang_name,
+        )
+
+        # 官方示例里 results[0][0].text / start_time / end_time
+        entries: List[Tuple[float, float, str]] = []
+        for item in (results[0] if results else []):
+            tok = (getattr(item, "text", "") or "").strip()
+            if not tok or _is_cjk_punct(tok):
+                continue
+            entries.append((float(item.start_time), float(item.end_time), tok))
+        return entries
+
+    def _align_chunked(
+        self,
+        audio_path: str,
+        text: str,
+        lang_name: str,
+        int_lang: str,
+        total_sec: float,
+        chunk_target_sec: float,
+    ) -> List[Tuple[float, float, str]]:
+        """
+        长音频分段对齐主流程：
+
+          1. 读取整段音频，计算短时能量曲线。
+          2. 按句子边界规划分段（_plan_sentence_aligned_chunks）：先按
+             标点把参考文本切成完整的句子/句子组，永远不在句子内部
+             下刀；分段之间的物理切点再用短时能量曲线在句子边界附近
+             微调到真实安静区间。参考文本完全没有标点、无法按句切分时，
+             才退回旧版纯能量/比例切分（_plan_audio_chunks +
+             _split_text_by_duration_quota）。
+          3. 逐段物理裁剪音频、写临时 wav，分别调用
+             _align_single_chunk() 做局部对齐。
+          4. 局部时间戳 + 该段起始偏移 = 全局绝对时间戳，按顺序拼接。
+
+        任何一步意外失败（音频读取失败、规划出的分段数 <= 1、某一段对齐
+        异常等）都不会让整个任务失败：分别退化为"整段单次对齐"或"该段
+        时长内均匀分配"，保证一定有可用的对齐结果返回。
+        """
+        import tempfile
+        import shutil
+        import os as _os
+
+        try:
+            import numpy as np
+            import soundfile as sf
+        except ImportError as e:
+            # 【诊断】这个分支被命中时，静音感知分段会被完全跳过，退化为
+            # "整段一次性喂给模型"——在长音频上会表现为一种和真实语句停顿
+            # 完全无关、但周期看起来却相当规律的"伪分割"感（因为模型自身的
+            # 音频编码器内部是按固定窗口分块处理长音频的，不具备静音感知
+            # 能力）。PyInstaller onedir 打包最常见的触发方式：soundfile
+            # 依赖的 libsndfile 动态库 / _soundfile_data 没有被正确收集进
+            # 产物目录，导致打包后的 exe 里 import soundfile 直接失败，而
+            # 开发环境的 venv 因为装的是完整 wheel 所以完全正常、复现不出来。
+            # 用 logger.error + 醒目前缀，方便直接在日志里搜索
+            # "QWEN3_FA_CHUNK_FALLBACK" 定位是否命中过这个分支。
+            logger.error(
+                f"[Qwen3-FA][QWEN3_FA_CHUNK_FALLBACK] 分段所需依赖缺失（{e}），"
+                "本次长音频将不做静音感知分段、整段单次对齐；如果是打包后的 "
+                "exe 里出现的，先检查 soundfile 的原生依赖（libsndfile 动态库 / "
+                "_soundfile_data）是否被正确打进了 PyInstaller 产物目录"
+            )
+            return self._align_single_chunk(audio_path, text, lang_name)
+
+        try:
+            audio, sr = sf.read(audio_path, always_2d=False)
+        except Exception as e:
+            # 同上：这里失败同样会导致静音感知分段被完全跳过。除了
+            # soundfile 原生依赖缺失外，也可能是 mp3 之类需要 libsndfile
+            # 具体 codec 支持的格式在打包后的运行环境里解码失败（常见于
+            # libsndfile 版本/编译选项在打包时被替换或未随 DLL 一起打包）。
+            logger.error(
+                f"[Qwen3-FA][QWEN3_FA_CHUNK_FALLBACK] 分段所需的音频加载失败（{e}），"
+                "本次长音频将不做静音感知分段、整段单次对齐；如果是打包后的 "
+                "exe 里出现的，先检查音频格式（尤其是 mp3）在当前打包环境下 "
+                "是否仍能被 soundfile/libsndfile 正常解码"
+            )
+            return self._align_single_chunk(audio_path, text, lang_name)
+
+        if getattr(audio, "ndim", 1) > 1:
+            audio = audio.mean(axis=1)
+        audio = np.asarray(audio, dtype=np.float32)
+
+        rms, hop_sec = _compute_rms_curve(audio, sr)
+        spans, chunk_texts = _plan_sentence_aligned_chunks(
+            total_sec, rms, hop_sec, text, int_lang, chunk_target_sec,
+        )
+
+        if len(spans) <= 1:
+            logger.info("[Qwen3-FA] 规划结果无需分段，按整段单次对齐处理")
+            return self._align_single_chunk(audio_path, text, lang_name)
+
+        logger.info(
+            f"[Qwen3-FA] 音频切分为 {len(spans)} 段: "
+            + ", ".join(f"[{s:.1f}s–{e:.1f}s]" for s, e in spans)
+        )
+
+        tmp_dir = tempfile.mkdtemp(prefix="qwen3_fa_chunk_")
+        all_entries: List[Tuple[float, float, str]] = []
+        try:
+            for idx, ((start_sec, end_sec), chunk_text) in enumerate(zip(spans, chunk_texts)):
+                chunk_text = (chunk_text or "").strip()
+                seg_dur = end_sec - start_sec
+
+                st_samp = max(0, int(round(start_sec * sr)))
+                en_samp = min(len(audio), int(round(end_sec * sr)))
+                cropped = audio[st_samp:en_samp]
+
+                local_entries: List[Tuple[float, float, str]] = []
+                if not chunk_text:
+                    logger.warning(
+                        f"[Qwen3-FA] 第 {idx + 1}/{len(spans)} 段未分配到参考文本，跳过对齐"
+                    )
+                elif len(cropped) < int(0.05 * sr):
+                    logger.warning(
+                        f"[Qwen3-FA] 第 {idx + 1}/{len(spans)} 段裁剪后过短，跳过对齐"
+                    )
+                else:
+                    chunk_wav = _os.path.join(tmp_dir, f"chunk_{idx:03d}.wav")
+                    try:
+                        sf.write(chunk_wav, cropped, sr)
+                        local_entries = self._align_single_chunk(chunk_wav, chunk_text, lang_name)
+                    except Exception as exc:
+                        logger.error(
+                            f"[Qwen3-FA] 第 {idx + 1}/{len(spans)} 段对齐失败（{exc}），"
+                            "该段退化为按时长均匀分配（精度较低）"
+                        )
+                        local_entries = []
+
+                if not local_entries and chunk_text:
+                    # 降级：该段内按可发音单元均匀分配时长，保证时间轴不断裂。
+                    units = (
+                        list(chunk_text) if int_lang in ("zh", "yue", "ja", "ko")
+                        else chunk_text.split()
+                    )
+                    units = [u for u in units if u.strip() and not _is_cjk_punct(u)]
+                    if units:
+                        dur = seg_dur / len(units)
+                        local_entries = [
+                            (i * dur, (i + 1) * dur, u) for i, u in enumerate(units)
+                        ]
+
+                for s, e, tok in local_entries:
+                    all_entries.append((s + start_sec, e + start_sec, tok))
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        all_entries.sort(key=lambda x: x[0])
+        return all_entries
 
     def _extract_timestamps(
         self,
