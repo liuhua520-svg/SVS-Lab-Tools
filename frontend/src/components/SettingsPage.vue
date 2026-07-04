@@ -154,6 +154,30 @@
           </el-col>
         </el-row>
 
+        <p class="group-label">{{ t('settings.tuningGroupChunking') }}</p>
+        <el-row :gutter="16">
+          <el-col :xs="24" :sm="12">
+            <el-form-item :label="t('settings.qwen3FaChunkThresholdSec')">
+              <el-input-number
+                v-model="form.qwen3_fa_chunk_threshold_sec"
+                :min="0" :max="3600" :step="1" :precision="1"
+                controls-position="right" style="width: 100%; max-width: 240px"
+              />
+              <p class="help-text">{{ t('settings.qwen3FaChunkThresholdSecHint') }}</p>
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :sm="12">
+            <el-form-item :label="t('settings.qwen3FaChunkTargetSec')">
+              <el-input-number
+                v-model="form.qwen3_fa_chunk_target_sec"
+                :min="0" :max="300" :step="1" :precision="1"
+                controls-position="right" style="width: 100%; max-width: 240px"
+              />
+              <p class="help-text">{{ t('settings.qwen3FaChunkTargetSecHint') }}</p>
+            </el-form-item>
+          </el-col>
+        </el-row>
+
         <el-form-item>
           <el-button size="small" @click="resetTuningToDefaults">
             ↺ {{ t('settings.tuningResetButton') }}
@@ -209,6 +233,10 @@ interface AppSettings {
   ctc_max_cjk_particle_sec: number
   ctc_max_en_word_sec: number
   ctc_min_sp_sec: number
+  // Qwen3-ForcedAligner 长音频分段对齐；同样属于"实时生效，无需重启"的
+  // 调优参数组，0 表示禁用分段。
+  qwen3_fa_chunk_threshold_sec: number
+  qwen3_fa_chunk_target_sec: number
 }
 
 type RestartStatus = 'restarted' | 'not_running' | 'failed'
@@ -228,6 +256,8 @@ const TUNING_DEFAULTS = {
   ctc_max_cjk_particle_sec: 0.35,
   ctc_max_en_word_sec: 1.20,
   ctc_min_sp_sec: 0.15,
+  qwen3_fa_chunk_threshold_sec: 30.0,
+  qwen3_fa_chunk_target_sec: 20.0,
 } as const
 
 const form = ref<AppSettings>({
@@ -289,6 +319,8 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     ctc_max_cjk_particle_sec: num('ctc_max_cjk_particle_sec'),
     ctc_max_en_word_sec: num('ctc_max_en_word_sec'),
     ctc_min_sp_sec: num('ctc_min_sp_sec'),
+    qwen3_fa_chunk_threshold_sec: num('qwen3_fa_chunk_threshold_sec'),
+    qwen3_fa_chunk_target_sec: num('qwen3_fa_chunk_target_sec'),
   }
 }
 

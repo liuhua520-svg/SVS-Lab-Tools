@@ -596,7 +596,7 @@
           >
             <el-option value="default" :label="t('processor.dictSourceDefault')" />
             <el-option
-              v-for="d in dictionaries"
+              v-for="d in filteredDictionaries"
               :key="d.name"
               :value="d.name"
               :label="`${d.name} (${d.notation === 'vocaloid' ? t('dictionary.notationVocaloid') : t('dictionary.notationSynthesizerV')}, ${d.count})`"
@@ -604,7 +604,7 @@
           </el-select>
           <div class="dict-source-hint">
             {{ selectDictionaryHint }}
-            <span v-if="!dictionaries.length"> {{ t('processor.dictSourceEmptyHint') }}</span>
+            <span v-if="!filteredDictionaries.length"> {{ t('processor.dictSourceEmptyHint') }}</span>
           </div>
         </el-form-item>
 
@@ -1120,6 +1120,32 @@ const showDictSource = computed(() => {
   const format = formData.value.outputFormat?.toLowerCase() || ''
   const isSupportedFormat = format.includes('sv') || format.includes('vsqx')
   return (processingMode.value === 'full' || processingMode.value === 'project-only') && isSupportedFormat
+})
+
+// 根据当前输出格式过滤"选择词典"下拉列表：
+// - 输出格式为 SVP（Synthesizer V）时，只显示 notation === 'synthesizerv' 的词典，
+//   隐藏 notation === 'vocaloid'（VOCALOID4）的词典；
+// - 输出格式为 VSQX（VOCALOID4）时，只显示 notation === 'vocaloid' 的词典，
+//   隐藏 notation === 'synthesizerv'（Synthesizer V）的词典。
+// "使用软件默认值"选项不受影响，始终可选。
+const filteredDictionaries = computed(() => {
+  const format = formData.value.outputFormat?.toLowerCase() || ''
+  if (format.includes('vsqx')) {
+    return dictionaries.value.filter(d => d.notation === 'vocaloid')
+  }
+  if (format.includes('sv')) {
+    return dictionaries.value.filter(d => d.notation === 'synthesizerv')
+  }
+  return dictionaries.value
+})
+
+// 若用户之前选中的独立词典因输出格式切换而被过滤掉（音素标注体系与新格式
+// 不匹配），自动回退为"使用软件默认值"，避免提交一个已隐藏、不兼容的词典。
+watch(filteredDictionaries, (list) => {
+  if (dictSource.value === 'default') return
+  if (!list.some(d => d.name === dictSource.value)) {
+    dictSource.value = 'default'
+  }
 })
 
 // "选择词典"的提示文本：强调词典可将任意语言映射为音素，且优先级高于

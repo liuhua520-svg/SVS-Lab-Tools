@@ -369,6 +369,11 @@ const messages = {
       ctcMaxEnWordSecHint: '较宽松的上限，仅用于捕获极端拉伸的英文单词。默认 1.20 秒。',
       ctcMinSpSec: '最小可插入静音时长（秒）',
       ctcMinSpSecHint: '截断后剩余的时长若低于该值，则不值得单独插入一条静音标记。默认 0.15 秒。',
+      tuningGroupChunking: 'Qwen3-ForcedAligner 长音频分段对齐',
+      qwen3FaChunkThresholdSec: '分段触发阈值（秒）',
+      qwen3FaChunkThresholdSecHint: '音频总时长超过该值时自动切分成多段分别对齐，避免长音频时间戳随时长推进逐渐漂移。设为 0 表示禁用分段（整段单次对齐，等同于改造前行为）。默认 30 秒。',
+      qwen3FaChunkTargetSec: '每段目标时长（秒）',
+      qwen3FaChunkTargetSecHint: '每段的目标长度，实际切点会在该值的 0.5～1.5 倍区间内自动吸附到音频能量最低（最可能是真实停顿）的位置，不会严格等于该数值。默认 20 秒。',
     },
     dialogue: {
       pageTitle: '对话文本框批量处理',
@@ -785,6 +790,11 @@ const messages = {
       ctcMaxEnWordSecHint: '較寬鬆的上限，僅用於捕捉極端拉伸的英文單字。預設 1.20 秒。',
       ctcMinSpSec: '最小可插入靜音時長（秒）',
       ctcMinSpSecHint: '截斷後剩餘的時長若低於該值，則不值得單獨插入一條靜音標記。預設 0.15 秒。',
+      tuningGroupChunking: 'Qwen3-ForcedAligner 長音訊分段對齊',
+      qwen3FaChunkThresholdSec: '分段觸發閾值（秒）',
+      qwen3FaChunkThresholdSecHint: '音訊總時長超過該值時自動切分成多段分別對齊，避免長音訊時間戳隨時長推進逐漸漂移。設為 0 表示停用分段（整段單次對齊，等同於改造前行為）。預設 30 秒。',
+      qwen3FaChunkTargetSec: '每段目標時長（秒）',
+      qwen3FaChunkTargetSecHint: '每段的目標長度，實際切點會在該值的 0.5～1.5 倍區間內自動吸附到音訊能量最低（最可能是真實停頓）的位置，不會嚴格等於該數值。預設 20 秒。',
     },
     dialogue: {
       pageTitle: '對話文字框批次處理',
@@ -1202,7 +1212,12 @@ const messages = {
 	    ctcMaxEnWordSec: 'Max English Word Duration (sec)',
 	    ctcMaxEnWordSecHint: 'A looser cap, intended only to catch extreme stretching of English words. Default 1.20s.',
 	    ctcMinSpSec: 'Min Insertable Silence Duration (sec)',
-	    ctcMinSpSecHint: 'If the leftover duration after truncation falls below this value, it is not worth inserting a separate silence marker. Default 0.15s.'
+	    ctcMinSpSecHint: 'If the leftover duration after truncation falls below this value, it is not worth inserting a separate silence marker. Default 0.15s.',
+	    tuningGroupChunking: 'Qwen3-ForcedAligner Long-Audio Chunked Alignment',
+	    qwen3FaChunkThresholdSec: 'Chunking Threshold (sec)',
+	    qwen3FaChunkThresholdSecHint: 'When total audio duration exceeds this value, it is automatically split into multiple chunks aligned separately, preventing timestamps from drifting as long audio progresses. Set to 0 to disable chunking entirely (single-pass alignment, matching pre-chunking behavior). Default 30s.',
+	    qwen3FaChunkTargetSec: 'Target Chunk Duration (sec)',
+	    qwen3FaChunkTargetSecHint: 'Target length per chunk. Actual cut points are automatically snapped, within 0.5x-1.5x of this value, to the point of lowest audio energy (most likely a real pause), so they will not exactly match this number. Default 20s.'
 	  },
 	  dialogue: {
 		pageTitle: 'Dialogue Batch Processing',
@@ -1620,7 +1635,12 @@ const messages = {
 	  ctcMaxEnWordSec: '英単語の最大時間（秒）',
 	  ctcMaxEnWordSecHint: '緩めの上限値で、極端に引き伸ばされた英単語のみを捉えるためのものです。デフォルト 1.20 秒。',
 	  ctcMinSpSec: '挿入可能な最小無音時間（秒）',
-	  ctcMinSpSecHint: '切り詰め後の残り時間がこの値を下回る場合、無音マーカーを個別に挿入する価値はないと判断します。デフォルト 0.15 秒。'
+	  ctcMinSpSecHint: '切り詰め後の残り時間がこの値を下回る場合、無音マーカーを個別に挿入する価値はないと判断します。デフォルト 0.15 秒。',
+	  tuningGroupChunking: 'Qwen3-ForcedAligner 長時間音声の分割アライメント',
+	  qwen3FaChunkThresholdSec: '分割トリガー閾値（秒）',
+	  qwen3FaChunkThresholdSecHint: '音声の総時間がこの値を超えると自動的に複数のチャンクに分割してそれぞれアライメントし、長時間音声で時間の経過とともにタイムスタンプがずれていくのを防ぎます。0 に設定すると分割を無効化します（改修前と同じ、一括アライメント）。デフォルト 30 秒。',
+	  qwen3FaChunkTargetSec: '各チャンクの目標時間（秒）',
+	  qwen3FaChunkTargetSecHint: '各チャンクの目標長。実際の分割点はこの値の 0.5〜1.5 倍の範囲内で、音声エネルギーが最も低い（実際の間である可能性が高い）位置に自動的に吸着されるため、厳密にこの数値と一致するわけではありません。デフォルト 20 秒。'
 	},
     dialogue: {
       pageTitle: '対話テキストボックス一括処理',
@@ -2038,7 +2058,12 @@ const messages = {
 	  ctcMaxEnWordSec: '영어 단어 최대 길이 (초)',
 	  ctcMaxEnWordSecHint: '느슨한 상한값으로, 극단적으로 늘어난 영어 단어만 포착하기 위한 것입니다. 기본값 1.20초.',
 	  ctcMinSpSec: '삽입 가능한 최소 무음 길이 (초)',
-	  ctcMinSpSecHint: '잘라낸 후 남은 길이가 이 값보다 짧으면 별도의 무음 마커를 삽입할 가치가 없다고 판단합니다. 기본값 0.15초.'
+	  ctcMinSpSecHint: '잘라낸 후 남은 길이가 이 값보다 짧으면 별도의 무음 마커를 삽입할 가치가 없다고 판단합니다. 기본값 0.15초.',
+	  tuningGroupChunking: 'Qwen3-ForcedAligner 긴 오디오 분할 정렬',
+	  qwen3FaChunkThresholdSec: '분할 트리거 임계값(초)',
+	  qwen3FaChunkThresholdSecHint: '오디오 총 길이가 이 값을 초과하면 자동으로 여러 구간으로 분할하여 각각 정렬함으로써, 긴 오디오에서 시간이 지날수록 타임스탬프가 어긋나는 현상을 방지합니다. 0으로 설정하면 분할을 비활성화합니다(개선 전과 동일하게 전체를 한 번에 정렬). 기본값 30초.',
+	  qwen3FaChunkTargetSec: '구간별 목표 길이(초)',
+	  qwen3FaChunkTargetSecHint: '각 구간의 목표 길이입니다. 실제 분할 지점은 이 값의 0.5~1.5배 범위 내에서 오디오 에너지가 가장 낮은(실제 정지 구간일 가능성이 높은) 위치로 자동 흡착되므로, 이 값과 정확히 일치하지는 않습니다. 기본값 20초.'
 	},
     dialogue: {
       pageTitle: '대화 텍스트 박스 일괄 처리',
