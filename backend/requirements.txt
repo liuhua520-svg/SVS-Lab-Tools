@@ -1,0 +1,74 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# ====================== 核心依赖 & 严格版本锁定 ======================
+numpy==1.26.4               # 【关键修复】强制锁定 1.x，解决 NumPy 2.x 导致的 C-API 崩溃
+setuptools<82.0.0           # 解决 ctranslate2 / whisperx 对 pkg_resources 的依赖报错
+
+# NeMo Forced Aligner 后端 (nemo_server.py，由 alt_aligners.py 的
+# NeMoForcedAligner 通过 HTTP 调用，端口 127.0.0.1:5002)
+# 与上面的 qwen-asr 一样：这一行描述的是 nemo_server.py 自己独立环境
+# (nemo_env) 的依赖，不要装进运行 app.py 的那个环境，否则会触发依赖冲突
+# （NeMo 对 packaging/fsspec/omegaconf/hydra-core/lightning 等核心依赖
+# 有严格版本限制，会把 .mfa_env 里这些包"降级"，与其它工具产生冲突，
+# 例如 pip 会报 "pipdeptree requires packaging>=26, but you have 24.2"）。
+# 详见 NEMO_ALIGNER_INTEGRATION.md。
+# 需要 torchaudio>=2.1（forced_align / merge_tokens 接口）。
+# 截至本文件更新时 PyPI 最新稳定版为 2.7.x（NeMo 仓库正在拆分为聚焦语音的
+# NVIDIA-NeMo/Speech 独立仓库，2.8.x 暂为预发布版，故不锁定到该版本）。
+# nemo_toolkit[asr]>=2.7.0,<2.8.0
+
+
+# ====================== PyTorch (根据硬件三选一) ======================
+
+# CUDA 12.1（用于 RTX 30/40 系等现代显卡）
+# torch==2.3.1+cu121
+# torchaudio==2.3.1+cu121
+
+# CUDA 11.8 (旧版显卡保留选项)
+# torch==2.3.1+cu118
+# torchaudio==2.3.1+cu118
+
+# CPU Only（无显卡）
+torch==2.3.1+cpu
+torchaudio==2.3.1+cpu
+
+# ====================== 核心框架 & 网络 ======================
+flask==2.3.3
+flask-cors==4.0.0
+
+# ====================== 网络与其他基础库 ======================
+requests
+tqdm
+
+# ====================== 语音处理基础 ======================
+soundfile==0.12.1
+librosa>=0.10.0
+resampy>=0.4.2
+pyworld>=0.3.4
+torchcrepe==0.0.24
+kalpy
+
+# ====================== MFA 与文本处理 ======================
+montreal-forced-aligner==3.3.9
+textgrid==1.5
+pypinyin==0.53.0
+pycantonese>=0.1.0
+sudachipy==0.6.8
+sudachidict-core==20240409
+jamo==0.4.1
+nltk>=3.8.1
+num2words>=0.5.13
+g2p_en>=0.3.1
+
+# ====================== 替代对齐后端 ======================
+whisperx>=3.2.0
+ctranslate2>=4.3.0
+funasr>=1.1.0
+modelscope>=1.9.0
+accelerate>=0.27.0
+qwen-asr>=1.0.0
+k2
+
+# ====================== 工程文件导出 ======================
+ruamel.yaml>=0.18.0
+mido>=1.3.0
