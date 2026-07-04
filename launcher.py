@@ -31,8 +31,26 @@ backend/nemo_server.py（nemo_env）三个跑在各自独立 Python 环境里的
        └─ nemo_env/
 
 打包命令（见同目录 build_launcher.bat）：
-    pip install pyinstaller pystray pillow psutil
-    pyinstaller --name "Tsubaki启动器" --onedir --noconsole --clean launcher.py
+    pip install pyinstaller pystray pillow psutil pywebview pythonnet
+    pyinstaller --name "Tsubaki启动器" --onedir --noconsole --clean ^
+        --hidden-import=clr_loader --hidden-import=pythonnet launcher.py
+
+关于原生应用窗口（不再打开系统浏览器）
+──────────────────────────────────────
+本脚本用 pywebview 起一个原生窗口加载 http://127.0.0.1:5000，取代了旧版
+webbrowser.open() 在系统默认浏览器里开标签页的做法。相应地：
+
+  - app.py 自己 main() 里原本也会 Thread 一个 open_browser() 自动开浏览器
+    （方便单独用 `python app.py` 调试）。launcher.py 通过给 app.py 子进程
+    注入环境变量 SVS_SKIP_AUTO_BROWSER=1 来关掉这个自动打开——否则每次
+    启动会同时弹出"原生窗口 + 浏览器标签页"两个界面。单独调试 app.py 时
+    不设这个环境变量，行为不受影响。
+  - 点窗口右上角关闭按钮（X）就是彻底退出整个程序：会清理三个后端子进程
+    （连同设置页触发 /restart 后产生的孤儿进程）并停掉托盘图标，效果和
+    点托盘菜单"退出所有服务"完全一样——两个入口共用同一份清理逻辑，
+    互相触发也不会重复执行或报错。
+  - webview.start() 必须跑在主线程（部分平台强制要求，Windows 上也建议
+    如此），所以主线程留给它，pystray 的 icon.run() 挪到后台线程里跑。
 
 关于控制台显示/隐藏
 ────────────────────
@@ -64,11 +82,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
 import time
-import webbrowser
+import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -79,6 +98,7 @@ except ImportError:
 
 from PIL import Image, ImageDraw
 import pystray
+import webview
 
 # ────────────────────────────────────────────────────────────────
 # 路径解析
@@ -167,12 +187,19 @@ def _spawn(service: Dict[str, str]) -> Optional[subprocess.Popen]:
         return None
 
     logger.info("启动 %s: %s %s", service["name"], py, script.name)
+    env = os.environ.copy()
+    if service["name"] == "app":
+        # app.py 自己 main() 里会自动 webbrowser.open() 一次；由 launcher 起时
+        # 界面已经交给 pywebview 原生窗口负责，这里关掉它，避免多弹出一个
+        # 浏览器标签页。不影响单独 `python app.py` 调试时的默认行为。
+        env["SVS_SKIP_AUTO_BROWSER"] = "1"
     try:
         return subprocess.Popen(
             [str(py), str(script)],
             cwd=str(BACKEND_DIR),
             creationflags=CREATE_NEW_CONSOLE,
             close_fds=True,
+            env=env,
         )
     except Exception as e:
         logger.error("启动 %s 失败: %s", service["name"], e)
@@ -213,11 +240,66 @@ def start_all() -> None:
             _procs.append(proc)
 
 
-def _open_browser_delayed() -> None:
-    # 三个服务里 app.py 起 Flask 通常很快，但如果磁盘/CPU 繁忙可能要几秒，
-    # 这里给点余量；具体是否加载完模型不影响打开页面，页面本身会自己轮询状态。
-    time.sleep(3)
-    webbrowser.open(f"http://{HOST}:{MAIN_PORT}")
+def _wait_for_backend_ready(timeout: float = 30.0) -> bool:
+    """
+    轮询 app.py 的 /api/health，等主服务真正能响应 HTTP 请求了再去创建
+    原生窗口——避免窗口一开出来就是"连接被拒绝"的空白/报错页面。
+
+    超时后仍然返回 False 而不是抛异常：就算 30 秒内没等到（比如机器很慢），
+    也继续把窗口开出来，前端页面本身会自己重试请求，不阻塞用户看到界面。
+    """
+    url = f"http://{HOST}:{MAIN_PORT}/api/health"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1.5) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception:
+            pass
+        time.sleep(0.3)
+    return False
+
+
+# 原生窗口对象 / 托盘图标对象，供各回调函数引用。
+# 都在 main() 里创建后赋值，此后只读，不重新创建。
+_main_window: Optional["webview.Window"] = None
+_tray_icon: Optional["pystray.Icon"] = None
+
+_shutdown_started = False
+_shutdown_lock = threading.Lock()
+
+
+def _shutdown() -> None:
+    """
+    统一的退出清理逻辑：杀掉三个后端子进程 + 停掉托盘图标。
+
+    两个入口都会调用它——窗口被关闭（events.closed）和托盘"退出所有
+    服务"菜单——所以用一个标志位加锁保证只真正执行一次：quit_all() 里
+    destroy() 窗口会连带触发 events.closed 再调一次 _shutdown()，此时
+    应该直接跳过，否则会重复 terminate 已经不存在的进程（虽然无害，但
+    没必要）、以及对已经 stop() 过的托盘图标再 stop() 一次。
+    """
+    global _shutdown_started
+    with _shutdown_lock:
+        if _shutdown_started:
+            return
+        _shutdown_started = True
+
+    logger.info("正在退出所有服务...")
+    _kill_tracked()
+    time.sleep(0.5)
+    _kill_by_cmdline()
+    if _tray_icon is not None:
+        try:
+            _tray_icon.stop()
+        except Exception as e:
+            logger.warning("停止托盘图标失败: %s", e)
+
+
+def _on_window_closed() -> None:
+    """窗口被关闭（点 X）之后触发：彻底退出整个程序。"""
+    _shutdown()
 
 
 # ────────────────────────────────────────────────────────────────
@@ -257,15 +339,26 @@ def _kill_by_cmdline() -> None:
 
 
 def quit_all(icon: "pystray.Icon", _item=None) -> None:
-    logger.info("正在退出所有服务...")
-    _kill_tracked()
-    time.sleep(0.5)
-    _kill_by_cmdline()
-    icon.stop()
+    _shutdown()
+    # 销毁窗口会让阻塞在主线程里的 webview.start() 返回，main() 才能走完，
+    # 整个 launcher 进程随之退出；不销毁的话，托盘线程停了但主线程还卡在
+    # webview 的 GUI 循环里，进程不会真正退出。这一步会连带触发窗口的
+    # events.closed（进而再调一次 _shutdown()），已经用标志位挡掉了。
+    if _main_window is not None:
+        try:
+            _main_window.destroy()
+        except Exception as e:
+            logger.warning("销毁窗口失败: %s", e)
 
 
 def open_ui_action(icon, item) -> None:
-    webbrowser.open(f"http://{HOST}:{MAIN_PORT}")
+    if _main_window is None:
+        return
+    try:
+        _main_window.show()
+        _main_window.restore()
+    except Exception as e:
+        logger.warning("恢复窗口显示失败: %s", e)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -280,18 +373,39 @@ def _make_icon_image() -> Image.Image:
 
 
 def run_tray() -> None:
+    global _tray_icon
     menu = pystray.Menu(
         pystray.MenuItem("打开界面", open_ui_action, default=True),
         pystray.MenuItem("退出所有服务", quit_all),
     )
     icon = pystray.Icon("tsubaki_launcher", _make_icon_image(), "Tsubaki 对齐工具", menu)
+    _tray_icon = icon
     icon.run()
 
 
 def main() -> None:
+    global _main_window
+
     start_all()
-    threading.Thread(target=_open_browser_delayed, daemon=True).start()
-    run_tray()  # 阻塞，直到用户点“退出所有服务”
+
+    if not _wait_for_backend_ready(timeout=30.0):
+        logger.warning("等待 app.py 就绪超时（30s），仍然打开窗口，页面会自行重试连接。")
+
+    _main_window = webview.create_window(
+        title="Tsubaki 对齐工具",
+        url=f"http://{HOST}:{MAIN_PORT}",
+        width=1280,
+        height=800,
+        min_size=(1000, 650),
+    )
+    _main_window.events.closed += _on_window_closed
+
+    # pystray 的 icon.run() 和 webview.start() 都是阻塞调用；webview 要求
+    # 跑在主线程，所以托盘挪到后台线程执行。
+    threading.Thread(target=run_tray, daemon=True).start()
+
+    webview.start()  # 阻塞主线程，直到窗口被 quit_all() 里的 destroy() 关掉
+    logger.info("主窗口已关闭，launcher 进程退出。")
 
 
 if __name__ == "__main__":
