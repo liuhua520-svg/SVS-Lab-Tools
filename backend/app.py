@@ -1864,9 +1864,14 @@ def main(host: str = "127.0.0.1", port: int = 5000):
     print(f"⏹️  按 Ctrl+C 停止服务")
     print(f"{'=' * 60}\n")
     
-    # 【可注释】 Thread(target=open_browser, args=(host, port), daemon=True).start()
-    # 将不再自动打开浏览器
-    Thread(target=open_browser, args=(host, port), daemon=True).start()
+    # 由 launcher.py 拉起时会注入 SVS_SKIP_AUTO_BROWSER=1：界面已经交给
+    # launcher 里的 pywebview 原生窗口负责显示，这里就不再自己弹一个系统
+    # 浏览器标签页了，否则每次启动会同时看到"原生窗口 + 浏览器标签页"。
+    # 单独用 `python app.py` 调试（不经过 launcher）时不受影响，仍会自动开浏览器。
+    if os.environ.get("SVS_SKIP_AUTO_BROWSER") != "1":
+        Thread(target=open_browser, args=(host, port), daemon=True).start()
+    else:
+        logger.info("检测到由 launcher 启动（SVS_SKIP_AUTO_BROWSER=1），跳过自动打开系统浏览器。")
     app.run(host=host, port=port, debug=False, threaded=True, use_reloader=False)
 
 
