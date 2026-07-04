@@ -83,11 +83,11 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     # Qwen3ForcedAligner._align_chunked() 的说明）。
     # 音频总时长超过该阈值（秒）时，自动切分成多段分别对齐，避免长音频
     # 一次性喂给模型导致时间戳随时长推进逐渐漂移/错位。
-    "qwen3_fa_chunk_threshold_sec": 30.0,
+    "qwen3_fa_chunk_threshold_sec": 120.0,
     # 每段的目标长度（秒）。实际切点会在 [目标长度×0.5, 目标长度×1.5]
     # 区间内自动吸附到音频能量最低（最可能是真实停顿）的位置，不会严格
     # 等于这个数值。
-    "qwen3_fa_chunk_target_sec": 20.0,
+    "qwen3_fa_chunk_target_sec": 100.0,
 }
 
 # 对齐调优参数的合法取值范围（秒），用于 save_settings() 里的边界钳制。

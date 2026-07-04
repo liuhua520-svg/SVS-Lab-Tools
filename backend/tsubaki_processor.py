@@ -891,10 +891,7 @@ class TsubakiProcessor:
             note = self._default_svp_note(seg.label, tone, onset, dur)
 
             # ── 音素写入 phonemes 字段：词典命中 与 word_phoneme_map 开关解耦 ──
-            # 条件：label 是英语单词（非静音/非辅音占位符）+ 语言守卫：优先用
-            # native_english_words（从原始文本预提取）判断；若未提供则回退到
-            # 词典查询。防止中文拼音 rang/wang/dong 等被 g2p_en 误当英语词
-            # 转换成 ARPABET。
+            # 条件：label 是 ASCII 形态（非静音/非 CJK 占位符）。
             #
             # 【解耦说明】选择了自定义词典（dict_source != "default"）时，只要
             # 词典命中该词，就应写入音素——不要求用户额外打开
@@ -902,11 +899,22 @@ class TsubakiProcessor:
             # 未命中时，是否兜底走软件默认 G2P（word_to_arpabet）转换全部英语
             # 单词"。因此这里的入口条件是"开关已开启 或 已选择自定义词典"，
             # 而不是像旧版那样把整段逻辑（含词典查询）都锁在开关之后。
+            #
+            # 【重要】词典查询本身不受 _label_is_english_word 语言守卫限制：
+            # 该守卫（native_english_words / is_in_english_dict）判断的是
+            # "这是否是一个真实的英语单词"，用于防止中文拼音 rang/wang/dong
+            # 等被 g2p_en 误当英语词转换成 ARPABET——但自定义词典的条目不
+            # 局限于真实英语单词（dictionary_manager.py 明确支持任意语言的
+            # 字词，甚至可以是 ARPABET/VOCALOID 音素符号本身，例如跨语种
+            # 英语在 MFA 里回退到音素级对齐时，seg.label 可能直接是
+            # "ah"/"ch" 这样的音素符号而非完整拼写单词）。若仍然对词典查询
+            # 套用这层语言守卫，会导致词典里明明存在的音素因为 label 不是
+            # "真实英语单词"而被判定为未命中，音素因此没有被写入。因此语言
+            # 守卫只应用于 G2P 兜底（word_to_arpabet），不应用于词典查询。
             _dict_selected = bool(dict_source) and dict_source != "default"
             if (
                 (word_phoneme_map or _dict_selected)
                 and self._is_ascii_word_label(seg.label)
-                and self._label_is_english_word(seg.label, language, native_english_words)
             ):
                 try:
                     resolved_phones: Optional[List[str]] = None
@@ -931,7 +939,15 @@ class TsubakiProcessor:
                                     seg.label, user_phones_str,
                                 )
 
-                    if resolved_phones is None and word_phoneme_map:
+                    # G2P 兜底（word_to_arpabet）：仅在词典未命中、且用户开启了
+                    # word_phoneme_map 开关时才走，并且必须通过语言守卫
+                    # （_label_is_english_word），防止拼音误判——这是唯一
+                    # 需要该守卫的地方。
+                    if (
+                        resolved_phones is None
+                        and word_phoneme_map
+                        and self._label_is_english_word(seg.label, language, native_english_words)
+                    ):
                         from phoneme_converter import word_to_arpabet
                         resolved_phones = word_to_arpabet(seg.label)
 
@@ -2203,20 +2219,25 @@ class TsubakiProcessor:
             # ── 音素写入 <p> 字段：词典命中 与 word_phoneme_map 开关解耦 ─────
             # <p></p>                    → VOCALOID 自带 G2P（默认）
             # <p lock="1"><![CDATA[…]]></p>  → 手工音素 + 锁定（phoneme lock）
-            # 语言守卫：优先用 native_english_words（从原始文本预提取的集合）
-            # 判断，彻底消除"拼音碰巧是英语词"的误判（rang/wang/dong/shi 等）。
-            # 若未提供集合则回退词典查询（兼容旧调用路径）。
             #
             # 【解耦说明】与 SVP 分支同理：只要选择了自定义词典
             # （dict_source != "default"）且命中该词，就应写入 <p lock="1">，
             # 不要求用户额外打开 word_phoneme_map 开关；该开关只控制"词典
             # 未命中时，是否兜底走软件默认 G2P（word_to_arpabet →
             # arpabet_to_vocaloid4）转换全部英语单词"。
+            #
+            # 【重要】词典查询本身不受 _label_is_english_word 语言守卫限制，
+            # 理由与 SVP 分支相同：词典条目不局限于真实英语单词，也可以是
+            # ARPABET/VOCALOID 音素符号本身（跨语种英语在 MFA 里回退到音素级
+            # 对齐时，label 可能直接是 "ah"/"ch" 这样的音素符号）。语言守卫
+            # （native_english_words / is_in_english_dict，用于防止拼音
+            # rang/wang/dong 等误判为英语词）只应用于 G2P 兜底
+            # （word_to_arpabet），不应用于词典查询，否则词典里明明存在的
+            # 音素会因 label 未通过"真实英语单词"判定而被跳过、不被写入。
             p_tag = '<p></p>'
             if (
                 (word_phoneme_map or _dict_selected)
                 and self._is_ascii_word_label(label)
-                and self._label_is_english_word(label, language, native_english_words)
             ):
                 try:
                     v4_phones: Optional[str] = None
@@ -2248,7 +2269,16 @@ class TsubakiProcessor:
                                         notation, label, v4_phones,
                                     )
 
-                    if v4_phones is None and word_phoneme_map and _word_to_arpabet is not None:
+                    # G2P 兜底（word_to_arpabet → arpabet_to_vocaloid4）：仅在
+                    # 词典未命中、且用户开启了 word_phoneme_map 开关时才走，
+                    # 并且必须通过语言守卫（_label_is_english_word），防止
+                    # 拼音误判——这是唯一需要该守卫的地方。
+                    if (
+                        v4_phones is None
+                        and word_phoneme_map
+                        and _word_to_arpabet is not None
+                        and self._label_is_english_word(label, language, native_english_words)
+                    ):
                         arpabet_phones = _word_to_arpabet(label)
                         if arpabet_phones and _arpabet_to_vocaloid4 is not None:
                             v4_phones = _arpabet_to_vocaloid4(arpabet_phones)

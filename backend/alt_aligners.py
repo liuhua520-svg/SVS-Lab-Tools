@@ -487,8 +487,8 @@ def _get_alignment_tuning() -> Dict[str, float]:
         # 值保存后，_align_chunked 调用方 (Qwen3ForcedAligner.align()) 读到
         # 的 tuning.get(...) 永远只会命中调用处自己写的字面量默认值
         # （30.0 / 20.0），保存设置完全不生效，且没有任何报错或警告。
-        "qwen3_fa_chunk_threshold_sec": 30.0,
-        "qwen3_fa_chunk_target_sec": 20.0,
+        "qwen3_fa_chunk_threshold_sec": 120.0,
+        "qwen3_fa_chunk_target_sec": 100.0,
     }
     try:
         import app_settings
@@ -3185,8 +3185,8 @@ class Qwen3ForcedAligner(AltAlignerBase):
             total_sec = self._get_audio_duration_100ns(audio_path) / 1e7
 
             tuning = _get_alignment_tuning()
-            chunk_threshold_sec = float(tuning.get("qwen3_fa_chunk_threshold_sec", 30.0))
-            chunk_target_sec = float(tuning.get("qwen3_fa_chunk_target_sec", 20.0))
+            chunk_threshold_sec = float(tuning.get("qwen3_fa_chunk_threshold_sec", 120.0))
+            chunk_target_sec = float(tuning.get("qwen3_fa_chunk_target_sec", 100.0))
 
             # 【长音频分段处理】详见本文件"6c. Qwen3-ForcedAligner 长音频
             # 分段处理"一节的说明：音频超过阈值时先切成若干短片段分别对齐，
