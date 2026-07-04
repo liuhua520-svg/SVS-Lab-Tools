@@ -260,7 +260,7 @@
             <el-row v-if="advanced.f0_smooth" :gutter="20">
               <el-col :xs="24" :sm="12">
                 <el-form-item :label="t('processor.smoothWindow')">
-                  <el-input-number v-model="advanced.f0_smooth_window" :min="1" :max="99" :step="2" controls-position="right" :disabled="processing || !advanced.export_pitch_line" />
+                  <el-input-number v-model="advanced.f0_smooth_window" :min="1" :max="29" :step="2" controls-position="right" :disabled="processing || !advanced.export_pitch_line" />
                   <span class="help-text">{{ t('processor.smoothWindowTip') }}</span>
                 </el-form-item>
               </el-col>
@@ -269,7 +269,7 @@
             <el-row v-if="outputFormat === 'vsqx' && advanced.f0_smooth" :gutter="20">
               <el-col :xs="24" :sm="12">
                 <el-form-item :label="t('processor.vsqxPitchSmoothWindow')">
-                  <el-input-number v-model="advanced.vsqx_pitch_smooth_window" :min="1" :max="99" :step="2" controls-position="right" :disabled="processing || !advanced.export_pitch_line" />
+                  <el-input-number v-model="advanced.vsqx_pitch_smooth_window" :min="1" :max="29" :step="2" controls-position="right" :disabled="processing || !advanced.export_pitch_line" />
                   <span class="help-text">{{ t('processor.vsqxPitchSmoothWindowTip') }}</span>
                 </el-form-item>
               </el-col>

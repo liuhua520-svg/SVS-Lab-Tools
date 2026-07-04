@@ -500,7 +500,7 @@
                   <el-input-number
                     v-model="advancedConfig.f0_smooth_window"
                     :min="1"
-                    :max="99"
+                    :max="29"
                     :step="2"
                     controls-position="right"
                     :disabled="!advancedConfig.export_pitch_line"
@@ -514,7 +514,7 @@
                   <el-input-number
                     v-model="advancedConfig.vsqx_pitch_smooth_window"
                     :min="1"
-                    :max="99"
+                    :max="29"
                     :step="2"
                     controls-position="right"
                     :disabled="!advancedConfig.export_pitch_line"
@@ -1421,7 +1421,7 @@ const refreshStatus = async () => {
 }
 
 const openGitHub = () => {
-  window.open('https://github.com/liuhua520-svg/SVS-Lab-Aligner', '_blank')
+  window.open('https://github.com/liuhua520-svg/SVS-Lab-Tools', '_blank')
 }
 
 const handleExceed = () => {

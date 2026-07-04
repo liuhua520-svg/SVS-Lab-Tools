@@ -170,7 +170,7 @@
             <el-form-item :label="t('settings.qwen3FaChunkTargetSec')">
               <el-input-number
                 v-model="form.qwen3_fa_chunk_target_sec"
-                :min="0" :max="300" :step="1" :precision="1"
+                :min="0" :max="3600" :step="1" :precision="1"
                 controls-position="right" style="width: 100%; max-width: 240px"
               />
               <p class="help-text">{{ t('settings.qwen3FaChunkTargetSecHint') }}</p>
@@ -256,8 +256,8 @@ const TUNING_DEFAULTS = {
   ctc_max_cjk_particle_sec: 0.35,
   ctc_max_en_word_sec: 1.20,
   ctc_min_sp_sec: 0.15,
-  qwen3_fa_chunk_threshold_sec: 30.0,
-  qwen3_fa_chunk_target_sec: 20.0,
+  qwen3_fa_chunk_threshold_sec: 180.0,
+  qwen3_fa_chunk_target_sec: 150.0,
 } as const
 
 const form = ref<AppSettings>({

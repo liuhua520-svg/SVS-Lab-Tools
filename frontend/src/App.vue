@@ -65,11 +65,11 @@
         <div class="footer-content">
           <p>{{ t('app.footer') }}</p>
           <p>
-            <a href="https://github.com/liuhua520-svg/SVS-Lab-Aligner" target="_blank">
+            <a href="https://github.com/liuhua520-svg/SVS-Lab-Tools" target="_blank">
               📚 GitHub
             </a>
             |
-            <a href="https://github.com/liuhua520-svg/SVS-Lab-Aligner/issues" target="_blank">
+            <a href="https://github.com/liuhua520-svg/SVS-Lab-Tools/issues" target="_blank">
               🐛 Issue
             </a>
           </p>
