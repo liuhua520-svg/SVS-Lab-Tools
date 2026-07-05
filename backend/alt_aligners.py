@@ -404,23 +404,58 @@ def _fill_silences_lab(
 
 
 def _count_spoken_chars(text: str, int_lang: str) -> int:
-    """统计参考文本中的可发音字符数（排除标点/空白），用于与 entries 数量对比"""
-    count = 0
-    for ch in text:
-        cat = unicodedata.category(ch)
-        if cat.startswith(("P", "Z", "S")):
-            continue
-        # 对 CJK 语言只计汉字和假名
-        if int_lang in ("zh", "yue"):
-            if '\u4e00' <= ch <= '\u9fff' or '\u3400' <= ch <= '\u4dbf':
-                count += 1
-        elif int_lang == "ja":
-            if '\u3040' <= ch <= '\u30ff' or '\u4e00' <= ch <= '\u9fff':
-                count += 1
-        else:
+    """统计参考文本中的可发音"单元"数（排除标点/空白），用于与 entries 数量对比。
+
+    【历史 bug 说明 / 2026-07 修复】旧实现对 zh/yue/ja 只计落在 CJK 码位
+    区间内的字符，混进参考文本里的拉丁字母（缩写逐字母朗读、型号名、
+    "AI"/"WAV"/"RMVPE" 之类）会被直接无声丢弃、既不计数也不当标点跳过。
+    但 aligner 对这些拉丁字母词是按"整串字母 = 1 条时间戳"的粒度产生
+    真实对齐条目的（不是逐字母），于是旧实现统计出的参考字符数系统性
+    偏低——偏低量等于文本里拉丁字母"词"的个数——导致下游告警
+    "参考文本可发音字符数 ≠ 对齐条目数" 在任何混有英文的 CJK 稿子上
+    都会稳定触发一次误报，且这个偏差量与音频是否分段、切在哪儿完全
+    无关（纯粹是文本计数口径错误，不是对齐或分段合并的问题）。
+
+    现在的处理：连续的拉丁字母串整体计为 1 个单元（与 aligner 的英文
+    对齐粒度对齐，不能逐字母计数，否则同样会和真实 entries 数对不上）；
+    CJK 字符仍按单字/单假名计数；标点/空白/符号一律不计。
+    """
+    if int_lang in ("zh", "yue", "ja", "ko"):
+        count = 0
+        i, n = 0, len(text)
+        while i < n:
+            ch = text[i]
+            if ch.isascii() and ch.isalpha():
+                j = i
+                while j < n and text[j].isascii() and text[j].isalpha():
+                    j += 1
+                count += 1          # 一整串拉丁字母 = 1 个词级对齐单元
+                i = j
+                continue
+            cat = unicodedata.category(ch)
+            if cat.startswith(("P", "Z", "S")):
+                i += 1
+                continue
+            if int_lang in ("zh", "yue"):
+                if '\u4e00' <= ch <= '\u9fff' or '\u3400' <= ch <= '\u4dbf':
+                    count += 1
+            elif int_lang == "ja":
+                if '\u3040' <= ch <= '\u30ff' or '\u4e00' <= ch <= '\u9fff':
+                    count += 1
+            else:  # ko：原实现里缺失的分支（原来落到 else 靠 ch.strip() 兜底），这里显式补上
+                if '\uac00' <= ch <= '\ud7a3':
+                    count += 1
+            i += 1
+        return count
+    else:
+        count = 0
+        for ch in text:
+            cat = unicodedata.category(ch)
+            if cat.startswith(("P", "Z", "S")):
+                continue
             if ch.strip():
                 count += 1
-    return count
+        return count
 
 
 # ── 句末/句内标点 → 停顿时长映射 ──────────────────────────────────────────────
@@ -487,8 +522,8 @@ def _get_alignment_tuning() -> Dict[str, float]:
         # 值保存后，_align_chunked 调用方 (Qwen3ForcedAligner.align()) 读到
         # 的 tuning.get(...) 永远只会命中调用处自己写的字面量默认值
         # （30.0 / 20.0），保存设置完全不生效，且没有任何报错或警告。
-        "qwen3_fa_chunk_threshold_sec": 120.0,
-        "qwen3_fa_chunk_target_sec": 100.0,
+        "qwen3_fa_chunk_threshold_sec": 30.0,
+        "qwen3_fa_chunk_target_sec": 20.0,
     }
     try:
         import app_settings
@@ -3185,8 +3220,8 @@ class Qwen3ForcedAligner(AltAlignerBase):
             total_sec = self._get_audio_duration_100ns(audio_path) / 1e7
 
             tuning = _get_alignment_tuning()
-            chunk_threshold_sec = float(tuning.get("qwen3_fa_chunk_threshold_sec", 120.0))
-            chunk_target_sec = float(tuning.get("qwen3_fa_chunk_target_sec", 100.0))
+            chunk_threshold_sec = float(tuning.get("qwen3_fa_chunk_threshold_sec", 180.0))
+            chunk_target_sec = float(tuning.get("qwen3_fa_chunk_target_sec", 150.0))
 
             # 【长音频分段处理】详见本文件"6c. Qwen3-ForcedAligner 长音频
             # 分段处理"一节的说明：音频超过阈值时先切成若干短片段分别对齐，
@@ -3202,7 +3237,7 @@ class Qwen3ForcedAligner(AltAlignerBase):
                     audio_path, text, lang_name, int_lang, total_sec, chunk_target_sec,
                 )
             else:
-                word_entries = self._align_single_chunk(audio_path, text, lang_name)
+                word_entries = self._align_single_chunk(audio_path, text, lang_name, int_lang)
 
             if not word_entries:
                 return {
@@ -3247,8 +3282,256 @@ class Qwen3ForcedAligner(AltAlignerBase):
                 "processing_time": int((time.time() - t0) * 1000),
             }
 
+    # ============================================================
+    # Qwen3-FA 局部对齐结果的"退化区间"检测与自愈修复
+    # ------------------------------------------------------------
+    # 背景（详见 _align_chunked 里 QWEN3_FA_CHUNK_FALLBACK 分支的说明）：
+    # Qwen3 自己的音频编码器在处理较长音频时，内部是按固定窗口分块处理
+    # 的，不具备静音感知能力。这意味着即使外层已经按句子边界 + 静音做过
+    # 一次切分，只要单个分段本身仍不够短（或者音频本身信息密度高、语速
+    # 快、中英混杂），依然可能在分段内部撞上 Qwen3 内部窗口的边界，产生
+    # 两种典型的退化时间戳：
+    #
+    #   (a) "压缩坍缩"：连续一串字全部被挤进远小于正常语速所需的时间
+    #       窗口（比如 20 个字被压进 0.4 秒），识别出的文字内容本身是对
+    #       的，只是时间戳错了。
+    #   (b) "伪等距停顿"（实测最常见于长音频单次整段对齐的尾部）：几乎
+    #       每一个字后面都被插入一段几十到一百多毫秒、彼此时长异常接近
+    #       的"假 SIL"，形成一种和真实语句停顿完全无关、却机械地非常
+    #       规律的"字-停-字-停"节拍。
+    #
+    # 这两种情况的根源都不是"分段切点选得不对"，而是模型自身在这段局部
+    # 音频上的时间戳判定本身就不可靠——所以修复思路不是去猜一个"安全"的
+    # chunk_target_sec（换一个更长/更难的音频随时可能又不安全），而是在
+    # 拿到每一段的对齐结果后自动检测是否退化；退化了就把这一小段音频再
+    # 切细、递归重新对齐，直到恢复正常或者短到没有再切的意义为止。
+    # ============================================================
+    _DEGEN_MIN_RUN = 4                # 至少连续多少个非 SIL token 才构成"一段"
+    _DEGEN_ABS_DUR_FLOOR = 0.045      # 压缩坍缩：单字时长下限（秒），低于视为异常
+    _DEGEN_METRONOME_MIN_PAIRS = 3    # 伪等距停顿：至少多少个连续"字+紧跟停顿"才算异常
+                                       # （实测：5 会漏掉退化区间里不够"整齐"的前段，3 覆盖更完整）
+    _DEGEN_METRONOME_CV_MAX = 0.30    # 伪等距停顿：字时长变异系数上限（越小越"整齐划一"）
+    _DEGEN_GAP_MIN = 0.03             # 伪等距停顿：判定为"插入了一次停顿"的最小间隙（秒）
+                                       # 低于此值视为正常连读之间的自然过渡，不计入
+    _DEGEN_MIN_REPAIR_SPAN_SEC = 0.6  # 退化区间物理时长低于此值时，直接均匀分配，不再递归
+    _DEGEN_MAX_RECURSION_DEPTH = 3    # 递归重新对齐的最大深度，避免极端情况下死循环
+
+    @staticmethod
+    def _find_degenerate_spans(
+        entries: List[Tuple[float, float, str]],
+    ) -> List[Tuple[int, int]]:
+        """
+        扫描单段局部对齐结果（entries 为该段自身时间轴、从 0 开始的
+        [(start, end, token), ...]），返回退化区间列表，每项是
+        (start_idx, end_idx) —— entries 里 [start_idx, end_idx) 这个左闭
+        右开区间被判定为退化，需要重新处理。
+
+        两种检测逻辑（细节见上方说明）：
+          1. 压缩坍缩：连续 >= _DEGEN_MIN_RUN 个非 SIL token，每个时长都
+             小于 _DEGEN_ABS_DUR_FLOOR。
+          2. 伪等距停顿：连续 >= _DEGEN_METRONOME_MIN_PAIRS 个"字"，每个
+             字后面都紧跟着一段不可忽略的时间间隙（>= _DEGEN_GAP_MIN），
+             且"字时长+间隙"这个周期本身的变异系数很低（人类说话不可能
+             每个字之间都精准地插入几乎等长的停顿）。
+
+             注意：这里故意不要求"紧跟的是字面上的 SIL token"——
+             _align_single_chunk() 内部调用本函数时，拿到的是 Qwen3
+             模型的原始输出，这个阶段根本不会出现 "SIL" 这个 token
+             （SIL 是后续 _word_entries_to_lab() 转换成 .lab 文本时才
+             插入的）。如果只认字面 "SIL"，这条检测在实际线上跑的时候
+             永远不会触发，只有拿最终生成的 .lab 文件离线测试时才会
+             命中——这里改成直接看相邻两个 token 之间的时间间隙，不管
+             这个间隙有没有被后续步骤物化成一个显式的 SIL 条目。
+        """
+        spans: List[Tuple[int, int]] = []
+        n = len(entries)
+
+        # ---- 检测 1：压缩坍缩 ----
+        i = 0
+        while i < n:
+            s, e, tok = entries[i]
+            if tok != "SIL" and (e - s) < Qwen3ForcedAligner._DEGEN_ABS_DUR_FLOOR:
+                j = i
+                while (
+                    j < n
+                    and entries[j][2] != "SIL"
+                    and (entries[j][1] - entries[j][0]) < Qwen3ForcedAligner._DEGEN_ABS_DUR_FLOOR
+                ):
+                    j += 1
+                if j - i >= Qwen3ForcedAligner._DEGEN_MIN_RUN:
+                    spans.append((i, j))
+                i = j
+            else:
+                i += 1
+
+        # ---- 检测 2：伪等距停顿（字+隐式间隙的规律重复）----
+        i = 0
+        while i < n - 1:
+            run_start = i
+            periods: List[float] = []
+            j = i
+            while (
+                j + 1 < n
+                and entries[j][2] != "SIL"
+                and entries[j + 1][2] != "SIL"
+            ):
+                gap = entries[j + 1][0] - entries[j][1]
+                if gap < Qwen3ForcedAligner._DEGEN_GAP_MIN:
+                    break  # 间隙太小，只是正常连读之间的过渡，不算"卡了一下"
+                tok_dur = entries[j][1] - entries[j][0]
+                periods.append(tok_dur + gap)
+                j += 1
+            run_len = j - run_start
+            if run_len >= Qwen3ForcedAligner._DEGEN_METRONOME_MIN_PAIRS:
+                mean_p = sum(periods) / len(periods)
+                if mean_p > 0:
+                    var = sum((p - mean_p) ** 2 for p in periods) / len(periods)
+                    cv = (var ** 0.5) / mean_p
+                    if cv < Qwen3ForcedAligner._DEGEN_METRONOME_CV_MAX:
+                        spans.append((run_start, j + 1))
+            i = j if j > i else i + 1
+
+        if not spans:
+            return []
+
+        # 合并重叠/相邻区间
+        spans.sort()
+        merged: List[Tuple[int, int]] = [spans[0]]
+        for s, e in spans[1:]:
+            ls, le = merged[-1]
+            if s <= le:
+                merged[-1] = (ls, max(le, e))
+            else:
+                merged.append((s, e))
+        return merged
+
+    def _repair_degenerate_spans(
+        self,
+        entries: List[Tuple[float, float, str]],
+        audio_path: str,
+        lang_name: str,
+        int_lang: str,
+        chunk_dur_sec: Optional[float] = None,
+        _depth: int = 0,
+    ) -> List[Tuple[float, float, str]]:
+        """
+        对 _align_single_chunk() 刚拿到的局部结果做退化检测 + 自愈修复。
+
+        对每个探测到的退化区间：
+          1. 取区间前一个条目的结束时间 / 区间后一个条目的开始时间作为
+             "已知可信"的时间边界 [t_lo, t_hi]（区间在片段开头/结尾时，
+             分别退化为 0.0 / 该片段自身音频总时长）。
+          2. 若 [t_lo, t_hi] 还有一定长度、且递归深度未超限：把这段音频
+             物理裁出来，单独重新调用一次 _align_single_chunk()——一小
+             段（通常几秒）音频撞上 Qwen3 内部窗口边界的概率远低于原来
+             那一整段，多数情况下这一步就能拿到正常结果。
+          3. 重新对齐后的结果会再跑一次同样的退化检测（递归），如果还
+             是不行就继续切小，直到深度耗尽。
+          4. 深度耗尽、区间物理时长太短、或找不到可发音字符时，退化为
+             按字符数均匀分配（与 _align_chunked 里已有的整段失败兜底
+             逻辑一致）。
+        """
+        spans = self._find_degenerate_spans(entries)
+        if not spans:
+            return entries
+
+        try:
+            import soundfile as sf
+        except ImportError:
+            logger.warning("[Qwen3-FA][自愈修复] 缺少 soundfile，无法裁剪音频做局部重对齐，跳过自愈")
+            return entries
+
+        try:
+            audio, sr = sf.read(audio_path, always_2d=False)
+        except Exception as e:
+            logger.warning(f"[Qwen3-FA][自愈修复] 读取音频失败（{e}），跳过自愈")
+            return entries
+        if getattr(audio, "ndim", 1) > 1:
+            audio = audio.mean(axis=1)
+
+        total_local_dur = chunk_dur_sec if chunk_dur_sec is not None else len(audio) / sr
+
+        import tempfile
+        import shutil
+        import os as _os
+
+        tmp_dir = tempfile.mkdtemp(prefix="qwen3_fa_selfheal_")
+        try:
+            new_entries = list(entries)
+            # 从后往前处理，避免下标在拼接替换后错位
+            for span_start, span_end in reversed(spans):
+                t_lo = entries[span_start - 1][1] if span_start > 0 else 0.0
+                t_hi = entries[span_end][0] if span_end < len(entries) else total_local_dur
+                span_dur = t_hi - t_lo
+                bad_tokens = [tok for _, _, tok in entries[span_start:span_end] if tok != "SIL"]
+
+                repaired: Optional[List[Tuple[float, float, str]]] = None
+
+                if (
+                    span_dur >= Qwen3ForcedAligner._DEGEN_MIN_REPAIR_SPAN_SEC
+                    and _depth < Qwen3ForcedAligner._DEGEN_MAX_RECURSION_DEPTH
+                    and bad_tokens
+                ):
+                    sub_text = (
+                        "".join(bad_tokens) if int_lang in ("zh", "yue", "ja", "ko")
+                        else " ".join(bad_tokens)
+                    )
+                    st_samp = max(0, int(round(t_lo * sr)))
+                    en_samp = min(len(audio), int(round(t_hi * sr)))
+                    cropped = audio[st_samp:en_samp]
+                    if len(cropped) >= int(0.2 * sr):
+                        sub_wav = _os.path.join(tmp_dir, f"heal_{span_start}_{span_end}.wav")
+                        try:
+                            sf.write(sub_wav, cropped, sr)
+                            sub_entries = self._align_single_chunk(
+                                sub_wav, sub_text, lang_name, int_lang, _depth=_depth + 1,
+                            )
+                            if sub_entries and not self._find_degenerate_spans(sub_entries):
+                                repaired = [(s + t_lo, e + t_lo, tok) for s, e, tok in sub_entries]
+                                logger.info(
+                                    f"[Qwen3-FA][自愈修复] 区间 [{t_lo:.2f}s–{t_hi:.2f}s] "
+                                    f"重新对齐成功（depth={_depth + 1}）"
+                                )
+                            else:
+                                logger.warning(
+                                    f"[Qwen3-FA][自愈修复] 区间 [{t_lo:.2f}s–{t_hi:.2f}s] "
+                                    f"重新对齐后仍异常，回退为均匀分配"
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                f"[Qwen3-FA][自愈修复] 区间 [{t_lo:.2f}s–{t_hi:.2f}s] "
+                                f"重新对齐失败（{exc}），回退为均匀分配"
+                            )
+
+                if repaired is None:
+                    units = (
+                        [u for u in "".join(bad_tokens) if u.strip()]
+                        if int_lang in ("zh", "yue", "ja", "ko")
+                        else [u for u in bad_tokens if u.strip()]
+                    )
+                    if units:
+                        dur = span_dur / len(units)
+                        repaired = [
+                            (t_lo + i * dur, t_lo + (i + 1) * dur, u)
+                            for i, u in enumerate(units)
+                        ]
+                        logger.warning(
+                            f"[Qwen3-FA][自愈修复] 区间 [{t_lo:.2f}s–{t_hi:.2f}s] "
+                            f"改为按 {len(units)} 个可发音单元均匀分配（精度较低）"
+                        )
+                    else:
+                        repaired = []
+
+                new_entries[span_start:span_end] = repaired
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        return new_entries
+
     def _align_single_chunk(
         self, audio_path: str, text: str, lang_name: str,
+        int_lang: Optional[str] = None,
+        _depth: int = 0,
     ) -> List[Tuple[float, float, str]]:
         """
         对单个音频片段（可以是完整音频，也可以是分段切出的短片段）调用
@@ -3257,6 +3540,10 @@ class Qwen3ForcedAligner(AltAlignerBase):
 
         分段场景下，调用方（_align_chunked）负责把这里返回的局部时间戳
         加上该段在整段音频里的起始偏移，换算成全局时间戳。
+
+        int_lang 用于退化区间自愈修复（_repair_degenerate_spans）里判断
+        "按字符切分还是按空格切分"；不传时退化为不做自愈（保持旧行为），
+        调用方应尽量把已有的 int_lang 传进来。
         """
         results = self._model.align(
             audio=audio_path,
@@ -3271,7 +3558,207 @@ class Qwen3ForcedAligner(AltAlignerBase):
             if not tok or _is_cjk_punct(tok):
                 continue
             entries.append((float(item.start_time), float(item.end_time), tok))
+
+        if entries and int_lang is not None:
+            entries = self._repair_degenerate_spans(
+                entries, audio_path, lang_name, int_lang, _depth=_depth,
+            )
+
         return entries
+
+    # ============================================================
+    # "尾部死区"检测与修复
+    # ------------------------------------------------------------
+    # 背景：_plan_sentence_aligned_chunks() 给每一段分配参考文本时，是
+    # 按"整段音频总时长 × 累计字符数占比"这个粗略估算来切句子边界的；而
+    # 真正物理切开音频的切点 split_t，是在这个估算点附近另外做静音搜索
+    # 选出来的，两者并不保证严丝合缝。如果某一段实际语速比估算的平均语
+    # 速慢（或者相邻两段语速差异较大），就会出现"这一段自己的音频其实
+    # 比分配给它的参考文本要长"——多出来的那截真实语音，其对应的文字被
+    # 分给了下一段。强制对齐只能对齐"给它的文本"，本段文本提前用完之后，
+    # 自己音频里剩下的那一截真实语音就没有任何文本可对应，最终被后续
+    # fill_silences 逻辑整段填成一个和真实停顿毫无关系、但看起来"合理"
+    # 的巨大 SIL——播放时就是一段明显比其他停顿长得多、里面其实还有人声
+    # 的"死区"。
+
+    # 尾部空白超过这个时长（相对该段自身音频总长）才需要怀疑是死区，而
+    # 不是真实的长停顿（实测这批音频里真实停顿基本都在 1 秒以内）。
+    _DEAD_ZONE_MIN_SEC = 1.2
+    # 判断死区里是不是"真的有声音"用的 RMS 门限（输入是 float32 [-1,1]
+    # 归一化后的采样点）；纯静音/底噪通常远低于这个值。
+    _DEAD_ZONE_RMS_FLOOR = 0.01
+    # 出现死区时，从下一段参考文本开头"借"多少个可发音单元，拼到本段
+    # 文本末尾重新对齐一次。
+    _DEAD_ZONE_BORROW_UNITS = 60
+    # 重新对齐后，尾部必须比修复前至少往后推进这么多秒，才认为确实把
+    # 死区填上了；否则视为真实的长停顿，放弃修复、保留原结果。
+    _DEAD_ZONE_MIN_IMPROVEMENT_SEC = 0.3
+
+    def _fix_trailing_dead_zone(
+        self,
+        local_entries: List[Tuple[float, float, str]],
+        cropped_audio,
+        sr: int,
+        chunk_text: str,
+        next_chunk_text: str,
+        lang_name: str,
+        int_lang: str,
+        seg_dur: float,
+    ) -> Tuple[List[Tuple[float, float, str]], Optional[str]]:
+        """
+        检测并修复"这一段末尾出现一大截本不该存在的空白，但那截音频里其实
+        还有真实人声"的情况（细节见上方模块说明）。
+
+        Returns
+        -------
+        (repaired_entries, new_next_chunk_text)
+            repaired_entries：修复后的局部对齐结果（本段自身时间轴，从 0
+            开始）；没有检测到死区、或修复失败时原样返回 local_entries。
+            new_next_chunk_text：为 None 时表示"不需要修改下一段的参考
+            文本"（包括没有触发修复、触发了但没能确认具体借用了多少内容
+            两种情况）；否则是已经裁掉被借用部分之后、下一段应该使用的
+            剩余参考文本，调用方直接整体替换 chunk_texts[idx + 1] 即可，
+            不需要再做任何字符串匹配。
+        """
+        if not local_entries:
+            return local_entries, None
+
+        last_end = local_entries[-1][1]
+        tail_gap = seg_dur - last_end
+        if tail_gap < self._DEAD_ZONE_MIN_SEC:
+            return local_entries, None  # 尾部空白不够长，不值得怀疑
+
+        next_text = (next_chunk_text or "").strip()
+        if not next_text:
+            return local_entries, None  # 已经是最后一段，没有文本可借
+
+        # 用简单的 RMS 快速判断这截"疑似死区"是不是真的安静。
+        st = max(0, int(round(last_end * sr)))
+        en = min(len(cropped_audio), int(round(seg_dur * sr)))
+        tail_audio = cropped_audio[st:en]
+        if len(tail_audio) == 0:
+            return local_entries, None
+        try:
+            rms = float((tail_audio.astype("float64") ** 2).mean()) ** 0.5
+        except Exception:
+            return local_entries, None
+        if rms < self._DEAD_ZONE_RMS_FLOOR:
+            return local_entries, None  # 确实是真安静，不是死区
+
+        # units 保留下一段参考文本里的每一个原始字符（含标点），后面裁剪
+        # 下一段文本时要按这个"含标点"的原始下标来切，不能用过滤完标点
+        # 之后的字符数，否则会因为标点不产生对齐条目而算错该裁多少。
+        units = (
+            list(next_text) if int_lang in ("zh", "yue", "ja", "ko")
+            else next_text.split()
+        )
+        borrow_units = units[: self._DEAD_ZONE_BORROW_UNITS]
+        if not borrow_units:
+            return local_entries, None
+        borrow_text = (
+            "".join(borrow_units) if int_lang in ("zh", "yue", "ja", "ko")
+            else " ".join(borrow_units)
+        )
+        sep = "" if int_lang in ("zh", "yue", "ja", "ko") else " "
+        extended_text = (chunk_text or "").strip() + sep + borrow_text
+
+        import tempfile
+        import os as _os
+        try:
+            import soundfile as sf
+        except ImportError:
+            logger.warning("[Qwen3-FA][死区修复] 缺少 soundfile，跳过死区修复")
+            return local_entries, None
+
+        tmp_wav = None
+        try:
+            fd, tmp_wav = tempfile.mkstemp(suffix=".wav", prefix="qwen3_fa_deadzone_")
+            _os.close(fd)
+            sf.write(tmp_wav, cropped_audio, sr)
+            retried = self._align_single_chunk(tmp_wav, extended_text, lang_name, int_lang)
+        except Exception as exc:
+            logger.warning(f"[Qwen3-FA][死区修复] 借用下一段文本重新对齐失败（{exc}），保留原结果")
+            return local_entries, None
+        finally:
+            if tmp_wav:
+                try:
+                    _os.remove(tmp_wav)
+                except OSError:
+                    pass
+
+        if not retried:
+            return local_entries, None
+
+        # 【越界/倒退防护】借用的文本有可能比这一段音频实际能承载的语音
+        # 还多；模型仍然被强制要求给所有输入文本安排时间戳，对于超出
+        # 音频真实内容的多余文本，可能会外推出一些落在 [0, seg_dur] 之
+        # 外、甚至不再随顺序单调递增的"幻觉"时间戳。这类条目一旦混进
+        # 最终结果，会让后面的退化检测算出语无伦次的区间（例如某个条目
+        # 的"结束时间"反而比后一个条目的"开始时间"更晚）。这里直接从头
+        # 扫描，一旦遇到越界或倒退就整体截断，只保留前面确认可信的部分。
+        clipped: List[Tuple[float, float, str]] = []
+        prev_end = 0.0
+        for s, e, tok in retried:
+            if s < prev_end - 1e-6 or s >= seg_dur:
+                break
+            clipped.append((s, min(e, seg_dur), tok))
+            prev_end = min(e, seg_dur)
+        retried = clipped
+        if not retried:
+            return local_entries, None
+
+        new_last_end = retried[-1][1]
+        if new_last_end < last_end + self._DEAD_ZONE_MIN_IMPROVEMENT_SEC:
+            # 借了文本也没能把尾部填上，大概率真的是一段很长的停顿
+            # （比如说话人真的换气/停顿了很久），放弃修复、保留原结果。
+            logger.info(
+                f"[Qwen3-FA][死区修复] 尾部 {tail_gap:.2f}s 疑似死区（RMS={rms:.4f}），"
+                "借用下一段文本重新对齐后仍无改善，视为真实长停顿，保留原结果"
+            )
+            return local_entries, None
+
+        # 估算这次重新对齐"吃掉"了下一段文本开头多少个可发音单元：用新
+        # 结果里非 SIL 条目数减去本段原本应有的单元数。
+        original_units = (
+            [u for u in (chunk_text or "").strip() if u.strip() and not _is_cjk_punct(u)]
+            if int_lang in ("zh", "yue", "ja", "ko")
+            else [u for u in (chunk_text or "").strip().split() if u.strip()]
+        )
+        new_non_sil = [tok for _, _, tok in retried if tok != "SIL"]
+        recognized_borrowed = max(0, len(new_non_sil) - len(original_units))
+
+        if recognized_borrowed <= 0:
+            logger.info(
+                f"[Qwen3-FA][死区修复] 尾部 {tail_gap:.2f}s 死区已通过重新对齐改善，"
+                "但无法确定具体消费了下一段的多少内容，下一段文本不做裁剪"
+            )
+            return retried, None
+
+        # 把"消费了多少个可发音单元"换算成 units（含标点）里的原始下标：
+        # 从头数，跳过标点，数满 recognized_borrowed 个可发音字符后，
+        # 其后的位置就是应该裁掉的原始字符范围的右边界。这样标点符号
+        # 本身不产生对齐条目也不会导致裁剪长度算错。
+        raw_cut_idx = len(units)  # 默认：全部借用的都被消费掉了
+        pronounceable_seen = 0
+        for idx, u in enumerate(units):
+            if not u.strip() or _is_cjk_punct(u):
+                continue
+            pronounceable_seen += 1
+            if pronounceable_seen >= recognized_borrowed:
+                raw_cut_idx = idx + 1
+                break
+
+        remaining_units = units[raw_cut_idx:]
+        new_next_text = (
+            "".join(remaining_units) if int_lang in ("zh", "yue", "ja", "ko")
+            else " ".join(remaining_units)
+        )
+        logger.info(
+            f"[Qwen3-FA][死区修复] 尾部 {tail_gap:.2f}s 死区确认存在真实语音（RMS={rms:.4f}），"
+            f"借用下一段开头 {recognized_borrowed} 个可发音单元（原始 {raw_cut_idx} 个字符，"
+            f"含标点）后重新对齐成功，尾部空白收窄为 {seg_dur - new_last_end:.2f}s"
+        )
+        return retried, new_next_text
 
     def _align_chunked(
         self,
@@ -3324,7 +3811,7 @@ class Qwen3ForcedAligner(AltAlignerBase):
                 "exe 里出现的，先检查 soundfile 的原生依赖（libsndfile 动态库 / "
                 "_soundfile_data）是否被正确打进了 PyInstaller 产物目录"
             )
-            return self._align_single_chunk(audio_path, text, lang_name)
+            return self._align_single_chunk(audio_path, text, lang_name, int_lang)
 
         try:
             audio, sr = sf.read(audio_path, always_2d=False)
@@ -3339,7 +3826,7 @@ class Qwen3ForcedAligner(AltAlignerBase):
                 "exe 里出现的，先检查音频格式（尤其是 mp3）在当前打包环境下 "
                 "是否仍能被 soundfile/libsndfile 正常解码"
             )
-            return self._align_single_chunk(audio_path, text, lang_name)
+            return self._align_single_chunk(audio_path, text, lang_name, int_lang)
 
         if getattr(audio, "ndim", 1) > 1:
             audio = audio.mean(axis=1)
@@ -3352,7 +3839,7 @@ class Qwen3ForcedAligner(AltAlignerBase):
 
         if len(spans) <= 1:
             logger.info("[Qwen3-FA] 规划结果无需分段，按整段单次对齐处理")
-            return self._align_single_chunk(audio_path, text, lang_name)
+            return self._align_single_chunk(audio_path, text, lang_name, int_lang)
 
         logger.info(
             f"[Qwen3-FA] 音频切分为 {len(spans)} 段: "
@@ -3383,13 +3870,27 @@ class Qwen3ForcedAligner(AltAlignerBase):
                     chunk_wav = _os.path.join(tmp_dir, f"chunk_{idx:03d}.wav")
                     try:
                         sf.write(chunk_wav, cropped, sr)
-                        local_entries = self._align_single_chunk(chunk_wav, chunk_text, lang_name)
+                        local_entries = self._align_single_chunk(chunk_wav, chunk_text, lang_name, int_lang)
                     except Exception as exc:
                         logger.error(
                             f"[Qwen3-FA] 第 {idx + 1}/{len(spans)} 段对齐失败（{exc}），"
                             "该段退化为按时长均匀分配（精度较低）"
                         )
                         local_entries = []
+
+                # 【尾部死区检测与修复】见 _fix_trailing_dead_zone 顶部说明：
+                # 这一段自己已经对齐出结果，但结果末尾比这一段自己的音频
+                # 总时长明显短一截，且那一截里其实还有真实人声——大概率是
+                # 参考文本被多分给了下一段。尝试借下一段开头一小截文本
+                # 重新对齐；如果借用成功，还要把已经被"借走"的这部分文本
+                # 从下一段的参考文本里裁掉，避免下一段重复对齐同一段内容。
+                if local_entries and chunk_text and idx + 1 < len(chunk_texts):
+                    local_entries, new_next_text = self._fix_trailing_dead_zone(
+                        local_entries, cropped, sr, chunk_text, chunk_texts[idx + 1],
+                        lang_name, int_lang, seg_dur,
+                    )
+                    if new_next_text is not None:
+                        chunk_texts[idx + 1] = new_next_text
 
                 if not local_entries and chunk_text:
                     # 降级：该段内按可发音单元均匀分配时长，保证时间轴不断裂。
