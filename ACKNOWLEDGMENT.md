@@ -12,7 +12,7 @@
 
 本项目采用 **MIT License** 发布。
 
-Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools-WebUI)
+Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools)
 
 详见项目根目录 `LICENSE` 文件。
 
