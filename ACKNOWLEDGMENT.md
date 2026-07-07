@@ -3,7 +3,7 @@
 本项目使用了众多优秀的开源软件和工具，在此向所有贡献者和维护者表示衷心感谢！
 
 **项目源码：**
-- 仓库：`liuhua520-svg/SVS-Lab-Tools-WebUI`
+- 仓库：`liuhua520-svg/SVS-Lab-Tools`
 - 项目许可证：MIT
 
 ---
