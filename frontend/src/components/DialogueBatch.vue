@@ -665,13 +665,20 @@
 
       <!-- 语音预设管理弹窗：新增 / 编辑 / 删除；音色列表跟随本弹窗内选择的
            引擎（narratorFormVoices），与每个对话框各自的 box.ttsVoices 互相独立 -->
-      <el-dialog v-model="narratorManagerVisible" :title="t('processor.manageNarrators')" width="520px">
+      <el-dialog v-model="narratorManagerVisible" :title="t('processor.manageNarrators')" width="600px">
         <el-table :data="narrators" size="small" style="margin-bottom: 16px" max-height="240">
           <el-table-column prop="name" :label="t('processor.narratorName')" width="110" />
           <el-table-column :label="t('processor.ttsEngine')" width="90">
             <template #default="{ row }">{{ engineLabel(row.engine) }}</template>
           </el-table-column>
           <el-table-column prop="voice" :label="t('processor.ttsVoice')" show-overflow-tooltip />
+          <el-table-column :label="t('processor.narratorParamsColumn')" width="140" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span style="font-size: 12px; color: var(--el-text-color-secondary)">
+                {{ row.rate || '+0%' }} / {{ row.pitch || '+0Hz' }} / {{ row.volume || '+0%' }}
+              </span>
+            </template>
+          </el-table-column>
           <el-table-column width="110">
             <template #default="{ row }">
               <el-button link size="small" @click="editNarrator(row)">{{ t('processor.edit') }}</el-button>
@@ -705,6 +712,20 @@
             >
               <el-option v-for="v in narratorFormVoices" :key="v.id" :label="`${v.name} (${v.locale})`" :value="v.id" />
             </el-select>
+          </el-form-item>
+          <!-- 语音预设需要连同语速/音调/音量一起保存，否则套用预设时只会
+               恢复引擎+音色，语速等参数还得用户手动重新调 -->
+          <el-form-item :label="t('processor.ttsRate')">
+            <el-slider v-model="narratorFormRateNum" :min="-50" :max="100" show-input style="max-width: 420px" />
+          </el-form-item>
+          <el-form-item :label="t('processor.ttsPitch')">
+            <el-slider v-model="narratorFormPitchNum" :min="-50" :max="50" show-input style="max-width: 420px" />
+          </el-form-item>
+          <el-form-item v-if="narratorForm.engine === 'windows_sapi'">
+            <el-alert :closable="false" type="info" :title="t('processor.ttsPitchBestEffortHint')" show-icon />
+          </el-form-item>
+          <el-form-item :label="t('processor.ttsVolume')">
+            <el-slider v-model="narratorFormVolumeNum" :min="-50" :max="50" show-input style="max-width: 420px" />
           </el-form-item>
         </el-form>
 
@@ -800,6 +821,22 @@ const ttsEnginesLoading = ref(false)
 const narratorManagerVisible = ref(false)
 const narratorForm = ref<TtsNarrator>({ id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%' })
 const narratorSaving = ref(false)
+
+// 语音预设对话框里的语速/音调/音量：narratorForm 里存的是 EdgeTTS 风格的
+// 字符串（"+10%" / "-5Hz"），但 el-slider 需要绑定数字，这里用 computed
+// get/set 做双向转换（与 MFAProcessor.vue 保持一致的写法）。
+const narratorFormRateNum = computed<number>({
+  get: () => parseInt(narratorForm.value.rate) || 0,
+  set: (v: number) => { narratorForm.value.rate = `${v >= 0 ? '+' : ''}${v}%` },
+})
+const narratorFormPitchNum = computed<number>({
+  get: () => parseInt(narratorForm.value.pitch) || 0,
+  set: (v: number) => { narratorForm.value.pitch = `${v >= 0 ? '+' : ''}${v}Hz` },
+})
+const narratorFormVolumeNum = computed<number>({
+  get: () => parseInt(narratorForm.value.volume) || 0,
+  set: (v: number) => { narratorForm.value.volume = `${v >= 0 ? '+' : ''}${v}%` },
+})
 // 语音预设管理对话框内的音色列表：跟随对话框内正在编辑的 narratorForm.engine，
 // 与每个对话框各自的 box.ttsVoices 互相独立，避免串扰（同 MFAProcessor.vue）。
 const narratorFormVoices = ref<TtsVoice[]>([])
@@ -1056,7 +1093,15 @@ const fetchNarrators = async () => {
 }
 
 const handleBoxNarratorSelect = async (box: DialogueBox, narratorId: string) => {
-  if (!narratorId) return
+  if (!narratorId) {
+    // 切回"不使用预设"（自定义）时，把这个对话框的语速/音调/音量重置为
+    // 默认值——否则下拉框显示"不使用预设"，滑块却还停留在上一个预设的
+    // 参数上，容易误以为已经跟预设脱钩了。
+    box.ttsRate = 0
+    box.ttsPitch = 0
+    box.ttsVolume = 0
+    return
+  }
   const n = narrators.value.find((x) => x.id === narratorId)
   if (!n) return
   const engine = n.engine || 'edge_tts'

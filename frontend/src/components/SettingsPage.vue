@@ -226,6 +226,53 @@
           </el-col>
         </el-row>
 
+        <el-divider />
+
+        <div class="section-heading">
+          <span>✂️ {{ t('settings.ttsSegmentSectionTitle') }}</span>
+        </div>
+        <p class="page-subtitle">{{ t('settings.ttsSegmentSectionSubtitle') }}</p>
+
+        <el-alert type="success" :closable="false" show-icon class="no-restart-hint">
+          <template #title>{{ t('settings.tuningNoRestartHint') }}</template>
+        </el-alert>
+
+        <el-row :gutter="16">
+          <el-col :xs="24" :sm="12">
+            <el-form-item :label="t('settings.ttsMinSegmentLen')">
+              <el-input-number
+                v-model="form.tts_min_segment_len"
+                :min="1" :max="5000" :step="10" :precision="0"
+                controls-position="right" style="width: 100%; max-width: 240px"
+              />
+              <p class="help-text">{{ t('settings.ttsMinSegmentLenHint') }}</p>
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :sm="12">
+            <el-form-item :label="t('settings.ttsMaxSegmentLen')">
+              <el-input-number
+                v-model="form.tts_max_segment_len"
+                :min="1" :max="5000" :step="10" :precision="0"
+                controls-position="right" style="width: 100%; max-width: 240px"
+              />
+              <p class="help-text">{{ t('settings.ttsMaxSegmentLenHint') }}</p>
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-alert
+          v-if="form.tts_min_segment_len > form.tts_max_segment_len"
+          type="warning" :closable="false" show-icon class="restart-hint"
+        >
+          <template #title>{{ t('settings.ttsSegmentLenOrderWarning') }}</template>
+        </el-alert>
+
+        <el-form-item>
+          <el-button size="small" @click="resetTtsSegmentLenToDefaults">
+            ↺ {{ t('settings.tuningResetButton') }}
+          </el-button>
+        </el-form-item>
+
         <el-alert
           v-for="item in restartSummary"
           :key="item.service"
@@ -289,6 +336,11 @@ interface AppSettings {
   qwen3_fa_whisperx_prepass_model: string
   // WhisperX 转录 batch_size，独立对齐后端与上面的粗测预处理共用同一个值。
   whisperx_batch_size: number
+  // ── tts_processor.py 逐句合成分段长度（字符数，同样"实时生效，无需
+  // 重启"）── 单行文本超过 tts_max_segment_len 才会二次切割，切割点落在
+  // [tts_min_segment_len, tts_max_segment_len] 区间内。
+  tts_min_segment_len: number
+  tts_max_segment_len: number
 }
 
 type RestartStatus = 'restarted' | 'not_running' | 'failed'
@@ -320,6 +372,12 @@ const WHISPERX_DEFAULTS = {
   whisperx_batch_size: 16,
 } as const
 
+// TTS 逐句合成分段长度默认值：与 app_settings.py 的 DEFAULT_SETTINGS 保持一致。
+const TTS_SEGMENT_LEN_DEFAULTS = {
+  tts_min_segment_len: 250,
+  tts_max_segment_len: 500,
+} as const
+
 // 与 alt_aligners.py 里 WhisperXAligner.SUPPORTED_MODELS 保持一致，
 // 复用 processor.whisperModelXxx 系列翻译（单文件处理页已有同一份模型列表）。
 const WHISPERX_MODEL_OPTIONS = [
@@ -348,10 +406,16 @@ const form = ref<AppSettings>({
   skip_start_nemo_server: false,
   ...TUNING_DEFAULTS,
   ...WHISPERX_DEFAULTS,
+  ...TTS_SEGMENT_LEN_DEFAULTS,
 })
 
 const resetTuningToDefaults = () => {
   Object.assign(form.value, TUNING_DEFAULTS)
+  ElMessage.info(t('settings.tuningResetHint'))
+}
+
+const resetTtsSegmentLenToDefaults = () => {
+  Object.assign(form.value, TTS_SEGMENT_LEN_DEFAULTS)
   ElMessage.info(t('settings.tuningResetHint'))
 }
 
@@ -387,6 +451,20 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
   // whisperx_batch_size 走独立的整数校验（1-128），与后端 save_settings() 的钳制范围一致
   const batchSize = Number(settings?.whisperx_batch_size)
   const prepassModel = String(settings?.qwen3_fa_whisperx_prepass_model || '').trim()
+  // tts_min_segment_len / tts_max_segment_len：整数校验 + 钳制到 [1, 5000]，
+  // 与后端 save_settings() 的钳制范围一致；若钳制后 min > max 则交换两者，
+  // 与后端行为保持一致，避免表单里出现区间倒置的中间态。
+  const rawTtsMinLen = Number(settings?.tts_min_segment_len)
+  const rawTtsMaxLen = Number(settings?.tts_max_segment_len)
+  let ttsMinLen = Number.isFinite(rawTtsMinLen)
+    ? Math.min(Math.max(Math.round(rawTtsMinLen), 1), 5000)
+    : TTS_SEGMENT_LEN_DEFAULTS.tts_min_segment_len
+  let ttsMaxLen = Number.isFinite(rawTtsMaxLen)
+    ? Math.min(Math.max(Math.round(rawTtsMaxLen), 1), 5000)
+    : TTS_SEGMENT_LEN_DEFAULTS.tts_max_segment_len
+  if (ttsMinLen > ttsMaxLen) {
+    ;[ttsMinLen, ttsMaxLen] = [ttsMaxLen, ttsMinLen]
+  }
   form.value = {
     auto_update_models: !!settings?.auto_update_models,
     use_mirror: !!settings?.use_mirror,
@@ -412,6 +490,8 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     whisperx_batch_size: Number.isFinite(batchSize)
       ? Math.min(Math.max(Math.round(batchSize), 1), 128)
       : WHISPERX_DEFAULTS.whisperx_batch_size,
+    tts_min_segment_len: ttsMinLen,
+    tts_max_segment_len: ttsMaxLen,
   }
 }
 

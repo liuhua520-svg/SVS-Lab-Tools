@@ -126,13 +126,14 @@
             <el-slider v-model="ttsConfig.volumeNum" :min="-50" :max="50" show-input style="max-width: 420px" />
           </el-form-item>
 
-          <!-- 手动分段预览：不再随输入自动防抖触发，只在用户点击按钮时
-               按句末标点分段、逐句合成生成预览音频（不做 Qwen3-FA 对齐，
-               也不再有句子数量上限，会合成完整文本）。生成期间"开始处理"
-               会被暂时禁用；生成完成后点击"开始处理"会直接复用这份分句
-               音频去对齐，不会重新合成一遍。若在生成预览后又修改了文本 /
-               引擎 / 音色 / 语速 / 音调 / 音量 / 语种，这份预览会失效，
-               "开始处理"将退回"先合成再对齐"的完整流程。 -->
+          <!-- 手动分段预览：不再随输入自动防抖触发，只在用户点击按钮时按新分
+               段规则（优先按换行分段，单行过长再按句号/逗号二次切割）逐句合成
+               生成预览音频（不做 Qwen3-FA 对齐，也不再有句子数量上限，会合成
+               完整文本）。生成期间"开始处理"会被暂时禁用；生成完成后点击
+               "开始处理"会直接复用这份分句音频去对齐，不会重新合成一遍。若在
+               生成预览后又修改了文本 / 引擎 / 音色 / 语速 / 音调 / 音量 /
+               语种，这份预览会失效，"开始处理"将退回"先合成再对齐"的完整
+               流程。 -->
           <el-form-item :label="t('processor.ttsSegmentPreviewTitle')">
             <div style="width: 100%">
               <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
@@ -173,13 +174,20 @@
 
         <!-- 语音预设管理弹窗：新增 / 编辑 / 删除；音色列表跟随本弹窗内选择的
              引擎（narratorFormVoices），与主面板当前引擎（ttsVoices）互相独立 -->
-        <el-dialog v-model="narratorManagerVisible" :title="t('processor.manageNarrators')" width="520px">
+        <el-dialog v-model="narratorManagerVisible" :title="t('processor.manageNarrators')" width="600px">
           <el-table :data="narrators" size="small" style="margin-bottom: 16px" max-height="240">
             <el-table-column prop="name" :label="t('processor.narratorName')" width="110" />
             <el-table-column :label="t('processor.ttsEngine')" width="90">
               <template #default="{ row }">{{ engineLabel(row.engine) }}</template>
             </el-table-column>
             <el-table-column prop="voice" :label="t('processor.ttsVoice')" show-overflow-tooltip />
+            <el-table-column :label="t('processor.narratorParamsColumn')" width="140" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span style="font-size: 12px; color: var(--el-text-color-secondary)">
+                  {{ row.rate || '+0%' }} / {{ row.pitch || '+0Hz' }} / {{ row.volume || '+0%' }}
+                </span>
+              </template>
+            </el-table-column>
             <el-table-column width="110">
               <template #default="{ row }">
                 <el-button link size="small" @click="editNarrator(row)">{{ t('processor.edit') }}</el-button>
@@ -213,6 +221,20 @@
               >
                 <el-option v-for="v in narratorFormVoices" :key="v.id" :label="`${v.name} (${v.locale})`" :value="v.id" />
               </el-select>
+            </el-form-item>
+            <!-- 语音预设需要连同语速/音调/音量一起保存，否则套用预设时只会
+                 恢复引擎+音色，语速等参数还得用户手动重新调 -->
+            <el-form-item :label="t('processor.ttsRate')">
+              <el-slider v-model="narratorFormRateNum" :min="-50" :max="100" show-input style="max-width: 420px" />
+            </el-form-item>
+            <el-form-item :label="t('processor.ttsPitch')">
+              <el-slider v-model="narratorFormPitchNum" :min="-50" :max="50" show-input style="max-width: 420px" />
+            </el-form-item>
+            <el-form-item v-if="narratorForm.engine === 'windows_sapi'">
+              <el-alert :closable="false" type="info" :title="t('processor.ttsPitchBestEffortHint')" show-icon />
+            </el-form-item>
+            <el-form-item :label="t('processor.ttsVolume')">
+              <el-slider v-model="narratorFormVolumeNum" :min="-50" :max="50" show-input style="max-width: 420px" />
             </el-form-item>
           </el-form>
 
@@ -1206,11 +1228,12 @@ const engineLabel = (id?: string): string => {
 const narratorFormVoices = ref<TtsVoice[]>([])
 const narratorFormVoicesLoading = ref(false)
 
-// ── 手动分段预览：由"生成预览"按钮触发，按句末标点分段、逐句合成生成
-// 预览音频（不做 Qwen3-FA 对齐，不再有句子数量上限）。previewId 是后端
-// 返回的缓存凭证——生成后若没有改动文本/参数，点击"开始处理"会带上它
-// 直接复用这份分句音频去对齐；一旦相关输入发生变化就会被清空，逼迫
-// "开始处理"退回"先合成再对齐"的完整流程，避免用旧音频对新文本。
+// ── 手动分段预览：由"生成预览"按钮触发，按新分段规则（优先按换行分段，
+// 单行过长再按句号/逗号二次切割）逐句合成生成预览音频（不做 Qwen3-FA
+// 对齐，不再有句子数量上限）。previewId 是后端返回的缓存凭证——生成后若
+// 没有改动文本/参数，点击"开始处理"会带上它直接复用这份分句音频去对齐；
+// 一旦相关输入发生变化就会被清空，逼迫"开始处理"退回"先合成再对齐"的
+// 完整流程，避免用旧音频对新文本。
 const segmentPreview = ref<{
   loading: boolean
   audioUrl: string
@@ -1231,6 +1254,23 @@ let segmentPreviewRequestSeq = 0
 const narratorManagerVisible = ref(false)
 const narratorForm = ref<TtsNarrator>({ id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%' })
 const narratorSaving = ref(false)
+
+// 语音预设对话框里的语速/音调/音量：narratorForm 里存的是 EdgeTTS 风格的
+// 字符串（"+10%" / "-5Hz"），但 el-slider 需要绑定数字，这里用 computed
+// get/set 做双向转换，写法与主面板的 ttsConfig.rateNum/pitchNum/volumeNum
+// 保持一致，避免另外维护一套数字 ref 和 watch 同步逻辑。
+const narratorFormRateNum = computed<number>({
+  get: () => parseInt(narratorForm.value.rate) || 0,
+  set: (v: number) => { narratorForm.value.rate = `${v >= 0 ? '+' : ''}${v}%` },
+})
+const narratorFormPitchNum = computed<number>({
+  get: () => parseInt(narratorForm.value.pitch) || 0,
+  set: (v: number) => { narratorForm.value.pitch = `${v >= 0 ? '+' : ''}${v}Hz` },
+})
+const narratorFormVolumeNum = computed<number>({
+  get: () => parseInt(narratorForm.value.volume) || 0,
+  set: (v: number) => { narratorForm.value.volume = `${v >= 0 ? '+' : ''}${v}%` },
+})
 
 const formData = ref<FormData>({
   audioFile: null,
@@ -1633,7 +1673,15 @@ watch(() => ttsConfig.value.engine, (engine, oldEngine) => {
 })
 
 const handleNarratorSelect = (narratorId: string) => {
-  if (!narratorId) return
+  if (!narratorId) {
+    // 切回"不使用预设"（自定义）时，把语速/音调/音量重置为默认值——
+    // 否则用户会看到下拉框显示"不使用预设"，滑块却还停留在上一个预设的
+    // 参数上，误以为已经跟预设脱钩了。
+    ttsConfig.value.rateNum = 0
+    ttsConfig.value.pitchNum = 0
+    ttsConfig.value.volumeNum = 0
+    return
+  }
   const n = narrators.value.find(x => x.id === narratorId)
   if (!n) return
   if (n.engine && n.engine !== ttsConfig.value.engine) {
@@ -1729,7 +1777,14 @@ watch(
 )
 
 const openNarratorManager = () => {
-  narratorForm.value = { id: '', name: '', engine: ttsConfig.value.engine, voice: ttsConfig.value.voice, rate: '+0%', pitch: '+0Hz', volume: '+0%' }
+  // 打开"语音预设管理"时，用主面板当前的引擎/音色/语速/音调/音量预填表单，
+  // 方便用户把当前正在用的一套参数直接"另存为预设"，而不必再手动重设一遍。
+  narratorForm.value = {
+    id: '', name: '', engine: ttsConfig.value.engine, voice: ttsConfig.value.voice,
+    rate: `${ttsConfig.value.rateNum >= 0 ? '+' : ''}${ttsConfig.value.rateNum}%`,
+    pitch: `${ttsConfig.value.pitchNum >= 0 ? '+' : ''}${ttsConfig.value.pitchNum}Hz`,
+    volume: `${ttsConfig.value.volumeNum >= 0 ? '+' : ''}${ttsConfig.value.volumeNum}%`,
+  }
   narratorManagerVisible.value = true
   fetchNarratorFormVoices(narratorForm.value.engine || 'edge_tts')
 }
