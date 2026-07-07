@@ -72,13 +72,18 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 #### LGPL 3.0 License
 | 包名     | 版本       | 链接 |
 |---------|------------|------|
-| edge-tts | >=6.1.12  | [GitHub](https://github.com/rany2/edge-tts) |
+| edge-tts | >=7.0  | [GitHub](https://github.com/rany2/edge-tts) |
 
 #### ISC License
 | 包名     | 版本       | 链接 |
 |---------|------------|------|
 | librosa | >=0.10.0   | [GitHub](https://github.com/librosa/librosa) |
 | resampy | >=0.4.2    | [GitHub](https://github.com/bmcfee/resampy) |
+
+#### PSF 2.0 License
+| 包名     | 版本       | 链接 |
+|---------|------------|------|
+| pywin32 | >=306   | [GitHub](https://github.com/mhammond/pywin32) |
 
 ---
 
