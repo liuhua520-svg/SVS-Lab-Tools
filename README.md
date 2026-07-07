@@ -4,9 +4,9 @@
 
 一个完全独立的 Web 应用程序，面向歌声合成（SVS）工作流，用于把“输入音频 + 文本”转换为可在歌声合成软件中使用的工程文件。
 
-它的目标不是做 TTS，也不是替代歌声合成引擎本身，而是作为一座桥梁，帮助歌姬“假装擅长说话”：
+它的目标不是做 SVS，也不是替代歌声合成引擎本身，而是作为一座桥梁，帮助歌姬“假装擅长说话”：
 
-- 先用 **[MFA](https://github.com/MontrealCorpusTools/Montreal-Forced-Aligner)** 将音频与文本自动对齐，生成 `.lab`
+- 先用 **[Qwen3-ForcedAligner-0.6B](https://github.com/QwenLM/Qwen3-ASR)** 将音频与文本自动对齐，生成 `.lab`
 - 再用 **[PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)** 提取 F0 音高
 - 最后输出歌声合成工程文件，便于在软件中继续编辑和播放
 
@@ -21,7 +21,7 @@
 ## ✨ 主要功能
 
 * **仅标注（快速）**
-  只执行 MFA 自动对齐，快速生成 `.lab`。
+  只执行 Qwen3-ForcedAligner-0.6B 自动对齐，快速生成 `.lab`。
 
 * **完整处理（标注 + F0 + 工程文件）**
   自动完成标注、音高提取，并输出歌声合成工程文件。
@@ -54,7 +54,7 @@
 * **支持 LAB 文件导出**
 
 * **支持多种对齐算法**
-  内置 **Montreal Forced Aligner、WhisperX、Qwen3-ASR、Qwen3-FA、NeMo Forced Aligner** 五种对齐方式，可根据不同需求选择不同算法。
+  内置 **Montreal Forced Aligner、WhisperX、Qwen3-ASR-1.7B、Qwen3-ForcedAligner-0.6B、NeMo Forced Aligner** 五种对齐方式，可根据不同需求选择不同算法。
   
 * **提供简洁易用的 Web 界面**
 
@@ -74,7 +74,7 @@
 ## 🛠️ 工作原理
 
 1. 输入音频文件与文本
-2. 使用 **[MFA](https://github.com/MontrealCorpusTools/Montreal-Forced-Aligner)** 进行自动时间对齐
+2. 使用 **[Qwen3-ForcedAligner-0.6B](https://github.com/QwenLM/Qwen3-ASR)** 进行自动时间对齐
 3. 生成 `.lab` 标注文件
 4. 使用 **[PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)** 提取 F0 音高
 5. 根据处理模式输出工程文件
@@ -106,11 +106,11 @@ http://127.0.0.1:5000
 ## 🔧 处理模式
 ### 1. 仅标注（快速）
 
-只进行 MFA 自动标注，生成 .lab 文件。
+只进行 Qwen3-FA 自动标注，生成 .lab 文件。
 
 ### 2. 完整处理（标注 + F0 + 工程文件）
 
-执行 MFA 对齐、F0 提取，并生成工程文件。
+执行 Qwen3-FA 对齐、F0 提取，并生成工程文件。
 
 ### 3. 仅生成工程（WAV + LAB）
 
@@ -130,7 +130,7 @@ Node.js 16+
 pip install montreal-forced-aligner
 ```
 
-# 下载语言模型
+# 下载 MFA 语言模型
 ```
 mfa model download acoustic cmn  # 中文
 mfa model download acoustic eng  # 英语
@@ -201,7 +201,7 @@ run.sh      Linux / Mac 启动脚本
 
 本项目用于以下用途：
 
-- 音频自动对齐（MFA）
+- 音频自动对齐（Qwen3-FA）
 - 音高提取（PyWORLD / F0）
 - 歌声合成工程文件生成
 
@@ -211,7 +211,7 @@ run.sh      Linux / Mac 启动脚本
 
 本工具仅作为“SVS 工作流辅助工具”，不具备以下能力：
 
-- 不进行语音合成（TTS / SVS）
+- 不进行歌声合成（SVS）
 - 不训练或修改声库模型
 - 不替代任何歌声合成软件
 
