@@ -3,7 +3,7 @@ THIRD-PARTY-NOTICES
 This repository includes third-party software and data packages in addition to the project source code.
 
 Project source code:
-- Repository: liuhua520-svg/gpt-sovits-mfa-aligner-tsubaki
+- Repository: liuhua520-svg/SVS-Lab-Tools
 - Upstream project license: MIT
 
 Keep this notice together with the project LICENSE file in any distribution.
@@ -14,7 +14,7 @@ Keep this notice together with the project LICENSE file in any distribution.
 
 The project itself is licensed under the MIT License.
 
-Copyright (c) 2026 xiaohuang12345-ts
+Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools)
 
 See the repository LICENSE file for the full text of the MIT License.
 
@@ -153,10 +153,22 @@ Based on backend/requirements.txt
   Link: https://github.com/SpotlightKid/mido
 
 === TTS模块 ===
-- edge-tts>=6.1.12
+- edge-tts >= 7.0
+  Copyright (c) 2014-2023 Christopher Down
   Copyright (c) 2025- rany <rany@riseup.net>
-  License: LGPL-3.0
+
+  License:
+  - LGPL-3.0 (all source files except srt_composer.py)
+  - MIT (src/edge_tts/srt_composer.py only)
+
   Link: https://github.com/rany2/edge-tts
+
+=== Windows 支持 ===
+
+- pywin32>=306; sys_platform == "win32"
+  Copyright (c) Mark Hammond et al.
+  License: PSF-2.0 (Python Software Foundation License)
+  Link: https://github.com/mhammond/pywin32
 
 === 其他 ===
 - requests
