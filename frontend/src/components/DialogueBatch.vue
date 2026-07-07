@@ -14,12 +14,23 @@
 
       <p class="page-subtitle">{{ t('dialogue.pageSubtitle') }}</p>
 
+      <!-- 输入模式：TTS跟读（讲述人 + EdgeTTS）/ 音频跟读（原有上传音频对齐流程） -->
+      <el-form label-position="top" class="shared-form">
+        <el-form-item :label="t('processor.inputModeLabel')">
+          <el-radio-group v-model="inputMode" :disabled="processing">
+            <el-radio value="tts">{{ t('processor.inputModeTts') }}</el-radio>
+            <el-radio value="audio">{{ t('processor.inputModeAudio') }}</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+
       <!-- ============== 共用高级设置（与单文件处理页面语义一致） ============== -->
       <el-form label-position="top" class="shared-form">
         <!-- 以下几项（对齐后端 / 对齐运行设备 / NeMo 模型覆盖 / 语言）仅在
              "完整处理"模式下生效——该模式需要执行对齐；"仅生成工程"模式
-             跳过对齐，直接使用已提供的 LAB / MIDI，故隐藏这些设置。 -->
-        <el-form-item v-if="processingMode === 'full'" :label="t('processor.backendLabel')">
+             跳过对齐，直接使用已提供的 LAB / MIDI，故隐藏这些设置。
+             TTS跟读模式固定使用 Qwen3-ForcedAligner，不显示后端选择器。 -->
+        <el-form-item v-if="inputMode === 'audio' && processingMode === 'full'" :label="t('processor.backendLabel')">
           <el-radio-group v-model="alignerBackend" :disabled="processing">
             <el-radio value="mfa">
               <span>{{ t('processor.backendMfa') }}</span>
@@ -54,12 +65,20 @@
           </el-radio-group>
         </el-form-item>
 
-        <el-form-item v-if="processingMode === 'full' && alignerBackend !== 'mfa'" :label="t('processor.alignDevice')">
+        <el-form-item v-if="inputMode === 'tts' || (processingMode === 'full' && alignerBackend !== 'mfa')" :label="t('processor.alignDevice')">
           <el-radio-group v-model="advanced.aligner_device" :disabled="processing">
             <el-radio value="auto">{{ t('processor.deviceAuto') }}</el-radio>
             <el-radio value="cpu">{{ t('processor.deviceCpu') }}</el-radio>
             <el-radio value="cuda">{{ t('processor.deviceCuda') }}</el-radio>
           </el-radio-group>
+        </el-form-item>
+
+        <el-form-item v-if="inputMode === 'tts'">
+          <el-alert :closable="false" type="info" :title="t('processor.ttsFixedBackendHint')" show-icon />
+        </el-form-item>
+
+        <el-form-item v-if="inputMode === 'tts'" :label="t('processor.manageNarrators')">
+          <el-button :disabled="processing" @click="openNarratorManager">⚙ {{ t('processor.manageNarrators') }}</el-button>
         </el-form-item>
 
         <el-form-item v-if="processingMode === 'full' && alignerBackend === 'whisperx'" :label="t('processor.whisperModel')">
@@ -72,6 +91,23 @@
             <el-option value="base" :label="t('processor.whisperModelBase')" />
             <el-option value="tiny" :label="t('processor.whisperModelTiny')" />
           </el-select>
+        </el-form-item>
+
+        <!-- WhisperX 批处理大小（仅 aligner_device=cuda 时对显存占用有实际意义；
+             CPU 模式下隐藏控件，提交时后端仍会收到默认值 16） -->
+        <el-form-item
+          v-if="processingMode === 'full' && alignerBackend === 'whisperx' && advanced.aligner_device === 'cuda'"
+          :label="t('processor.whisperxBatchSize')"
+        >
+          <el-input-number
+            v-model="advanced.whisperx_batch_size"
+            :disabled="processing"
+            :min="1"
+            :max="64"
+            :step="1"
+            style="width:160px"
+          />
+          <div class="help-text">⚠️ {{ t('processor.whisperxBatchSizeHint') }}</div>
         </el-form-item>
 
         <el-form-item v-if="processingMode === 'full' && alignerBackend === 'nemo_aligner'" :label="t('processor.nemoModel')">
@@ -103,12 +139,13 @@
         <!-- 处理模式：完整处理（对齐 + F0 + 工程文件）/ 仅生成工程（跳过对齐，
              直接使用每个对话框已提供的 LAB / MIDI）。 -->
         <el-form-item :label="t('dialogue.processingMode')">
-          <el-radio-group v-model="processingMode" :disabled="processing">
+          <el-radio-group v-model="processingMode" :disabled="processing || inputMode === 'tts'">
             <el-radio value="full">{{ t('dialogue.processingModeFull') }}</el-radio>
-            <el-radio value="project-only">{{ t('dialogue.processingModeProjectOnly') }}</el-radio>
+            <el-radio v-if="inputMode === 'audio'" value="project-only">{{ t('dialogue.processingModeProjectOnly') }}</el-radio>
           </el-radio-group>
           <div class="mode-help">
-            <small v-if="processingMode === 'full'">{{ t('dialogue.processingModeFullHint') }}</small>
+            <small v-if="inputMode === 'tts'">{{ t('processor.ttsProcessingModeHint') }}</small>
+            <small v-else-if="processingMode === 'full'">{{ t('dialogue.processingModeFullHint') }}</small>
             <small v-else>{{ t('dialogue.processingModeProjectOnlyHint') }}</small>
           </div>
         </el-form-item>
@@ -451,23 +488,116 @@
 
             <el-col :xs="24" :sm="12">
               <div class="panel-label">{{ t('dialogue.rightPanelLabel') }}</div>
-              <el-upload
-                :key="box.audioUploadKey"
-                drag
-                action="#"
-                :auto-upload="false"
-                :limit="1"
-                :disabled="processing"
-                :on-change="(f: any) => handleAudioSelect(box, f)"
-                accept=".wav,.mp3,.flac,.m4a,.aac,.ogg"
-                class="compact-upload"
-              >
-                <div class="el-upload__text">{{ t('dialogue.dragAudio') }}</div>
-              </el-upload>
-              <div v-if="box.audioFile" class="file-info">
-                🎵 {{ box.audioFile.name }} ({{ formatFileSize(box.audioFile.size) }})
-                <el-button link type="danger" size="small" :disabled="processing" @click="box.audioFile = null">✖</el-button>
-              </div>
+
+              <!-- TTS跟读：讲述人 / EdgeTTS 音色 / 语速·音调 / 预览播放，
+                   替代原有的"音频导入"拖拽区域（该框的音频由 EdgeTTS 当场合成）。 -->
+              <template v-if="inputMode === 'tts'">
+                <el-select
+                  v-model="box.ttsEngine"
+                  @change="(eng: string) => handleBoxEngineChange(box, eng)"
+                  size="small"
+                  :loading="ttsEnginesLoading"
+                  style="width: 100%"
+                  :disabled="processing"
+                  :placeholder="t('processor.ttsEnginePlaceholder')"
+                >
+                  <el-option
+                    v-for="eng in ttsEngines"
+                    :key="eng.id"
+                    :label="engineLabel(eng.id)"
+                    :value="eng.id"
+                    :disabled="!eng.available"
+                  >
+                    <span>{{ engineLabel(eng.id) }}</span>
+                    <span v-if="!eng.available" style="float: right; color: var(--el-color-danger); font-size: 12px; margin-left: 12px">
+                      {{ eng.message }}
+                    </span>
+                  </el-option>
+                </el-select>
+                <el-select
+                  v-model="box.ttsNarratorId"
+                  @change="(id: string) => handleBoxNarratorSelect(box, id)"
+                  filterable
+                  size="small"
+                  style="width: 100%; margin-top: 6px"
+                  :disabled="processing"
+                  :placeholder="t('processor.narratorCustom')"
+                >
+                  <el-option :label="t('processor.narratorCustom')" value="" />
+                  <el-option v-for="n in narratorsForEngine(box.ttsEngine)" :key="n.id" :label="n.name" :value="n.id" />
+                </el-select>
+                <el-select
+                  v-model="box.ttsVoice"
+                  filterable
+                  size="small"
+                  :loading="box.ttsVoicesLoading"
+                  style="width: 100%; margin-top: 6px"
+                  :disabled="processing"
+                  :placeholder="t('processor.ttsVoicePlaceholder')"
+                >
+                  <el-option v-for="v in box.ttsVoices" :key="v.id" :label="`${v.name} (${v.locale})`" :value="v.id" />
+                </el-select>
+				<div class="tts-box-sliders">
+				  <span class="tts-mini-label">{{ t('processor.ttsRate') }}</span>
+				  <el-input-number v-model="box.ttsRate" :min="-50" :max="100" size="small" :disabled="processing" controls-position="right" style="width: 90px" />
+
+				  <span class="tts-mini-label">{{ t('processor.ttsPitch') }}</span>
+				  <el-input-number v-model="box.ttsPitch" :min="-50" :max="50" size="small" :disabled="processing" controls-position="right" style="width: 90px" />
+
+				  <span class="tts-mini-label">{{ t('processor.ttsVolume') }}</span>
+				  <el-input-number v-model="box.ttsVolume" :min="-50" :max="50" size="small" :disabled="processing" controls-position="right" style="width: 90px" />
+				</div>
+                <!-- 手动分段预览：只在点击按钮时把该框完整文本按句合成
+                     （不做对齐）；生成期间共享的"开始处理"按钮会被禁用，
+                     生成完成后点击"开始处理"会直接复用这份分句音频去
+                     对齐。若在生成预览后又改动了该框文本/引擎/音色/
+                     语速/音调/音量，这份预览会失效，"开始处理"会退回
+                     "先合成再对齐"的完整流程（仅针对这一个框）。 -->
+                <div style="margin-top: 6px">
+                  <el-button
+                    size="small"
+                    :loading="box.ttsSegmentPreviewLoading"
+                    :disabled="processing || !box.ttsVoice || !box.text.trim()"
+                    @click="runBoxSegmentPreview(box)"
+                  >
+                    🔄 {{ box.ttsSegmentPreviewUrl ? t('processor.ttsRegeneratePreview') : t('processor.ttsGeneratePreview') }}
+                  </el-button>
+                  <audio v-if="box.ttsSegmentPreviewUrl" :src="box.ttsSegmentPreviewUrl" controls style="height: 28px; margin-left: 8px; vertical-align: middle" />
+                  <div v-if="box.ttsSegmentPreviewSentenceCount && !box.ttsSegmentPreviewError" style="margin-top: 4px">
+                    <el-text type="info" size="small">
+                      {{ t('processor.ttsSegmentPreviewCount', { count: box.ttsSegmentPreviewSentenceCount }) }}
+                    </el-text>
+                  </div>
+                  <div v-if="box.ttsSegmentPreviewWarnings.length" style="margin-top: 4px">
+                    <el-text type="warning" size="small">
+                      {{ t('processor.ttsSegmentPreviewWarnings') }} ({{ box.ttsSegmentPreviewWarnings.length }})
+                    </el-text>
+                  </div>
+                  <div v-if="box.ttsSegmentPreviewError" style="margin-top: 4px">
+                    <el-text type="danger" size="small">{{ box.ttsSegmentPreviewError }}</el-text>
+                  </div>
+                </div>
+              </template>
+
+              <template v-else>
+                <el-upload
+                  :key="box.audioUploadKey"
+                  drag
+                  action="#"
+                  :auto-upload="false"
+                  :limit="1"
+                  :disabled="processing"
+                  :on-change="(f: any) => handleAudioSelect(box, f)"
+                  accept=".wav,.mp3,.flac,.m4a,.aac,.ogg"
+                  class="compact-upload"
+                >
+                  <div class="el-upload__text">{{ t('dialogue.dragAudio') }}</div>
+                </el-upload>
+                <div v-if="box.audioFile" class="file-info">
+                  🎵 {{ box.audioFile.name }} ({{ formatFileSize(box.audioFile.size) }})
+                  <el-button link type="danger" size="small" :disabled="processing" @click="box.audioFile = null">✖</el-button>
+                </div>
+              </template>
             </el-col>
           </el-row>
 
@@ -492,7 +622,12 @@
         </el-button>
         <el-button v-if="processing" @click="stopProcessing">⏹ {{ t('dialogue.stopProcessing') }}</el-button>
         <span v-if="isSubmitDisabled && !processing" class="disabled-text">
-          <template v-if="!boxes.some((b) => b.audioFile)">
+          <template v-if="inputMode === 'tts'">
+            <template v-if="!boxes.some((b) => b.text.trim() && b.ttsVoice)">
+              ({{ t('dialogue.ttsEmptyBoxesWarning') }})
+            </template>
+          </template>
+          <template v-else-if="!boxes.some((b) => b.audioFile)">
             ({{ t('dialogue.emptyBoxesWarning') }})
           </template>
           <template v-else-if="processingMode === 'project-only'">
@@ -527,6 +662,57 @@
       <div v-if="topError" class="error-section">
         <el-alert :title="topError" type="error" :closable="true" show-icon @close="topError = ''" />
       </div>
+
+      <!-- 语音预设管理弹窗：新增 / 编辑 / 删除；音色列表跟随本弹窗内选择的
+           引擎（narratorFormVoices），与每个对话框各自的 box.ttsVoices 互相独立 -->
+      <el-dialog v-model="narratorManagerVisible" :title="t('processor.manageNarrators')" width="520px">
+        <el-table :data="narrators" size="small" style="margin-bottom: 16px" max-height="240">
+          <el-table-column prop="name" :label="t('processor.narratorName')" width="110" />
+          <el-table-column :label="t('processor.ttsEngine')" width="90">
+            <template #default="{ row }">{{ engineLabel(row.engine) }}</template>
+          </el-table-column>
+          <el-table-column prop="voice" :label="t('processor.ttsVoice')" show-overflow-tooltip />
+          <el-table-column width="110">
+            <template #default="{ row }">
+              <el-button link size="small" @click="editNarrator(row)">{{ t('processor.edit') }}</el-button>
+              <el-button link size="small" type="danger" @click="deleteNarratorItem(row.id)">{{ t('processor.delete') }}</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <el-form label-position="top">
+          <el-form-item :label="t('processor.narratorName')">
+            <el-input v-model="narratorForm.name" :placeholder="t('processor.narratorNamePlaceholder')" />
+          </el-form-item>
+          <el-form-item :label="t('processor.ttsEngine')">
+            <el-select v-model="narratorForm.engine" style="width: 100%" :placeholder="t('processor.ttsEnginePlaceholder')">
+              <el-option
+                v-for="eng in ttsEngines"
+                :key="eng.id"
+                :label="engineLabel(eng.id)"
+                :value="eng.id"
+                :disabled="!eng.available"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item :label="t('processor.ttsVoice')">
+            <el-select
+              v-model="narratorForm.voice"
+              filterable
+              :loading="narratorFormVoicesLoading"
+              style="width: 100%"
+              :placeholder="t('processor.ttsVoicePlaceholder')"
+            >
+              <el-option v-for="v in narratorFormVoices" :key="v.id" :label="`${v.name} (${v.locale})`" :value="v.id" />
+            </el-select>
+          </el-form-item>
+        </el-form>
+
+        <template #footer>
+          <el-button @click="resetNarratorForm">{{ t('processor.reset') }}</el-button>
+          <el-button type="primary" :loading="narratorSaving" @click="saveNarrator">{{ t('processor.save') }}</el-button>
+        </template>
+      </el-dialog>
     </el-card>
   </div>
 </template>
@@ -536,7 +722,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 // ============== 类型 ==============
 type BoxStatus = 'idle' | 'queued' | 'processing' | 'done' | 'failed' | 'skipped_empty' | 'skipped_no_notation'
@@ -551,6 +737,29 @@ interface DialogueBox {
   audioUploadKey: number
   status: BoxStatus
   error: string
+  // ── TTS跟读专属（inputMode='tts' 时生效，替代 audioFile） ──────────
+  ttsNarratorId: string   // 语音预设 id，空字符串表示"自定义"（手动选引擎+音色）
+  ttsEngine: string       // 选择的 TTS 引擎（讲述人 / EdgeTTS / 未来可扩展），每个对话框可独立选择
+  ttsVoice: string        // 该引擎下的音色 id
+  ttsVoices: TtsVoice[]   // 该框当前引擎可用的音色列表（每框独立，不与其它框共用，
+                          // 避免"框A切到讲述人后框B的音色列表也被顶掉"的串扰）
+  ttsVoicesLoading: boolean
+  ttsRate: number         // 语速，百分比增量，如 10 → "+10%"
+  ttsPitch: number        // 音调，Hz 增量，如 -5 → "-5Hz"
+  ttsVolume: number       // 音量，百分比增量
+  ttsPreviewUrl: string
+  ttsPreviewLoading: boolean
+  // ── 手动分段预览（与上面的"试听音色"按钮是两回事）：点击后调用
+  // /api/tts/synthesize_preview 把该框的完整文本按句合成好，不做
+  // Qwen3-FA 对齐；返回的 previewId 若在点击"开始处理"时仍然有效
+  // （文本/引擎/音色/语速/音调/音量都未再变化），后端会直接复用这份
+  // 分句音频去对齐，不会重新合成一遍。
+  ttsSegmentPreviewLoading: boolean
+  ttsSegmentPreviewUrl: string
+  ttsSegmentPreviewId: string
+  ttsSegmentPreviewSentenceCount: number
+  ttsSegmentPreviewWarnings: string[]
+  ttsSegmentPreviewError: string
 }
 
 interface AdvancedConfig {
@@ -562,6 +771,7 @@ interface AdvancedConfig {
   f0_device: 'auto' | 'cpu' | 'cuda'
   aligner_device: 'auto' | 'cpu' | 'cuda'
   whisperx_model: string
+  whisperx_batch_size: number
   nemo_model: string
   crepe_model: 'full' | 'tiny'
   precision: 'single' | 'double'
@@ -576,6 +786,37 @@ interface AdvancedConfig {
 const alignerBackend = ref<string>('mfa')
 const alignerStatus = ref<Record<string, any>>({})
 const checkingStatus = ref(false)
+
+// 输入模式：TTS跟读（讲述人 + EdgeTTS，每个对话框不再上传音频，而是选择
+// 音色由 EdgeTTS 合成）/ 音频跟读（原有的每框上传音频对齐流程）。
+type TtsNarrator = { id: string; name: string; engine?: string; voice: string; rate: string; pitch: string; volume: string; language?: string }
+type TtsVoice = { id: string; name: string; gender?: string; locale: string }
+type TtsEngine = { id: string; label: string; label_zh: string; available: boolean; message: string }
+
+const inputMode = ref<'audio' | 'tts'>('audio')
+const narrators = ref<TtsNarrator[]>([])
+const ttsEngines = ref<TtsEngine[]>([])
+const ttsEnginesLoading = ref(false)
+const narratorManagerVisible = ref(false)
+const narratorForm = ref<TtsNarrator>({ id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%' })
+const narratorSaving = ref(false)
+// 语音预设管理对话框内的音色列表：跟随对话框内正在编辑的 narratorForm.engine，
+// 与每个对话框各自的 box.ttsVoices 互相独立，避免串扰（同 MFAProcessor.vue）。
+const narratorFormVoices = ref<TtsVoice[]>([])
+const narratorFormVoicesLoading = ref(false)
+
+// 引擎中/英文名按当前界面语言展示，"选择 TTS"下拉框、语音预设管理对话框、
+// 预设列表的引擎列都复用这一个函数。
+const engineLabel = (id?: string): string => {
+  const eng = ttsEngines.value.find(e => e.id === id)
+  if (!eng) return id || ''
+  return locale.value.startsWith('zh') ? eng.label_zh : eng.label
+}
+
+// 某个引擎下可选的语音预设列表（每个对话框各自的引擎可能不同，因此按引擎
+// 过滤为一个函数而非单一 computed，避免所有框共用同一份"当前引擎"）。
+const narratorsForEngine = (engine: string) =>
+  narrators.value.filter(n => (n.engine || 'edge_tts') === engine)
 
 const sharedLanguage = ref('cmn')
 const englishWordAlign = ref(false)
@@ -611,6 +852,7 @@ const advanced = ref<AdvancedConfig>({
   f0_device: 'auto',
   aligner_device: 'auto',
   whisperx_model: 'large-v3',
+  whisperx_batch_size: 16,
   nemo_model: '',
   crepe_model: 'full',
   precision: 'double',
@@ -655,6 +897,17 @@ watch(sharedLanguage, (lang) => {
   if (lang === 'jpn') {
     englishWordAlign.value = false
     wordPhonemeMap.value = false
+  }
+  if (inputMode.value === 'tts') fetchAllBoxTtsVoices()
+})
+
+// TTS跟读模式下没有"复用已有音频"的概念（音频当场合成），不存在
+// "仅生成工程"这种依赖已有音频的模式，切换到 TTS 跟读时强制回到"完整处理"。
+watch(inputMode, (mode) => {
+  if (mode === 'tts') {
+    processingMode.value = 'full'
+    fetchTtsEngines()
+    fetchAllBoxTtsVoices()
   }
 })
 
@@ -703,6 +956,277 @@ const fetchDictionaries = async () => {
   }
 }
 
+// ============== TTS跟读（讲述人 + EdgeTTS）辅助函数 ==============
+
+const fetchTtsEngines = async () => {
+  ttsEnginesLoading.value = true
+  try {
+    const res = await fetch('/api/tts/engines')
+    const data = await res.json()
+    if (data.success) {
+      ttsEngines.value = data.engines || []
+      // 兜底：新拉取的引擎列表里如果没有某个框当前用的引擎（几乎不会发生），
+      // 让它落回第一个可用引擎，避免卡在一个后端已不再声明支持的引擎上。
+      const validIds = new Set(ttsEngines.value.map(e => e.id))
+      boxes.value.forEach(box => {
+        if (!validIds.has(box.ttsEngine)) {
+          const firstAvailable = ttsEngines.value.find(e => e.available)
+          box.ttsEngine = (firstAvailable || ttsEngines.value[0])?.id || 'edge_tts'
+        }
+      })
+    }
+  } catch (e) {
+    console.error('获取 TTS 引擎列表失败', e)
+  } finally {
+    ttsEnginesLoading.value = false
+  }
+}
+
+// 每个对话框的音色列表独立获取、独立存放（box.ttsVoices），跟随该框自己的
+// ttsEngine，不与其它框或语音预设管理对话框共用列表——避免"切换框A的引擎
+// 后，框B的音色下拉也被联动清空/替换"这类串扰。
+const fetchBoxTtsVoices = async (box: DialogueBox, engine?: string) => {
+  const eng = engine || box.ttsEngine || 'edge_tts'
+  box.ttsVoicesLoading = true
+  try {
+    const res = await fetch(`/api/tts/voices?engine=${encodeURIComponent(eng)}&language=${encodeURIComponent(sharedLanguage.value)}`)
+    const data = await res.json()
+    if (data.success) {
+      box.ttsVoices = data.voices || []
+      if (box.ttsVoice && !box.ttsVoices.some(v => v.id === box.ttsVoice)) {
+        box.ttsVoice = ''
+      }
+    } else {
+      box.ttsVoices = []
+      if (data.error) ElMessage.error(`❌ ${data.error}`)
+    }
+  } catch (e) {
+    console.error('获取音色列表失败', e)
+  } finally {
+    box.ttsVoicesLoading = false
+  }
+}
+
+const fetchAllBoxTtsVoices = () => {
+  boxes.value.forEach(box => fetchBoxTtsVoices(box, box.ttsEngine))
+}
+
+// 切换某个对话框的"选择 TTS"引擎：清空该框当前音色（不同引擎音色 ID 体系
+// 不通用）并按新引擎重新拉取该框的音色列表；只影响这一个框。
+const handleBoxEngineChange = (box: DialogueBox, engine: string) => {
+  box.ttsVoice = ''
+  fetchBoxTtsVoices(box, engine)
+}
+
+const fetchNarratorFormVoices = async (engine: string) => {
+  narratorFormVoicesLoading.value = true
+  try {
+    const res = await fetch(`/api/tts/voices?engine=${encodeURIComponent(engine)}&language=${encodeURIComponent(sharedLanguage.value)}`)
+    const data = await res.json()
+    if (data.success) {
+      narratorFormVoices.value = data.voices || []
+      if (narratorForm.value.voice && !narratorFormVoices.value.some(v => v.id === narratorForm.value.voice)) {
+        narratorForm.value.voice = ''
+      }
+    } else {
+      narratorFormVoices.value = []
+      if (data.error) ElMessage.error(`❌ ${data.error}`)
+    }
+  } catch (e) {
+    console.error('获取语音预设音色列表失败', e)
+  } finally {
+    narratorFormVoicesLoading.value = false
+  }
+}
+
+// 对话框内切换"选择 TTS"引擎时，同步刷新该引擎下的音色列表；只在语音预设
+// 管理对话框打开期间生效。
+watch(() => narratorForm.value.engine, (engine) => {
+  if (narratorManagerVisible.value && engine) fetchNarratorFormVoices(engine)
+})
+
+const fetchNarrators = async () => {
+  try {
+    const res = await fetch('/api/tts/narrators')
+    const data = await res.json()
+    if (data.success) narrators.value = data.narrators || []
+  } catch (e) {
+    console.error('获取讲述人列表失败', e)
+  }
+}
+
+const handleBoxNarratorSelect = async (box: DialogueBox, narratorId: string) => {
+  if (!narratorId) return
+  const n = narrators.value.find((x) => x.id === narratorId)
+  if (!n) return
+  const engine = n.engine || 'edge_tts'
+  if (engine !== box.ttsEngine) {
+    box.ttsEngine = engine
+    await fetchBoxTtsVoices(box, engine)
+  }
+  box.ttsVoice = n.voice
+  box.ttsRate = parseInt(n.rate) || 0
+  box.ttsPitch = parseInt(n.pitch) || 0
+  box.ttsVolume = parseInt(n.volume) || 0
+}
+
+const previewBoxTts = async (box: DialogueBox) => {
+  if (!box.ttsVoice) {
+    ElMessage.warning(t('processor.ttsVoiceRequired'))
+    return
+  }
+  box.ttsPreviewLoading = true
+  try {
+    const previewText = (box.text || '').trim() || t('processor.ttsPreviewDefaultText')
+    const res = await fetch('/api/tts/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: previewText,
+        engine: box.ttsEngine,
+        voice: box.ttsVoice,
+        rate: `${box.ttsRate >= 0 ? '+' : ''}${box.ttsRate}%`,
+        pitch: `${box.ttsPitch >= 0 ? '+' : ''}${box.ttsPitch}Hz`,
+        volume: `${box.ttsVolume >= 0 ? '+' : ''}${box.ttsVolume}%`,
+      }),
+    })
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}))
+      throw new Error(errData.error || t('processor.submitFailed'))
+    }
+    const blob = await res.blob()
+    if (box.ttsPreviewUrl) URL.revokeObjectURL(box.ttsPreviewUrl)
+    box.ttsPreviewUrl = URL.createObjectURL(blob)
+  } catch (e: any) {
+    ElMessage.error(`❌ ${e?.message || String(e)}`)
+  } finally {
+    box.ttsPreviewLoading = false
+  }
+}
+
+// ── 手动分段预览（每个对话框独立）──────────────────────────────────
+// 只在用户点击该框的"生成预览"按钮时触发：按句末标点分段 → 逐句合成，
+// 返回完整拼接后的音频供试听，不做 Qwen3-FA 对齐，也不截断句子数量。
+// 生成成功后拿到的 ttsSegmentPreviewId 会在点击共享的"开始处理"按钮时
+// 一并提交；只要该框的文本/引擎/音色/语速/音调/音量之后没有变化，后端
+// 会直接复用这份分句音频去对齐，不会重新合成一遍。
+let boxSegmentPreviewSeq = 0
+const runBoxSegmentPreview = async (box: DialogueBox) => {
+  const text = (box.text || '').trim()
+  if (!text || !box.ttsVoice) return
+
+  const mySeq = ++boxSegmentPreviewSeq
+  box.ttsSegmentPreviewLoading = true
+  box.ttsSegmentPreviewError = ''
+  try {
+    const res = await fetch('/api/tts/synthesize_preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        language: sharedLanguage.value,
+        engine: box.ttsEngine,
+        voice: box.ttsVoice,
+        rate: `${box.ttsRate >= 0 ? '+' : ''}${box.ttsRate}%`,
+        pitch: `${box.ttsPitch >= 0 ? '+' : ''}${box.ttsPitch}Hz`,
+        volume: `${box.ttsVolume >= 0 ? '+' : ''}${box.ttsVolume}%`,
+      }),
+    })
+    const data = await res.json()
+    // 用户可能在等待响应期间又点了一次（同一个框或另一个框）——更旧的
+    // 响应回来时不应该覆盖较新的结果；这里用全局递增序号而非按框区分，
+    // 足够避免同一个框内的乱序覆盖（不同框之间互不影响各自的状态字段）。
+    if (mySeq !== boxSegmentPreviewSeq && box.ttsSegmentPreviewLoading === false) return
+
+    if (!data.success) {
+      box.ttsSegmentPreviewLoading = false
+      box.ttsSegmentPreviewUrl = ''
+      box.ttsSegmentPreviewId = ''
+      box.ttsSegmentPreviewSentenceCount = 0
+      box.ttsSegmentPreviewWarnings = []
+      box.ttsSegmentPreviewError = data.error || t('processor.ttsSegmentPreviewFailed')
+      return
+    }
+
+    if (box.ttsSegmentPreviewUrl) URL.revokeObjectURL(box.ttsSegmentPreviewUrl)
+    const blob = await (await fetch(`data:audio/wav;base64,${data.audio_base64}`)).blob()
+    box.ttsSegmentPreviewUrl = URL.createObjectURL(blob)
+    box.ttsSegmentPreviewId = data.preview_id || ''
+    box.ttsSegmentPreviewSentenceCount = data.sentence_count || 0
+    box.ttsSegmentPreviewWarnings = data.warnings || []
+    box.ttsSegmentPreviewError = ''
+  } catch (e: any) {
+    box.ttsSegmentPreviewUrl = ''
+    box.ttsSegmentPreviewId = ''
+    box.ttsSegmentPreviewSentenceCount = 0
+    box.ttsSegmentPreviewWarnings = []
+    box.ttsSegmentPreviewError = e?.message || String(e)
+  } finally {
+    box.ttsSegmentPreviewLoading = false
+  }
+}
+
+// 每个框的文本 / 引擎 / 音色 / 语速·音调·音量任一变化都会让已生成的
+// 分段预览音频与当前输入不再对应——清空该框的 previewId 让"开始处理"
+// 对这一个框退回"先合成再对齐"的完整流程，而不是悄悄拿旧音频去对齐
+// 新文本。这里只清空 previewId（保留试听音频/句数展示），生成新预览
+// 仍需用户手动点击按钮触发。用一个按框缓存的"签名"字符串来判断是否
+// 变化，避免共享语种切换或其它无关框的变化互相影响。
+// （watch 本身需要在 boxes 声明之后才能建立，定义见下方 boxes 声明处）
+const _boxSegmentPreviewSignatures = new Map<number, string>()
+const _boxSegmentPreviewSignature = (box: DialogueBox, language: string) =>
+  JSON.stringify([box.text, box.ttsEngine, box.ttsVoice, box.ttsRate, box.ttsPitch, box.ttsVolume, language])
+
+const openNarratorManager = () => {
+  narratorManagerVisible.value = true
+  fetchNarratorFormVoices(narratorForm.value.engine || 'edge_tts')
+}
+
+const editNarrator = (n: TtsNarrator) => {
+  narratorForm.value = { engine: 'edge_tts', ...n }
+  fetchNarratorFormVoices(narratorForm.value.engine || 'edge_tts')
+}
+
+const resetNarratorForm = () => {
+  narratorForm.value = { id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%' }
+  fetchNarratorFormVoices('edge_tts')
+}
+
+const saveNarrator = async () => {
+  if (!narratorForm.value.name.trim() || !narratorForm.value.voice) {
+    ElMessage.warning(t('processor.narratorNameVoiceRequired'))
+    return
+  }
+  narratorSaving.value = true
+  try {
+    const res = await fetch('/api/tts/narrators', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...narratorForm.value, language: sharedLanguage.value }),
+    })
+    const data = await res.json()
+    if (!data.success) throw new Error(data.error || t('processor.submitFailed'))
+    await fetchNarrators()
+    resetNarratorForm()
+    ElMessage.success(`✅ ${t('processor.success')}`)
+  } catch (e: any) {
+    ElMessage.error(`❌ ${e?.message || String(e)}`)
+  } finally {
+    narratorSaving.value = false
+  }
+}
+
+const deleteNarratorItem = async (narratorId: string) => {
+  try {
+    const res = await fetch(`/api/tts/narrators/${narratorId}`, { method: 'DELETE' })
+    const data = await res.json()
+    if (!data.success) throw new Error(data.error || t('processor.submitFailed'))
+    await fetchNarrators()
+  } catch (e: any) {
+    ElMessage.error(`❌ ${e?.message || String(e)}`)
+  }
+}
+
 // ============== 对话框列表 ==============
 let boxIdCounter = 0
 const createBox = (): DialogueBox => ({
@@ -715,9 +1239,49 @@ const createBox = (): DialogueBox => ({
   audioUploadKey: 0,
   status: 'idle',
   error: '',
+  ttsNarratorId: '',
+  ttsEngine: 'edge_tts',
+  ttsVoice: '',
+  ttsVoices: [],
+  ttsVoicesLoading: false,
+  ttsRate: 0,
+  ttsPitch: 0,
+  ttsVolume: 0,
+  ttsPreviewUrl: '',
+  ttsPreviewLoading: false,
+  ttsSegmentPreviewLoading: false,
+  ttsSegmentPreviewUrl: '',
+  ttsSegmentPreviewId: '',
+  ttsSegmentPreviewSentenceCount: 0,
+  ttsSegmentPreviewWarnings: [],
+  ttsSegmentPreviewError: '',
 })
 
 const boxes = ref<DialogueBox[]>([createBox()])
+
+// 分段预览失效判定 watch（定义见上方 _boxSegmentPreviewSignature 注释）：
+// 必须放在 boxes 声明之后，否则会在 <script setup> 顶层执行阶段抛出
+// "used before its declaration" 的运行时错误，导致整个组件挂载失败、
+// 页面空白。
+watch(
+  [boxes, sharedLanguage],
+  ([currentBoxes, language]) => {
+    for (const box of currentBoxes) {
+      const sig = _boxSegmentPreviewSignature(box, language)
+      const prevSig = _boxSegmentPreviewSignatures.get(box.id)
+      if (prevSig !== undefined && prevSig !== sig && box.ttsSegmentPreviewId) {
+        box.ttsSegmentPreviewId = ''
+      }
+      _boxSegmentPreviewSignatures.set(box.id, sig)
+    }
+    // 清理已删除对话框留下的签名缓存，避免无限增长。
+    const liveIds = new Set(currentBoxes.map((b) => b.id))
+    for (const id of _boxSegmentPreviewSignatures.keys()) {
+      if (!liveIds.has(id)) _boxSegmentPreviewSignatures.delete(id)
+    }
+  },
+  { deep: true, immediate: true },
+)
 
 const MAX_BOXES = 64
 
@@ -726,7 +1290,9 @@ const addBox = () => {
     ElMessage.warning(`Maximum ${MAX_BOXES} rows`)
     return
   }
-  boxes.value.push(createBox())
+  const box = createBox()
+  boxes.value.push(box)
+  if (inputMode.value === 'tts') fetchBoxTtsVoices(box, box.ttsEngine)
 }
 
 const removeBox = (index: number) => {
@@ -975,6 +1541,10 @@ let pollActive = false
 // 否则全部对话框都会被跳过、无法生成任何音轨（与后端校验一致）。
 const isSubmitDisabled = computed(() => {
   if (processing.value) return true
+  if (boxes.value.some((b) => b.ttsSegmentPreviewLoading)) return true
+  if (inputMode.value === 'tts') {
+    return !boxes.value.some((b) => b.text.trim() && b.ttsVoice)
+  }
   if (!boxes.value.some((b) => b.audioFile)) return true
   if (processingMode.value === 'project-only') {
     return !boxes.value.some((b) => b.audioFile && (b.labFile || b.midiFile))
@@ -985,13 +1555,35 @@ const isSubmitDisabled = computed(() => {
 const buildFormData = (): FormData => {
   const fd = new FormData()
   fd.append('box_count', String(boxes.value.length))
+  fd.append('input_mode', inputMode.value)
   boxes.value.forEach((box, i) => {
     if (box.text.trim()) fd.append(`text_${i}`, box.text)
-    if (box.audioFile) fd.append(`audio_${i}`, box.audioFile)
-    // LAB 优先级高于 MID：同一个对话框里两者互斥（单一文件槽位），
-    // 因此这里最多只会有其中一个被提交。
-    if (box.labFile) fd.append(`lab_${i}`, box.labFile)
-    else if (box.midiFile) fd.append(`mid_${i}`, box.midiFile)
+
+    if (inputMode.value === 'tts') {
+      if (box.text.trim() && box.ttsVoice) {
+        fd.append(`tts_text_${i}`, box.text)
+        fd.append(`tts_engine_${i}`, box.ttsEngine)
+        fd.append(`tts_voice_${i}`, box.ttsVoice)
+        fd.append(`tts_rate_${i}`, `${box.ttsRate >= 0 ? '+' : ''}${box.ttsRate}%`)
+        fd.append(`tts_pitch_${i}`, `${box.ttsPitch >= 0 ? '+' : ''}${box.ttsPitch}Hz`)
+        fd.append(`tts_volume_${i}`, `${box.ttsVolume >= 0 ? '+' : ''}${box.ttsVolume}%`)
+        // 若之前手动点过这一框的"生成预览"且之后未再改动文本/参数，
+        // ttsSegmentPreviewId 仍然有效——带给后端复用已经合成好的分句
+        // 音频，跳过重新合成直接对齐；否则是空字符串，该框退回"先合成
+        // 再对齐"的完整流程。
+        fd.append(`tts_preview_id_${i}`, box.ttsSegmentPreviewId)
+      }
+      // TTS 模式下极少见但仍保留兼容：若该框另外手动提供了 LAB/MIDI，
+      // 后端会优先沿用它，不用 TTS 自动对齐结果覆盖（见 app.py 注释）。
+      if (box.labFile) fd.append(`lab_${i}`, box.labFile)
+      else if (box.midiFile) fd.append(`mid_${i}`, box.midiFile)
+    } else {
+      if (box.audioFile) fd.append(`audio_${i}`, box.audioFile)
+      // LAB 优先级高于 MID：同一个对话框里两者互斥（单一文件槽位），
+      // 因此这里最多只会有其中一个被提交。
+      if (box.labFile) fd.append(`lab_${i}`, box.labFile)
+      else if (box.midiFile) fd.append(`mid_${i}`, box.midiFile)
+    }
   })
 
   fd.append('language', sharedLanguage.value)
@@ -1019,7 +1611,9 @@ const buildFormData = (): FormData => {
   fd.append('f0_device', advanced.value.f0_device)
   fd.append('crepe_model', advanced.value.crepe_model)
   fd.append('aligner_backend', alignerBackend.value)
+  fd.append('aligner_device', advanced.value.aligner_device)
   fd.append('whisperx_model', advanced.value.whisperx_model)
+  fd.append('whisperx_batch_size', String(advanced.value.whisperx_batch_size))
   fd.append('nemo_model', advanced.value.nemo_model || '')
   fd.append(
     'english_word_align',
@@ -1151,6 +1745,13 @@ const startProcessing = async () => {
     if (!res.ok || !data.success) throw new Error(data.error || t('processor.submitFailed'))
 
     await pollJob(data.job_id)
+    // 后端一旦读取某个框的 tts_preview_id_{i} 就会立刻把那条缓存记录
+    // 消费掉（无论最终对齐是否成功），所以这里统一清空所有框的
+    // ttsSegmentPreviewId——避免用户不改文本、直接再点一次"开始处理"
+    // 时，前端还误以为存在可复用的预览音频。
+    boxes.value.forEach((b) => {
+      if (b.ttsSegmentPreviewId) b.ttsSegmentPreviewId = ''
+    })
   } catch (e: any) {
     topError.value = e?.message || String(e)
     ElMessage.error(`❌ ${topError.value}`)
@@ -1194,6 +1795,7 @@ const downloadResult = async () => {
 onMounted(() => {
   refreshStatus()
   fetchDictionaries()
+  fetchNarrators()
 })
 </script>
 
@@ -1334,6 +1936,20 @@ onMounted(() => {
 
 .compact-upload :deep(.el-upload-dragger) {
   padding: 14px 10px;
+}
+
+.tts-box-sliders {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.tts-mini-label {
+  font-size: 12px;
+  color: #909399;
+  white-space: nowrap;
 }
 
 .box-error {

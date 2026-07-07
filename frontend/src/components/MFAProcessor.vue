@@ -24,7 +24,15 @@
       </template>
 
       <el-form :model="formData" label-position="top" class="processor-form">
-        <el-form-item :label="t('processor.audioFile')">
+        <!-- 输入模式：TTS跟读（讲述人 + EdgeTTS）/ 音频跟读（原有上传音频对齐流程） -->
+        <el-form-item :label="t('processor.inputModeLabel')">
+          <el-radio-group v-model="inputMode" @change="handleInputModeChange">
+            <el-radio value="tts">{{ t('processor.inputModeTts') }}</el-radio>
+            <el-radio value="audio">{{ t('processor.inputModeAudio') }}</el-radio>
+          </el-radio-group>
+        </el-form-item>
+
+        <el-form-item v-if="inputMode === 'audio'" :label="t('processor.audioFile')">
           <el-upload
             :key="audioUploadKey"
             drag
@@ -50,8 +58,172 @@
           </div>
         </el-form-item>
 
-        <!-- 对齐后端选择器（project-only 模式不需要对齐） -->
-        <el-form-item v-if="processingMode !== 'project-only'" :label="t('processor.backendLabel')">
+        <!-- TTS跟读专属面板：讲述人 / EdgeTTS 音色 / 语速·音调·音量 / 预览
+             （对应"音频跟读"下的音频上传区域；TTS跟读用合成语音代替上传音频） -->
+        <template v-if="inputMode === 'tts'">
+          <!-- 选择 TTS：引擎本身（讲述人 = Windows 内置 TTS / EdgeTTS / 未来可扩展），
+               与下面的"语音预设"是两个不同层面——预设只是"引擎+音色+参数"的命名快捷方式。 -->
+          <el-form-item :label="t('processor.ttsEngine')">
+            <el-select
+              v-model="ttsConfig.engine"
+              :loading="ttsEnginesLoading"
+              style="width: 220px"
+              :placeholder="t('processor.ttsEnginePlaceholder')"
+            >
+              <el-option
+                v-for="eng in ttsEngines"
+                :key="eng.id"
+                :label="engineLabel(eng.id)"
+                :value="eng.id"
+                :disabled="!eng.available"
+              >
+                <span>{{ engineLabel(eng.id) }}</span>
+                <span v-if="!eng.available" style="float: right; color: var(--el-color-danger); font-size: 12px; margin-left: 12px">
+                  {{ eng.message }}
+                </span>
+              </el-option>
+            </el-select>
+          </el-form-item>
+
+          <el-form-item :label="t('processor.narrator')">
+            <el-select
+              v-model="ttsConfig.narratorId"
+              @change="handleNarratorSelect"
+              filterable
+              style="width: 240px"
+              :placeholder="t('processor.narratorCustom')"
+            >
+              <el-option :label="t('processor.narratorCustom')" value="" />
+              <el-option v-for="n in filteredNarrators" :key="n.id" :label="n.name" :value="n.id" />
+            </el-select>
+            <el-button link type="primary" @click="openNarratorManager" style="margin-left: 8px">
+              ⚙ {{ t('processor.manageNarrators') }}
+            </el-button>
+          </el-form-item>
+
+          <el-form-item :label="t('processor.ttsVoice')">
+            <el-select
+              v-model="ttsConfig.voice"
+              filterable
+              :loading="ttsVoicesLoading"
+              style="width: 320px"
+              :placeholder="t('processor.ttsVoicePlaceholder')"
+            >
+              <el-option v-for="v in ttsVoices" :key="v.id" :label="`${v.name} (${v.locale})`" :value="v.id" />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item :label="t('processor.ttsRate')">
+            <el-slider v-model="ttsConfig.rateNum" :min="-50" :max="100" show-input style="max-width: 420px" />
+          </el-form-item>
+          <el-form-item :label="t('processor.ttsPitch')">
+            <el-slider v-model="ttsConfig.pitchNum" :min="-50" :max="50" show-input style="max-width: 420px" />
+          </el-form-item>
+          <el-form-item v-if="ttsConfig.engine === 'windows_sapi'">
+            <el-alert :closable="false" type="info" :title="t('processor.ttsPitchBestEffortHint')" show-icon />
+          </el-form-item>
+          <el-form-item :label="t('processor.ttsVolume')">
+            <el-slider v-model="ttsConfig.volumeNum" :min="-50" :max="50" show-input style="max-width: 420px" />
+          </el-form-item>
+
+          <!-- 手动分段预览：不再随输入自动防抖触发，只在用户点击按钮时
+               按句末标点分段、逐句合成生成预览音频（不做 Qwen3-FA 对齐，
+               也不再有句子数量上限，会合成完整文本）。生成期间"开始处理"
+               会被暂时禁用；生成完成后点击"开始处理"会直接复用这份分句
+               音频去对齐，不会重新合成一遍。若在生成预览后又修改了文本 /
+               引擎 / 音色 / 语速 / 音调 / 音量 / 语种，这份预览会失效，
+               "开始处理"将退回"先合成再对齐"的完整流程。 -->
+          <el-form-item :label="t('processor.ttsSegmentPreviewTitle')">
+            <div style="width: 100%">
+              <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
+                <el-button
+                  size="small"
+                  @click="runSegmentPreview"
+                  :loading="segmentPreview.loading"
+                  :disabled="!ttsConfig.voice || !formData.text.trim()"
+                >
+                  🔄 {{ segmentPreview.audioUrl ? t('processor.ttsRegeneratePreview') : t('processor.ttsGeneratePreview') }}
+                </el-button>
+                <audio v-if="segmentPreview.audioUrl" :src="segmentPreview.audioUrl" controls style="height: 32px; vertical-align: middle" />
+                <span v-if="segmentPreview.loading" style="color: var(--el-text-color-secondary); font-size: 13px">
+                  {{ t('processor.ttsSegmentPreviewGenerating') }}
+                </span>
+                <span v-else-if="!segmentPreview.audioUrl && !segmentPreview.error" style="color: var(--el-text-color-secondary); font-size: 13px">
+                  {{ t('processor.ttsSegmentPreviewIdle') }}
+                </span>
+                <span v-else-if="segmentPreview.sentenceCount" style="color: var(--el-text-color-secondary); font-size: 13px">
+                  {{ t('processor.ttsSegmentPreviewCount', { count: segmentPreview.sentenceCount }) }}
+                </span>
+              </div>
+              <div v-if="segmentPreview.warnings.length" style="margin-top: 6px">
+                <el-text type="warning" size="small">
+                  {{ t('processor.ttsSegmentPreviewWarnings') }} ({{ segmentPreview.warnings.length }})
+                </el-text>
+              </div>
+              <div v-if="segmentPreview.error" style="margin-top: 6px">
+                <el-text type="danger" size="small">{{ segmentPreview.error }}</el-text>
+              </div>
+            </div>
+          </el-form-item>
+
+          <el-form-item>
+            <el-alert :closable="false" type="info" :title="t('processor.ttsFixedBackendHint')" show-icon />
+          </el-form-item>
+        </template>
+
+        <!-- 语音预设管理弹窗：新增 / 编辑 / 删除；音色列表跟随本弹窗内选择的
+             引擎（narratorFormVoices），与主面板当前引擎（ttsVoices）互相独立 -->
+        <el-dialog v-model="narratorManagerVisible" :title="t('processor.manageNarrators')" width="520px">
+          <el-table :data="narrators" size="small" style="margin-bottom: 16px" max-height="240">
+            <el-table-column prop="name" :label="t('processor.narratorName')" width="110" />
+            <el-table-column :label="t('processor.ttsEngine')" width="90">
+              <template #default="{ row }">{{ engineLabel(row.engine) }}</template>
+            </el-table-column>
+            <el-table-column prop="voice" :label="t('processor.ttsVoice')" show-overflow-tooltip />
+            <el-table-column width="110">
+              <template #default="{ row }">
+                <el-button link size="small" @click="editNarrator(row)">{{ t('processor.edit') }}</el-button>
+                <el-button link size="small" type="danger" @click="deleteNarratorItem(row.id)">{{ t('processor.delete') }}</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <el-form label-position="top">
+            <el-form-item :label="t('processor.narratorName')">
+              <el-input v-model="narratorForm.name" :placeholder="t('processor.narratorNamePlaceholder')" />
+            </el-form-item>
+            <el-form-item :label="t('processor.ttsEngine')">
+              <el-select v-model="narratorForm.engine" style="width: 100%" :placeholder="t('processor.ttsEnginePlaceholder')">
+                <el-option
+                  v-for="eng in ttsEngines"
+                  :key="eng.id"
+                  :label="engineLabel(eng.id)"
+                  :value="eng.id"
+                  :disabled="!eng.available"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item :label="t('processor.ttsVoice')">
+              <el-select
+                v-model="narratorForm.voice"
+                filterable
+                :loading="narratorFormVoicesLoading"
+                style="width: 100%"
+                :placeholder="t('processor.ttsVoicePlaceholder')"
+              >
+                <el-option v-for="v in narratorFormVoices" :key="v.id" :label="`${v.name} (${v.locale})`" :value="v.id" />
+              </el-select>
+            </el-form-item>
+          </el-form>
+
+          <template #footer>
+            <el-button @click="resetNarratorForm">{{ t('processor.reset') }}</el-button>
+            <el-button type="primary" :loading="narratorSaving" @click="saveNarrator">{{ t('processor.save') }}</el-button>
+          </template>
+        </el-dialog>
+
+        <!-- 对齐后端选择器（TTS跟读固定使用 Qwen3-FA，不显示；project-only 模式不需要对齐） -->
+        <el-form-item v-if="inputMode === 'audio' && processingMode !== 'project-only'" :label="t('processor.backendLabel')">
           <el-radio-group v-model="alignerBackend">
             <el-radio value="mfa">
               <span>{{ t('processor.backendMfa') }}</span>
@@ -125,9 +297,9 @@
           </el-alert>
         </el-form-item>
 
-        <!-- 对齐工具运行设备（仅非 MFA 后端显示） -->
+        <!-- 对齐工具运行设备（非 MFA 后端 或 TTS跟读固定的 Qwen3-FA 都需要） -->
         <el-form-item
-          v-if="processingMode !== 'project-only' && alignerBackend !== 'mfa'"
+          v-if="inputMode === 'tts' || (processingMode !== 'project-only' && alignerBackend !== 'mfa')"
           :label="t('processor.alignDevice')"
         >
           <el-radio-group v-model="advancedConfig.aligner_device">
@@ -181,6 +353,25 @@
             <small v-else>
               ⚠️ {{ t('processor.whisperDescSmall') }}
             </small>
+          </div>
+        </el-form-item>
+
+        <!-- WhisperX 批处理大小（仅 device=cuda 时对显存占用有实际意义；
+             CPU 模式下该值基本不影响性能，为避免误导直接隐藏控件，
+             提交时后端仍会收到默认值 16） -->
+        <el-form-item
+          v-if="processingMode !== 'project-only' && alignerBackend === 'whisperx' && advancedConfig.aligner_device === 'cuda'"
+          :label="t('processor.whisperxBatchSize')"
+        >
+          <el-input-number
+            v-model="advancedConfig.whisperx_batch_size"
+            :min="1"
+            :max="64"
+            :step="1"
+            style="width:160px"
+          />
+          <div class="help-text" style="margin-top:6px">
+            <small>⚠️ {{ t('processor.whisperxBatchSizeHint') }}</small>
           </div>
         </el-form-item>
 
@@ -297,7 +488,7 @@
           <el-radio-group v-model="processingMode">
             <el-radio value="mfa-only">{{ t('processor.processingModeMfaOnly') }}</el-radio>
             <el-radio value="full">{{ t('processor.processingModeFull') }}</el-radio>
-            <el-radio value="project-only">{{ t('processor.processingModeProjectOnly') }}</el-radio>
+            <el-radio v-if="inputMode === 'audio'" value="project-only">{{ t('processor.processingModeProjectOnly') }}</el-radio>
           </el-radio-group>
           <div class="mode-help">
             <small v-if="processingMode === 'mfa-only'">
@@ -911,6 +1102,7 @@ interface AdvancedConfig {
   f0_device: 'auto' | 'cpu' | 'cuda'
   aligner_device: 'auto' | 'cpu' | 'cuda'  // WhisperX / Qwen3 对齐工具运行设备
   whisperx_model: string                    // WhisperX Whisper 模型选择
+  whisperx_batch_size: number                // WhisperX 推理批大小（仅 aligner_device=cuda 时有实际意义）
   nemo_model: string                        // NeMo Forced Aligner 模型覆盖（可选，留空用语言默认模型）
   crepe_model: 'full' | 'tiny'
   precision: 'single' | 'double'
@@ -972,6 +1164,74 @@ const alignerStatus = ref<Record<string, any>>({
   nemo_aligner:  { available: false, message: t('processor.backendStatusChecking') },
 })
 
+// ── TTS跟读（讲述人 + EdgeTTS）状态 ──────────────────────────────────
+// 与"音频跟读"（inputMode='audio'，即原有的上传音频对齐流程）互斥；
+// TTS跟读不需要用户上传音频，文本本身就是标注来源，音频由 EdgeTTS 合成，
+// 对齐固定使用 Qwen3-ForcedAligner（不经过 alignerBackend 选择器）。
+type TtsNarrator = { id: string; name: string; engine?: string; voice: string; rate: string; pitch: string; volume: string; language?: string }
+type TtsVoice = { id: string; name: string; gender?: string; locale: string }
+type TtsEngine = { id: string; label: string; label_zh: string; available: boolean; message: string }
+
+const inputMode = ref<'audio' | 'tts'>('audio')
+const ttsConfig = ref<{ engine: string; narratorId: string; voice: string; rateNum: number; pitchNum: number; volumeNum: number }>({
+  engine: 'edge_tts',
+  narratorId: '',
+  voice: '',
+  rateNum: 0,
+  pitchNum: 0,
+  volumeNum: 0,
+})
+const narrators = ref<TtsNarrator[]>([])
+// 语音预设下拉框只展示与当前所选引擎匹配的预设，避免"选了讲述人引擎，
+// 列表里却混着一堆 EdgeTTS 预设"的困惑。
+const filteredNarrators = computed(() =>
+  narrators.value.filter(n => (n.engine || 'edge_tts') === ttsConfig.value.engine)
+)
+const ttsEngines = ref<TtsEngine[]>([])
+const ttsEnginesLoading = ref(false)
+const ttsVoices = ref<TtsVoice[]>([])
+const ttsVoicesLoading = ref(false)
+
+// 引擎中/英文名按当前界面语言展示："选择 TTS"下拉框、语音预设管理对话框的
+// 引擎选择器、预设列表的引擎列都复用这一个函数，不需要各处重复判断。
+const engineLabel = (id?: string): string => {
+  const eng = ttsEngines.value.find(e => e.id === id)
+  if (!eng) return id || ''
+  return locale.value.startsWith('zh') ? eng.label_zh : eng.label
+}
+
+// 语音预设管理对话框里的音色列表：跟随对话框内正在编辑的 narratorForm.engine，
+// 而不是主面板当前选中的 ttsConfig.engine——用户可能想为一个当前未选中的
+// 引擎创建/编辑预设（例如主面板选的是 EdgeTTS，但想顺手建一个讲述人预设）。
+const narratorFormVoices = ref<TtsVoice[]>([])
+const narratorFormVoicesLoading = ref(false)
+
+// ── 手动分段预览：由"生成预览"按钮触发，按句末标点分段、逐句合成生成
+// 预览音频（不做 Qwen3-FA 对齐，不再有句子数量上限）。previewId 是后端
+// 返回的缓存凭证——生成后若没有改动文本/参数，点击"开始处理"会带上它
+// 直接复用这份分句音频去对齐；一旦相关输入发生变化就会被清空，逼迫
+// "开始处理"退回"先合成再对齐"的完整流程，避免用旧音频对新文本。
+const segmentPreview = ref<{
+  loading: boolean
+  audioUrl: string
+  previewId: string
+  sentenceCount: number
+  warnings: string[]
+  error: string
+}>({
+  loading: false,
+  audioUrl: '',
+  previewId: '',
+  sentenceCount: 0,
+  warnings: [],
+  error: '',
+})
+let segmentPreviewRequestSeq = 0
+
+const narratorManagerVisible = ref(false)
+const narratorForm = ref<TtsNarrator>({ id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%' })
+const narratorSaving = ref(false)
+
 const formData = ref<FormData>({
   audioFile: null,
   labFile: null,
@@ -992,6 +1252,7 @@ const advancedConfig = ref<AdvancedConfig>({
   f0_device: 'auto',
   aligner_device: 'auto',
   whisperx_model: 'large-v3',
+  whisperx_batch_size: 16,
   nemo_model: '',
   crepe_model: 'full',
   precision: 'double',
@@ -1070,6 +1331,10 @@ const normalizedModels = computed(() => {
 })
 
 const isReady = computed(() => {
+  // TTS跟读固定使用 Qwen3-ForcedAligner，就绪状态看它是否可用
+  if (inputMode.value === 'tts') {
+    return alignerStatus.value['qwen3_aligner']?.available ?? false
+  }
   // 替代后端不依赖 MFA 模型，只要后端可用或是 MFA 时检查模型
   if (alignerBackend.value !== 'mfa') {
     return alignerStatus.value[alignerBackend.value]?.available ?? false
@@ -1198,6 +1463,9 @@ watch(() => formData.value.language, (lang) => {
 
 // 根据不同模式控制提交按钮的禁用状态
 const isSubmitDisabled = computed(() => {
+  if (inputMode.value === 'tts') {
+    return !formData.value.text.trim() || !ttsConfig.value.voice || !isReady.value || segmentPreview.value.loading
+  }
   if (processingMode.value === 'project-only') {
     return !formData.value.audioFile || (!formData.value.labFile && !formData.value.midiFile)
   }
@@ -1255,7 +1523,262 @@ const fetchDictionaries = async () => {
 onMounted(() => {
   checkSystemStatus()
   fetchDictionaries()
+  fetchNarrators()
 })
+
+// ── TTS跟读辅助函数 ──────────────────────────────────────────────────
+
+const fetchTtsEngines = async () => {
+  ttsEnginesLoading.value = true
+  try {
+    const res = await fetch('/api/tts/engines')
+    const data = await res.json()
+    if (data.success) {
+      ttsEngines.value = data.engines || []
+      // 当前选中的引擎如果不在返回列表里（几乎不会发生，兜底处理），
+      // 或者尚未选择过引擎，优先选第一个"可用"的引擎，没有可用的就退回
+      // 列表第一项，让用户能看到具体的不可用原因（message）。
+      if (!ttsEngines.value.some(e => e.id === ttsConfig.value.engine)) {
+        const firstAvailable = ttsEngines.value.find(e => e.available)
+        ttsConfig.value.engine = (firstAvailable || ttsEngines.value[0])?.id || 'edge_tts'
+      }
+    }
+  } catch (e) {
+    console.error('获取 TTS 引擎列表失败', e)
+  } finally {
+    ttsEnginesLoading.value = false
+  }
+}
+
+const fetchTtsVoices = async (language: string, engine?: string) => {
+  ttsVoicesLoading.value = true
+  try {
+    const eng = engine || ttsConfig.value.engine || 'edge_tts'
+    const res = await fetch(`/api/tts/voices?engine=${encodeURIComponent(eng)}&language=${encodeURIComponent(language)}`)
+    const data = await res.json()
+    if (data.success) {
+      ttsVoices.value = data.voices || []
+      // 若当前选中的音色不在新语种/新引擎的列表里，清空让用户重选，避免
+      // "引擎/语种已经切换，但音色还是上一次选的"这种不一致状态。
+      if (ttsConfig.value.voice && !ttsVoices.value.some(v => v.id === ttsConfig.value.voice)) {
+        ttsConfig.value.voice = ''
+      }
+    } else {
+      ttsVoices.value = []
+      if (data.error) ElMessage.error(`❌ ${data.error}`)
+    }
+  } catch (e) {
+    console.error('获取 TTS 音色列表失败', e)
+  } finally {
+    ttsVoicesLoading.value = false
+  }
+}
+
+const fetchNarrators = async () => {
+  try {
+    const res = await fetch('/api/tts/narrators')
+    const data = await res.json()
+    if (data.success) narrators.value = data.narrators || []
+  } catch (e) {
+    console.error('获取语音预设列表失败', e)
+  }
+}
+
+const fetchNarratorFormVoices = async (engine: string) => {
+  narratorFormVoicesLoading.value = true
+  try {
+    const res = await fetch(`/api/tts/voices?engine=${encodeURIComponent(engine)}&language=${encodeURIComponent(formData.value.language)}`)
+    const data = await res.json()
+    if (data.success) {
+      narratorFormVoices.value = data.voices || []
+      if (narratorForm.value.voice && !narratorFormVoices.value.some(v => v.id === narratorForm.value.voice)) {
+        narratorForm.value.voice = ''
+      }
+    } else {
+      narratorFormVoices.value = []
+      if (data.error) ElMessage.error(`❌ ${data.error}`)
+    }
+  } catch (e) {
+    console.error('获取语音预设音色列表失败', e)
+  } finally {
+    narratorFormVoicesLoading.value = false
+  }
+}
+
+// 对话框内切换"选择 TTS"引擎时，同步刷新该引擎下的音色列表并清空不匹配的
+// 旧音色选择；只在对话框打开期间生效，避免和主面板的 ttsConfig.engine
+// watch 互相干扰。
+watch(() => narratorForm.value.engine, (engine) => {
+  if (narratorManagerVisible.value && engine) fetchNarratorFormVoices(engine)
+})
+
+const handleInputModeChange = () => {
+  if (inputMode.value === 'tts') {
+    if (processingMode.value === 'project-only') processingMode.value = 'full'
+    fetchTtsEngines()
+    fetchTtsVoices(formData.value.language)
+  }
+}
+
+watch(() => formData.value.language, (lang) => {
+  if (inputMode.value === 'tts') fetchTtsVoices(lang)
+})
+
+// 切换"选择 TTS"引擎时：清空当前音色（不同引擎的音色 ID 体系完全不同，
+// 沿用旧值没有意义）并按新引擎重新拉取音色列表。
+watch(() => ttsConfig.value.engine, (engine, oldEngine) => {
+  if (!engine || engine === oldEngine) return
+  ttsConfig.value.voice = ''
+  if (inputMode.value === 'tts') fetchTtsVoices(formData.value.language, engine)
+})
+
+const handleNarratorSelect = (narratorId: string) => {
+  if (!narratorId) return
+  const n = narrators.value.find(x => x.id === narratorId)
+  if (!n) return
+  if (n.engine && n.engine !== ttsConfig.value.engine) {
+    ttsConfig.value.engine = n.engine
+  }
+  ttsConfig.value.voice = n.voice
+  ttsConfig.value.rateNum = parseInt(n.rate) || 0
+  ttsConfig.value.pitchNum = parseInt(n.pitch) || 0
+  ttsConfig.value.volumeNum = parseInt(n.volume) || 0
+}
+
+// ── 手动分段预览 ─────────────────────────────────────────────────────
+// 只在用户点击"生成预览"按钮时触发（不再随输入防抖自动生成）：按句末
+// 标点分段 → 逐句合成，返回完整拼接后的音频供试听。这一步不做 Qwen3-FA
+// 对齐，也不再截断句子数量——会合成完整输入文本。
+// 生成成功后会拿到一个 previewId：如果用户紧接着点"开始处理"、且没有
+// 改动文本/引擎/音色/语速/音调/音量/语种，后端会直接复用这份分句音频
+// 去对齐，不会重新合成一遍；只要上述任一项发生变化，下面的 watch 会清空
+// previewId，"开始处理"就会退回"先合成再对齐"的完整流程。
+const runSegmentPreview = async () => {
+  if (inputMode.value !== 'tts') return
+  const text = (formData.value.text || '').trim()
+  if (!text || !ttsConfig.value.voice) {
+    segmentPreview.value = {
+      loading: false, audioUrl: '', previewId: '', sentenceCount: 0, warnings: [], error: '',
+    }
+    return
+  }
+
+  const mySeq = ++segmentPreviewRequestSeq
+  segmentPreview.value.loading = true
+  segmentPreview.value.error = ''
+  try {
+    const res = await fetch('/api/tts/synthesize_preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        language: formData.value.language,
+        engine: ttsConfig.value.engine,
+        voice: ttsConfig.value.voice,
+        rate: `${ttsConfig.value.rateNum >= 0 ? '+' : ''}${ttsConfig.value.rateNum}%`,
+        pitch: `${ttsConfig.value.pitchNum >= 0 ? '+' : ''}${ttsConfig.value.pitchNum}Hz`,
+        volume: `${ttsConfig.value.volumeNum >= 0 ? '+' : ''}${ttsConfig.value.volumeNum}%`,
+      }),
+    })
+    const data = await res.json()
+    // 用户可能在等待响应期间又点了一次——这种情况下这次（更旧的）响应
+    // 回来时应该被忽略，避免界面倒退回旧结果。
+    if (mySeq !== segmentPreviewRequestSeq) return
+
+    if (!data.success) {
+      segmentPreview.value = {
+        loading: false, audioUrl: '', previewId: '', sentenceCount: 0,
+        warnings: [], error: data.error || t('processor.ttsSegmentPreviewFailed'),
+      }
+      return
+    }
+
+    if (segmentPreview.value.audioUrl) URL.revokeObjectURL(segmentPreview.value.audioUrl)
+    const blob = await (await fetch(`data:audio/wav;base64,${data.audio_base64}`)).blob()
+    segmentPreview.value = {
+      loading: false,
+      audioUrl: URL.createObjectURL(blob),
+      previewId: data.preview_id || '',
+      sentenceCount: data.sentence_count || 0,
+      warnings: data.warnings || [],
+      error: '',
+    }
+  } catch (e: any) {
+    if (mySeq !== segmentPreviewRequestSeq) return
+    segmentPreview.value = {
+      loading: false, audioUrl: '', previewId: '', sentenceCount: 0,
+      warnings: [], error: e?.message || String(e),
+    }
+  }
+}
+
+// 文本 / 引擎 / 音色 / 语速·音调·音量 / 语种任一变化都会让已生成的预览
+// 音频与当前输入不再对应——清空 previewId 让"开始处理"退回完整流程，
+// 而不是悄悄拿旧音频去对齐新文本。注意：这里只清空 previewId 状态，
+// 不会自动重新生成预览（生成预览仍然只能靠用户手动点按钮触发）。
+watch(
+  () => [
+    formData.value.text, formData.value.language, ttsConfig.value.engine, ttsConfig.value.voice,
+    ttsConfig.value.rateNum, ttsConfig.value.pitchNum, ttsConfig.value.volumeNum,
+  ],
+  () => {
+    if (inputMode.value === 'tts' && segmentPreview.value.previewId) {
+      segmentPreview.value.previewId = ''
+    }
+  },
+)
+
+const openNarratorManager = () => {
+  narratorForm.value = { id: '', name: '', engine: ttsConfig.value.engine, voice: ttsConfig.value.voice, rate: '+0%', pitch: '+0Hz', volume: '+0%' }
+  narratorManagerVisible.value = true
+  fetchNarratorFormVoices(narratorForm.value.engine || 'edge_tts')
+}
+
+const editNarrator = (n: TtsNarrator) => {
+  narratorForm.value = { engine: 'edge_tts', ...n }
+  fetchNarratorFormVoices(narratorForm.value.engine || 'edge_tts')
+}
+
+const resetNarratorForm = () => {
+  narratorForm.value = { id: '', name: '', engine: ttsConfig.value.engine, voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%' }
+  fetchNarratorFormVoices(narratorForm.value.engine || 'edge_tts')
+}
+
+const saveNarrator = async () => {
+  if (!narratorForm.value.name.trim() || !narratorForm.value.voice) {
+    ElMessage.warning(t('processor.narratorNameVoiceRequired'))
+    return
+  }
+  narratorSaving.value = true
+  try {
+    const res = await fetch('/api/tts/narrators', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...narratorForm.value, language: formData.value.language }),
+    })
+    const data = await res.json()
+    if (!data.success) throw new Error(data.error || t('processor.submitFailed'))
+    await fetchNarrators()
+    resetNarratorForm()
+    ElMessage.success(`✅ ${t('processor.success')}`)
+  } catch (e: any) {
+    ElMessage.error(`❌ ${e?.message || String(e)}`)
+  } finally {
+    narratorSaving.value = false
+  }
+}
+
+const deleteNarratorItem = async (narratorId: string) => {
+  try {
+    const res = await fetch(`/api/tts/narrators/${narratorId}`, { method: 'DELETE' })
+    const data = await res.json()
+    if (!data.success) throw new Error(data.error || t('processor.submitFailed'))
+    if (ttsConfig.value.narratorId === narratorId) ttsConfig.value.narratorId = ''
+    await fetchNarrators()
+  } catch (e: any) {
+    ElMessage.error(`❌ ${e?.message || String(e)}`)
+  }
+}
 
 // 辅助工具函数
 const midiNoteToName = (note: number): string => {
@@ -1486,6 +2009,124 @@ const downloadModel = async (lang: string) => {
 // 核心核心控制逻辑：开始处理
 const processAudio = async () => {
   // ============================================================
+  // 分支 0) TTS跟读：讲述人 + EdgeTTS，不需要用户上传音频
+  // ============================================================
+  if (inputMode.value === 'tts') {
+    if (!formData.value.text.trim()) {
+      ElMessage.warning(t('processor.ttsTextRequired'))
+      return
+    }
+    if (!ttsConfig.value.voice) {
+      ElMessage.warning(t('processor.ttsVoiceRequired'))
+      return
+    }
+    if (!isReady.value) {
+      ElMessage.error(t('processor.backendNotReady'))
+      return
+    }
+
+    clearJobPolling()
+    processing.value = true
+    progressPercent.value = 0
+    error.value = ''
+    result.value = null
+    currentJobId.value = ''
+    resetProcessingSteps()
+    updateProcessingStep(0, t('processor.statusProcessing'), t('processor.ttsSynthesizing'))
+    updateProcessingStep(1, t('processor.statusWaiting'), t('processor.stageExtractF0'))
+    updateProcessingStep(2, t('processor.statusWaiting'), t('processor.projectModeWaitProject'))
+
+    let progressTimer: number | null = null
+
+    try {
+      const formDataObj = new FormData()
+      formDataObj.append('text', formData.value.text)
+      formDataObj.append('language', formData.value.language)
+      formDataObj.append('engine', ttsConfig.value.engine)
+      formDataObj.append('voice', ttsConfig.value.voice)
+      formDataObj.append('rate', `${ttsConfig.value.rateNum >= 0 ? '+' : ''}${ttsConfig.value.rateNum}%`)
+      formDataObj.append('pitch', `${ttsConfig.value.pitchNum >= 0 ? '+' : ''}${ttsConfig.value.pitchNum}Hz`)
+      formDataObj.append('volume', `${ttsConfig.value.volumeNum >= 0 ? '+' : ''}${ttsConfig.value.volumeNum}%`)
+      formDataObj.append('aligner_device', advancedConfig.value.aligner_device)
+      formDataObj.append('english_word_align', (englishWordAlign.value && formData.value.language !== 'jpn').toString())
+      formDataObj.append('processing_mode', processingMode.value === 'full' ? 'full' : 'mfa-only')
+      // 如果之前手动点过"生成预览"且文本/参数之后未再变化，previewId 仍然
+      // 有效——带给后端复用已经合成好的分句音频，跳过重新合成直接对齐；
+      // 否则这里是空字符串，后端会走"先合成再对齐"的完整流程。
+      formDataObj.append('preview_id', segmentPreview.value.previewId)
+
+      if (processingMode.value === 'full') {
+        formDataObj.append('format', formData.value.outputFormat)
+        if (formData.value.outputFormat === 'vsqx') {
+          formDataObj.append('vsqx_singer',    vsqxSingerConfig.value.name)
+          formDataObj.append('vsqx_singer_id', vsqxSingerConfig.value.id)
+          formDataObj.append('vsqx_pitch_smooth_window', advancedConfig.value.vsqx_pitch_smooth_window.toString())
+        }
+        formDataObj.append('title', formData.value.projectTitle)
+        formDataObj.append('bpm', advancedConfig.value.bpm.toString())
+        formDataObj.append('base_pitch', advancedConfig.value.base_pitch.toString())
+        formDataObj.append('f0_method', advancedConfig.value.f0_method)
+        formDataObj.append('f0_device', advancedConfig.value.f0_device)
+        formDataObj.append('crepe_model', advancedConfig.value.crepe_model)
+        formDataObj.append('f0_smooth', advancedConfig.value.f0_smooth.toString())
+        formDataObj.append('f0_smooth_window', advancedConfig.value.f0_smooth_window.toString())
+        formDataObj.append('precision', advancedConfig.value.precision)
+        formDataObj.append('f0_floor', advancedConfig.value.f0_floor.toString())
+        formDataObj.append('f0_ceil', advancedConfig.value.f0_ceil.toString())
+        formDataObj.append('auto_note_pitch', advancedConfig.value.auto_note_pitch.toString())
+        formDataObj.append('export_pitch_line', advancedConfig.value.export_pitch_line.toString())
+        formDataObj.append('word_phoneme_map', wordPhonemeMapEffective.value.toString())
+        formDataObj.append('dict_source', dictSource.value)
+      }
+
+      progressTimer = window.setInterval(() => {
+        if (progressPercent.value < 30) progressPercent.value += 3
+      }, 400)
+
+      const res = await fetch('/api/tts/process', { method: 'POST', body: formDataObj })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || t('processor.submitFailed'))
+
+      // 后端一旦读取 preview_id 就会立刻把这条缓存记录消费掉（无论最终
+      // 对齐是否成功），所以这里的 previewId 已经不能再被复用——清空它，
+      // 避免用户不改文本、直接再点一次"开始处理"时，前端还误以为存在
+      // 一份可复用的预览音频。
+      if (segmentPreview.value.previewId) segmentPreview.value.previewId = ''
+
+      if (progressTimer !== null) { window.clearInterval(progressTimer); progressTimer = null }
+      progressPercent.value = 35
+
+      const finalPayload = await waitForJobFinished(data.job_id)
+      const normalized = normalizeResult(finalPayload)
+
+      if (processingMode.value === 'full') {
+        if (!normalized.projectPath) throw new Error(t('processor.projectMissing'))
+        updateProcessingStep(0, t('processor.statusDone'), t('processor.ttsSynthesizeDone'))
+        updateProcessingStep(1, t('processor.statusDone'), t('processor.projectModeF0Done'))
+        updateProcessingStep(2, t('processor.statusDone'), `${t('processor.projectFile')}: ${getFileName(normalized.projectPath)}`)
+      } else {
+        if (!normalized.labContent) throw new Error(t('processor.labEmpty'))
+        const segCount = countLabSegments(normalized.labContent)
+        updateProcessingStep(0, t('processor.statusDone'), `${segCount} ${t('processor.segmentCount')}`)
+        updateProcessingStep(1, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
+        updateProcessingStep(2, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
+      }
+
+      result.value = normalized
+      progressPercent.value = 100
+      ElMessage.success(`✅ ${t('processor.success')}`)
+    } catch (e: any) {
+      error.value = e?.message || String(e)
+      ElMessage.error(`❌ ${error.value}`)
+    } finally {
+      if (progressTimer !== null) window.clearInterval(progressTimer)
+      clearJobPolling()
+      processing.value = false
+    }
+    return
+  }
+
+  // ============================================================
   // 分支 1) 仅工程文件模式：WAV + LAB -> 直接转工程文件
   // ============================================================
 if (processingMode.value === 'project-only') {
@@ -1646,6 +2287,7 @@ if (processingMode.value === 'project-only') {
     formDataObj.append('aligner_backend', alignerBackend.value)
     formDataObj.append('aligner_device', advancedConfig.value.aligner_device)
     formDataObj.append('whisperx_model', advancedConfig.value.whisperx_model)
+    formDataObj.append('whisperx_batch_size', advancedConfig.value.whisperx_batch_size.toString())
     formDataObj.append('nemo_model', advancedConfig.value.nemo_model || '')
     formDataObj.append('english_word_align', (englishWordAlign.value && formData.value.language !== 'jpn').toString())
 

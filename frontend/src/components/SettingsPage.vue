@@ -157,23 +157,23 @@
         <p class="group-label">{{ t('settings.tuningGroupChunking') }}</p>
         <el-row :gutter="16">
           <el-col :xs="24" :sm="12">
-            <el-form-item :label="t('settings.qwen3FaChunkThresholdSec')">
+            <el-form-item :label="t('settings.qwen3FaMinSentenceChunkSec')">
               <el-input-number
-                v-model="form.qwen3_fa_chunk_threshold_sec"
-                :min="0" :max="3600" :step="1" :precision="1"
+                v-model="form.qwen3_fa_min_sentence_chunk_sec"
+                :min="0.1" :max="600" :step="0.5" :precision="1"
                 controls-position="right" style="width: 100%; max-width: 240px"
               />
-              <p class="help-text">{{ t('settings.qwen3FaChunkThresholdSecHint') }}</p>
+              <p class="help-text">{{ t('settings.qwen3FaMinSentenceChunkSecHint') }}</p>
             </el-form-item>
           </el-col>
           <el-col :xs="24" :sm="12">
-            <el-form-item :label="t('settings.qwen3FaChunkTargetSec')">
+            <el-form-item :label="t('settings.qwen3FaMaxSentenceChunkSec')">
               <el-input-number
-                v-model="form.qwen3_fa_chunk_target_sec"
-                :min="0" :max="3600" :step="1" :precision="1"
+                v-model="form.qwen3_fa_max_sentence_chunk_sec"
+                :min="1" :max="600" :step="1" :precision="1"
                 controls-position="right" style="width: 100%; max-width: 240px"
               />
-              <p class="help-text">{{ t('settings.qwen3FaChunkTargetSecHint') }}</p>
+              <p class="help-text">{{ t('settings.qwen3FaMaxSentenceChunkSecHint') }}</p>
             </el-form-item>
           </el-col>
         </el-row>
@@ -183,6 +183,48 @@
             ↺ {{ t('settings.tuningResetButton') }}
           </el-button>
         </el-form-item>
+
+        <el-divider />
+
+        <div class="section-heading">
+          <span>🚀 {{ t('settings.whisperxSectionTitle') }}</span>
+        </div>
+        <p class="page-subtitle">{{ t('settings.whisperxSectionSubtitle') }}</p>
+
+        <el-alert type="success" :closable="false" show-icon class="no-restart-hint">
+          <template #title>{{ t('settings.tuningNoRestartHint') }}</template>
+        </el-alert>
+
+        <el-form-item :label="t('settings.qwen3FaUseWhisperxPrepass')">
+          <el-switch v-model="form.qwen3_fa_use_whisperx_prepass" />
+          <p class="help-text">{{ t('settings.qwen3FaUseWhisperxPrepassHint') }}</p>
+        </el-form-item>
+
+        <el-row :gutter="16">
+          <el-col v-if="form.qwen3_fa_use_whisperx_prepass" :xs="24" :sm="12">
+            <el-form-item :label="t('settings.qwen3FaWhisperxPrepassModel')">
+              <el-select v-model="form.qwen3_fa_whisperx_prepass_model" style="width: 100%; max-width: 320px">
+                <el-option
+                  v-for="model in WHISPERX_MODEL_OPTIONS"
+                  :key="model"
+                  :value="model"
+                  :label="t(`processor.whisperModel${modelLabelKey(model)}`)"
+                />
+              </el-select>
+              <p class="help-text">{{ t('settings.qwen3FaWhisperxPrepassModelHint') }}</p>
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :sm="12">
+            <el-form-item :label="t('settings.whisperxBatchSize')">
+              <el-input-number
+                v-model="form.whisperx_batch_size"
+                :min="1" :max="128" :step="1" :precision="0"
+                controls-position="right" style="width: 100%; max-width: 240px"
+              />
+              <p class="help-text">{{ t('settings.whisperxBatchSizeHint') }}</p>
+            </el-form-item>
+          </el-col>
+        </el-row>
 
         <el-alert
           v-for="item in restartSummary"
@@ -234,9 +276,19 @@ interface AppSettings {
   ctc_max_en_word_sec: number
   ctc_min_sp_sec: number
   // Qwen3-ForcedAligner 长音频分段对齐；同样属于"实时生效，无需重启"的
-  // 调优参数组，0 表示禁用分段。
-  qwen3_fa_chunk_threshold_sec: number
-  qwen3_fa_chunk_target_sec: number
+  // 调优参数组。现在按参考文本句末标点分段，这两项只用来处理单句过短/
+  // 过长这两种边缘情况（详见 alt_aligners.py _plan_sentence_aligned_
+  // chunks() 顶部说明）。
+  qwen3_fa_min_sentence_chunk_sec: number
+  qwen3_fa_max_sentence_chunk_sec: number
+  // ── WhisperX 相关（同样"实时生效，无需重启"）──────────────────────────
+  // 开启后，Qwen3-ForcedAligner 在长音频分段对齐前先用 WhisperX 做一次
+  // 轻量 ASR 粗测，用真实语音起止时间戳规划分段边界。
+  qwen3_fa_use_whisperx_prepass: boolean
+  // 上面粗测步骤专用的 Whisper 模型档位，仅在开关打开时才需要展示/生效。
+  qwen3_fa_whisperx_prepass_model: string
+  // WhisperX 转录 batch_size，独立对齐后端与上面的粗测预处理共用同一个值。
+  whisperx_batch_size: number
 }
 
 type RestartStatus = 'restarted' | 'not_running' | 'failed'
@@ -256,9 +308,36 @@ const TUNING_DEFAULTS = {
   ctc_max_cjk_particle_sec: 0.35,
   ctc_max_en_word_sec: 1.20,
   ctc_min_sp_sec: 0.15,
-  qwen3_fa_chunk_threshold_sec: 180.0,
-  qwen3_fa_chunk_target_sec: 150.0,
+  qwen3_fa_min_sentence_chunk_sec: 3.0,
+  qwen3_fa_max_sentence_chunk_sec: 20.0,
 } as const
+
+// WhisperX 相关默认值：与 app_settings.py 的 DEFAULT_SETTINGS 保持一致。
+// 注意 qwen3_fa_use_whisperx_prepass 默认关闭，与后端一致（需要用户显式开启）。
+const WHISPERX_DEFAULTS = {
+  qwen3_fa_use_whisperx_prepass: false,
+  qwen3_fa_whisperx_prepass_model: 'large-v3',
+  whisperx_batch_size: 16,
+} as const
+
+// 与 alt_aligners.py 里 WhisperXAligner.SUPPORTED_MODELS 保持一致，
+// 复用 processor.whisperModelXxx 系列翻译（单文件处理页已有同一份模型列表）。
+const WHISPERX_MODEL_OPTIONS = [
+  'large-v3',
+  'large-v3-turbo',
+  'large-v2',
+  'medium',
+  'small',
+  'base',
+  'tiny',
+] as const
+
+// 'large-v3-turbo' → 'LargeV3Turbo'，用于拼出 processor.whisperModelLargeV3Turbo 这类 key
+const modelLabelKey = (model: string) =>
+  model
+    .split('-')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join('')
 
 const form = ref<AppSettings>({
   auto_update_models: false,
@@ -268,6 +347,7 @@ const form = ref<AppSettings>({
   skip_start_qwen3_server: false,
   skip_start_nemo_server: false,
   ...TUNING_DEFAULTS,
+  ...WHISPERX_DEFAULTS,
 })
 
 const resetTuningToDefaults = () => {
@@ -304,6 +384,9 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     const v = Number(settings?.[key])
     return Number.isFinite(v) ? v : TUNING_DEFAULTS[key]
   }
+  // whisperx_batch_size 走独立的整数校验（1-128），与后端 save_settings() 的钳制范围一致
+  const batchSize = Number(settings?.whisperx_batch_size)
+  const prepassModel = String(settings?.qwen3_fa_whisperx_prepass_model || '').trim()
   form.value = {
     auto_update_models: !!settings?.auto_update_models,
     use_mirror: !!settings?.use_mirror,
@@ -319,8 +402,16 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     ctc_max_cjk_particle_sec: num('ctc_max_cjk_particle_sec'),
     ctc_max_en_word_sec: num('ctc_max_en_word_sec'),
     ctc_min_sp_sec: num('ctc_min_sp_sec'),
-    qwen3_fa_chunk_threshold_sec: num('qwen3_fa_chunk_threshold_sec'),
-    qwen3_fa_chunk_target_sec: num('qwen3_fa_chunk_target_sec'),
+    qwen3_fa_min_sentence_chunk_sec: num('qwen3_fa_min_sentence_chunk_sec'),
+    qwen3_fa_max_sentence_chunk_sec: num('qwen3_fa_max_sentence_chunk_sec'),
+    qwen3_fa_use_whisperx_prepass: !!settings?.qwen3_fa_use_whisperx_prepass,
+    qwen3_fa_whisperx_prepass_model:
+      (WHISPERX_MODEL_OPTIONS as readonly string[]).includes(prepassModel)
+        ? prepassModel
+        : WHISPERX_DEFAULTS.qwen3_fa_whisperx_prepass_model,
+    whisperx_batch_size: Number.isFinite(batchSize)
+      ? Math.min(Math.max(Math.round(batchSize), 1), 128)
+      : WHISPERX_DEFAULTS.whisperx_batch_size,
   }
 }
 
