@@ -69,6 +69,11 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 |---------|------------|------|
 | num2words | >=0.5.13  | [GitHub](https://github.com/savoirfairelinux/num2words) |
 
+#### LGPL 3.0 License
+| 包名     | 版本       | 链接 |
+|---------|------------|------|
+| edge-tts | >=6.1.12  | [GitHub](https://github.com/rany2/edge-tts) |
+
 #### ISC License
 | 包名     | 版本       | 链接 |
 |---------|------------|------|
@@ -93,6 +98,8 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 | vue-tsc                    | ^1.8.13       | [GitHub](https://github.com/vuejs/language-tools) |
 
 #### BSD 2-Clause
+| 包名                        | 版本          | 链接 |
+|----------------------------|---------------|------|
 | terser                     | ^5.29.1       | [GitHub](https://github.com/terser/terser) |
 
 #### Apache License 2.0
