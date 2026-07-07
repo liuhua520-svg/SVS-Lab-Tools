@@ -128,8 +128,13 @@ def _run_alignment(
     backend: str = "mfa",
     f0_device: str = "auto",
     whisperx_model: str = "large-v3",
+    whisperx_batch_size: int = 16,      # 新增
     english_word_align: bool = False,
     nemo_model: Optional[str] = None,
+    aligner_device: Optional[str] = None,   # 新增：对齐工具（WhisperX/Qwen3/NeMo）运行设备，
+                                             # 与 f0_device（F0 提取设备，CREPE/RMVPE 专用）
+                                             # 彻底解耦。None 时为向后兼容回退到 f0_device，
+                                             # 但正常链路（app.py）应始终显式传入。
 ) -> Dict:
     """
     统一调度对齐后端，返回与 MFAProcessor.process() 格式兼容的字典。
@@ -150,6 +155,15 @@ def _run_alignment(
     import tempfile, shutil, os
     from alt_aligners import get_aligner
 
+    # 【2026-07 修复】此前这里一直误用 f0_device（F0 音高提取设备，只有
+    # advancedConfig.f0_method 为 crepe/rmvpe 时前端才会显示该控件，其余
+    # 情况下前端根本不会提交这个字段，等于永远走默认值 "auto"）来决定
+    # WhisperX / Qwen3 / NeMo 的运行设备——而前端实际展示给用户、用户真正
+    # 用来选择"对齐工具运行设备"的是另一个独立控件 aligner_device。二者
+    # 长期没有打通，导致用户在"对齐工具运行设备"里选择 CPU 完全不会生效，
+    # 对齐后端仍按 f0_device 的（通常是默认 auto → 探测到的 cuda）运行。
+    resolved_aligner_device = aligner_device if aligner_device is not None else f0_device
+
     # 把文件保存到临时目录，获取路径供 alt aligner 使用
     tmp_dir = tempfile.mkdtemp(prefix="alt_aligner_")
     try:
@@ -160,9 +174,10 @@ def _run_alignment(
         extra = {}
         if backend == "whisperx":
             extra["whisper_model"] = whisperx_model
+            extra["batch_size"] = whisperx_batch_size   # 新增
         elif backend == "nemo_aligner" and nemo_model:
             extra["nemo_model"] = nemo_model
-        aligner = get_aligner(backend, device=f0_device, **extra)
+        aligner = get_aligner(backend, device=resolved_aligner_device, **extra)
         return aligner.align(tmp_wav, text or None, language,
                              english_word_align=english_word_align)
     finally:
@@ -208,7 +223,9 @@ class AudioProcessingPipeline:
         f0_device: str = "auto",
         crepe_model: str = "full",
         aligner_backend: str = "mfa",           # ← 新增
+        aligner_device: Optional[str] = None,    # ← 对齐工具运行设备（与 f0_device 解耦，None 时回退到 f0_device）
         whisperx_model: str = "large-v3",       # ← WhisperX 模型大小
+        whisperx_batch_size: int = 16,           # ← WhisperX 推理批大小（仅 device=cuda 时有意义）
         nemo_model: Optional[str] = None,        # ← NeMo Forced Aligner 模型覆盖（可选）
         english_word_align: bool = False,        # ← 英语单词级对齐
         vsqx_singer: str = "MIKU_V4_Chinese",           # ← VSQX 声库名（由 app.py 按语种注入）
@@ -255,8 +272,10 @@ class AudioProcessingPipeline:
             logger.info(f"[ 步骤 1/3 ] 对齐标注 (backend={aligner_backend})...")
             align_result = _run_alignment(audio_file, text, language, aligner_backend,
                                            f0_device, whisperx_model,
+                                           whisperx_batch_size=whisperx_batch_size,
                                            english_word_align=english_word_align,
-                                           nemo_model=nemo_model)
+                                           nemo_model=nemo_model,
+                                           aligner_device=aligner_device)
             if not align_result.get("success"):
                 error = align_result.get("error", "对齐处理失败")
                 logger.error(f"✗ 对齐失败: {error}")
@@ -351,7 +370,9 @@ class AudioProcessingPipeline:
         language: str = "cmn",
         aligner_backend: str = "mfa",           # ← 新增
         f0_device: str = "auto",
+        aligner_device: Optional[str] = None,    # ← 对齐工具运行设备（与 f0_device 解耦，None 时回退到 f0_device）
         whisperx_model: str = "large-v3",       # ← WhisperX 模型大小
+        whisperx_batch_size: int = 16,           # ← WhisperX 推理批大小（仅 device=cuda 时有意义）
         nemo_model: Optional[str] = None,        # ← NeMo Forced Aligner 模型覆盖（可选）
         english_word_align: bool = False,        # ← 英语单词级对齐
     ) -> Dict:
@@ -364,8 +385,10 @@ class AudioProcessingPipeline:
 
             result = _run_alignment(audio_file, text, language, aligner_backend,
                                     f0_device, whisperx_model,
+                                    whisperx_batch_size=whisperx_batch_size,
                                     english_word_align=english_word_align,
-                                    nemo_model=nemo_model)
+                                    nemo_model=nemo_model,
+                                    aligner_device=aligner_device)
 
             if result.get("success"):
                 lab_content = result.get("lab_content", "")
@@ -529,7 +552,9 @@ class AudioProcessingPipeline:
         f0_device: str = "auto",
         crepe_model: str = "full",
         aligner_backend: str = "mfa",
+        aligner_device: Optional[str] = None,    # ← 对齐工具运行设备（与 f0_device 解耦，None 时回退到 f0_device）
         whisperx_model: str = "large-v3",
+        whisperx_batch_size: int = 16,           # ← WhisperX 推理批大小（仅 device=cuda 时有意义）
         nemo_model: Optional[str] = None,
         english_word_align: bool = False,
         vsqx_singer: str = "MIKU_V4_Chinese",
@@ -689,8 +714,10 @@ class AudioProcessingPipeline:
                     align_result = _run_alignment(
                         audio_adapter, text, language, aligner_backend,
                         f0_device, whisperx_model,
+                        whisperx_batch_size=whisperx_batch_size,
                         english_word_align=english_word_align,
                         nemo_model=nemo_model,
+                        aligner_device=aligner_device,
                     )
                     if not align_result.get("success"):
                         box_result.update(

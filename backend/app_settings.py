@@ -80,14 +80,53 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "ctc_min_sp_sec": 0.15,
 
     # Qwen3-ForcedAligner 长音频分段对齐（详见 alt_aligners.py 里
-    # Qwen3ForcedAligner._align_chunked() 的说明）。
-    # 音频总时长超过该阈值（秒）时，自动切分成多段分别对齐，避免长音频
-    # 一次性喂给模型导致时间戳随时长推进逐渐漂移/错位。
-    "qwen3_fa_chunk_threshold_sec": 120.0,
-    # 每段的目标长度（秒）。实际切点会在 [目标长度×0.5, 目标长度×1.5]
-    # 区间内自动吸附到音频能量最低（最可能是真实停顿）的位置，不会严格
-    # 等于这个数值。
-    "qwen3_fa_chunk_target_sec": 100.0,
+    # Qwen3ForcedAligner._align_chunked() / _plan_sentence_aligned_chunks()
+    # 的说明）。
+    #
+    # 【v3】此前的 qwen3_fa_chunk_threshold_sec（音频超过多少秒才分段）和
+    # qwen3_fa_chunk_target_sec（每段目标多长）已废弃移除——这两个参数只按
+    # 音频总时长的比例猜句子边界，猜错了就会把切点定在句子中间。现在完全
+    # 改为按参考文本自身的句末标点（。！？.!?…；\n）分段：每个完整句子
+    # 默认就是独立的一段，不再需要"音频够长才分段"这个前置条件，也不再
+    # 需要一个目标时长把多句"凑"成一段。
+    #
+    # 下面两项只用来处理分句之后的两种边缘情况：
+    # 单句时长下限（秒）：短于此值的句子（如单字/叹词句"嗯。""啊！"）会
+    # 并入相邻句子，避免生成过短、难以稳定对齐的独立音频片段。
+    "qwen3_fa_min_sentence_chunk_sec": 3.0,
+    # 单句时长上限（秒）：长于此值的单句会先按句内逗号/顿号再切一刀，
+    # 避免整句被硬塞进一个过长的独立片段。
+    "qwen3_fa_max_sentence_chunk_sec": 20.0,
+
+    # ── Qwen3-FA 长音频分段：WhisperX 粗测时间戳预处理（可选）──────────────
+    # True  → 在 Qwen3-ForcedAligner 做长音频分段对齐之前，先用 WhisperX
+    #         对同一段音频做一次轻量 ASR 转录（只转录，不做 wav2vec2 强制
+    #         对齐），借用 Whisper 自身 VAD 分段给出的真实语音起止时间戳
+    #         规划分段边界，替代原来"假设语速均匀、按参考文本字符数占比
+    #         反推时间"的估算方案——演唱/拖腔/语速不均的素材上，字符占比
+    #         估算的系统性误差可达 1~2 秒，往往导致喂给 Qwen3-FA 的每一段
+    #         物理边界本身就没卡准，进而触发大量"自愈修复/均匀分配"退化
+    #         兜底。需要预先安装 whisperx（pip install whisperx）；未安装
+    #         或识别失败时自动回退到原方案，不影响任务本身是否成功。
+    # False → 保持原来的字符比例估算方案（默认，不引入 WhisperX 依赖）。
+    "qwen3_fa_use_whisperx_prepass": False,
+    # 上面这次"粗测"专用的 Whisper 模型档位——只影响这一步的速度/准确度，
+    # 与"WhisperX"作为独立对齐后端（backend="whisperx"）时使用的模型档位
+    # 互不影响，是两次独立的模型加载/调用。可选值见 alt_aligners.py 里
+    # WhisperXAligner.SUPPORTED_MODELS（"large-v3" / "large-v3-turbo" /
+    # "large-v2" / "medium" / "small" / "base" / "tiny"）；这里只是定位
+    # 分段边界，不追求最高识别精度，可以选比主对齐更小/更快的档位。
+    "qwen3_fa_whisperx_prepass_model": "large-v3",
+
+    # ── WhisperX ASR 转录 batch_size（独立对齐后端 + 上面 Qwen3-FA 粗测
+    # 预处理共用同一个设置）─────────────────────────────────────────────
+    # 默认 16（与 whisperx 官方默认一致）。低显存显卡（例如 6GB 的老款
+    # 矿卡）在 large-v3 + batch_size=16 下容易在 ASR 转录阶段直接 CUDA
+    # 显存不足；alt_aligners.py 已经内置了显存不足时自动腰斩 batch_size
+    # 重试的逻辑（见 WhisperXAligner._transcribe_with_oom_retry），但如果
+    # 已知自己的显卡显存有限，也可以在这里直接调低这个值，跳过重试直接
+    # 一次成功、减少无谓的重试耗时；反之显存充裕的显卡可以调大以提速。
+    "whisperx_batch_size": 16,
 }
 
 # 对齐调优参数的合法取值范围（秒），用于 save_settings() 里的边界钳制。
@@ -101,9 +140,10 @@ _TUNING_RANGES: Dict[str, tuple] = {
     "ctc_max_cjk_particle_sec": (0.05, 5.0),
     "ctc_max_en_word_sec": (0.05, 5.0),
     "ctc_min_sp_sec": (0.0, 2.0),
-    # 0 表示禁用分段（即使音频再长也整段单次对齐，等同于改造前的行为）。
-    "qwen3_fa_chunk_threshold_sec": (0.0, 3600.0),
-    "qwen3_fa_chunk_target_sec": (0.0, 300.0),
+    # 单句时长下限不允许为 0/负数（否则任意短句都会立刻单独成段）；
+    # 上限也需要明显大于下限，避免两者钳制后颠倒。
+    "qwen3_fa_min_sentence_chunk_sec": (0.1, 600.0),
+    "qwen3_fa_max_sentence_chunk_sec": (1.0, 600.0),
 }
 
 # alt_aligners.get_alignment_tuning() 使用的轻量缓存：避免每次对齐调用都
@@ -142,6 +182,23 @@ def save_settings(new_settings: Dict[str, object]) -> Dict[str, object]:
         current["hide_console_window"] = bool(current.get("hide_console_window"))
         current["skip_start_qwen3_server"] = bool(current.get("skip_start_qwen3_server"))
         current["skip_start_nemo_server"] = bool(current.get("skip_start_nemo_server"))
+
+        # Qwen3-FA WhisperX 粗测预处理：bool 开关 + 模型档位字符串（非法/
+        # 空值回退为默认档位，逻辑与上面 mirror_url 的兜底一致）。
+        current["qwen3_fa_use_whisperx_prepass"] = bool(current.get("qwen3_fa_use_whisperx_prepass"))
+        prepass_model = str(current.get("qwen3_fa_whisperx_prepass_model") or "").strip()
+        current["qwen3_fa_whisperx_prepass_model"] = (
+            prepass_model or DEFAULT_SETTINGS["qwen3_fa_whisperx_prepass_model"]
+        )
+
+        # WhisperX batch_size：转 int 并钳制到 [1, 128]，非法/缺失值回退
+        # 为默认值 16，避免 0/负数/非数字导致 transcribe() 抛出难以理解
+        # 的错误。
+        try:
+            wx_bs = int(current.get("whisperx_batch_size", DEFAULT_SETTINGS["whisperx_batch_size"]))
+        except (TypeError, ValueError):
+            wx_bs = int(DEFAULT_SETTINGS["whisperx_batch_size"])
+        current["whisperx_batch_size"] = min(max(wx_bs, 1), 128)
 
         # 对齐调优参数：转 float 并钳制到 _TUNING_RANGES 定义的合法区间，
         # 非法/缺失/无法解析的值一律回退为默认值，避免脏数据写入导致

@@ -203,6 +203,75 @@ except ImportError:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# 1c. transformers "torch.load 版本门禁" 兼容性补丁
+#     transformers 新版本加入了 check_torch_load_is_safe()：只要检测到当前
+#     安装的 torch < 2.6，就直接拒绝加载任何非 safetensors 格式的权重文件
+#     （CVE-2025-32434，torch.load 反序列化漏洞的官方修复），跟上面 1b 的
+#     weights_only 参数完全无关——即使 1b 已经把 weights_only 改回了
+#     False，这道检查依然会在 torch.load 真正被调用之前就直接抛出
+#     ValueError 拦下。
+#
+#     WhisperX 默认使用的中文强制对齐模型
+#     jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn（以及不少同类
+#     老牌 wav2vec2 CTC 模型）只发布了旧式 pytorch_model.bin，没有
+#     safetensors 版本，在 torch < 2.6 的环境下会被这道门禁拦下，报错
+#     "could not be found in huggingface"——报错信息具有误导性，实际不是
+#     模型不存在，而是加载器主动拒绝加载这个已经下载到本地的文件。
+#
+#     根治办法是把 venv 里的 torch 升级到 >= 2.6；但这可能牵动同一 venv
+#     里 ctranslate2 / faster-whisper 等对 torch 版本有绑定要求的依赖，
+#     不一定能立刻升级、且升级后需要重新验证 whisperx 各项功能仍然正常。
+#     这里参照上面 1b 同样的思路，只针对这一道版本门禁本身打一个禁用
+#     补丁：只信任 HuggingFace Hub 上下载量很大的公开官方模型（如这里
+#     用到的 jonatasgrosman 系列，不涉及加载任何用户上传的不可信文件），
+#     风险与 1b 跳过 weights_only 检查是同一类可接受的权衡。如果后续把
+#     torch 升级到 >= 2.6，这个补丁自然变成等价的无操作（原始检查本身
+#     也会通过），不需要手动回退或删除。
+#
+#     实现细节：transformers 内部是"from .utils.import_utils import
+#     check_torch_load_is_safe"，把函数对象按值拷贝进了
+#     transformers.modeling_utils 自己的命名空间——只替换
+#     import_utils 模块上的属性，对"已经导入过 modeling_utils"的进程
+#     不会生效（这也是为什么必须在任何 transformers 子模块被真正导入
+#     之前，也就是本文件模块顶层这个位置打补丁）。为了同时覆盖"万一
+#     transformers.modeling_utils 在此之前已经被别的地方导入过"这种
+#     情况，下面额外尝试直接覆盖 modeling_utils 里的同名引用兜底。
+# ═════════════════════════════════════════════════════════════════════════════
+try:
+    from transformers.utils import import_utils as _tf_import_utils
+
+    if not getattr(_tf_import_utils.check_torch_load_is_safe, "_tsubaki_patched", False):
+        def _patched_check_torch_load_is_safe(*_args, **_kwargs):
+            return None
+
+        _patched_check_torch_load_is_safe._tsubaki_patched = True
+        _tf_import_utils.check_torch_load_is_safe = _patched_check_torch_load_is_safe
+
+        # 兜底：如果 transformers.modeling_utils 已经被导入过并已经拷贝了
+        # 旧的函数引用，这里直接覆盖它自己命名空间里的那一份。
+        try:
+            from transformers import modeling_utils as _tf_modeling_utils
+            if hasattr(_tf_modeling_utils, "check_torch_load_is_safe"):
+                _tf_modeling_utils.check_torch_load_is_safe = _patched_check_torch_load_is_safe
+        except Exception:
+            pass
+
+        logger.info(
+            "[alt_aligners] 已应用 transformers check_torch_load_is_safe "
+            "兼容性补丁（仅放行 HuggingFace 官方公开模型的非 safetensors "
+            "权重加载；根治办法是把 torch 升级到 >= 2.6）"
+        )
+except ImportError:
+    pass  # transformers 未安装时跳过
+except Exception as _tf_patch_err:
+    logger.warning(
+        f"[alt_aligners] transformers 兼容性补丁应用失败（不影响其他功能，"
+        f"如遇 wav2vec2 对齐模型加载报错可手动升级 torch 至 >= 2.6）: "
+        f"{_tf_patch_err}"
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # 2. 语言代码映射
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -516,14 +585,15 @@ def _get_alignment_tuning() -> Dict[str, float]:
         "ctc_max_cjk_particle_sec": _CTC_MAX_CJK_PARTICLE_SEC,
         "ctc_max_en_word_sec": _CTC_MAX_EN_WORD_SEC,
         "ctc_min_sp_sec": _CTC_MIN_SP_SEC,
-        # 【修复】此前这里漏了这两项，导致 app_settings.get_alignment_tuning()
-        # 实际返回的 qwen3_fa_chunk_threshold_sec / qwen3_fa_chunk_target_sec
-        # 被下面 `if k in fallback` 的过滤条件直接丢弃——设置页面里改这两个
-        # 值保存后，_align_chunked 调用方 (Qwen3ForcedAligner.align()) 读到
-        # 的 tuning.get(...) 永远只会命中调用处自己写的字面量默认值
-        # （30.0 / 20.0），保存设置完全不生效，且没有任何报错或警告。
-        "qwen3_fa_chunk_threshold_sec": 30.0,
-        "qwen3_fa_chunk_target_sec": 20.0,
+        # 【v3】qwen3_fa_chunk_threshold_sec / qwen3_fa_chunk_target_sec 这两个
+        # 纯音频时长维度的分段阈值/目标长度已废弃并从这里移除——分段与否、
+        # 切在哪，现在完全由参考文本自身的句末标点决定（见 _align_chunked /
+        # _plan_sentence_aligned_chunks 顶部说明），不再需要这两个参数。
+        # 按句分段模式下，单句时长的下限/上限（详见 _plan_sentence_aligned_
+        # chunks() 顶部说明）；需要出现在这里才能被下面 `if k in fallback`
+        # 的过滤条件放行，不然设置页面里改了也不会生效。
+        "qwen3_fa_min_sentence_chunk_sec": 3.0,
+        "qwen3_fa_max_sentence_chunk_sec": 20.0,
     }
     try:
         import app_settings
@@ -532,6 +602,62 @@ def _get_alignment_tuning() -> Dict[str, float]:
     except Exception as e:
         logger.debug("读取对齐调优设置失败，使用内置默认值: %s", e)
     return fallback
+
+
+def _get_whisperx_prepass_settings() -> Dict[str, object]:
+    """
+    读取"Qwen3-FA 长音频分段前，先用 WhisperX 做一次粗测时间戳"这一开关
+    及其使用的 Whisper 模型档位（详见 _plan_chunks_via_whisperx_rough_pass
+    顶部说明）。
+
+    与 _get_alignment_tuning() 不同：那边全部是数值型调优参数，走
+    app_settings.get_alignment_tuning() 专用的 float 通道；这里一个是
+    bool 开关、一个是字符串，直接读 app_settings.load_settings() 的
+    原始字典即可，没有必要为此单独扩展 get_alignment_tuning() 的类型
+    约定。本函数只在每次 Qwen3-FA align() 任务开始时调用一次（不是
+    每个分段调用一次），无需像 _get_alignment_tuning() 那样做 mtime
+    缓存，直接读盘即可。
+
+    读取失败（app_settings 不可用、配置文件损坏）时安全回退到"关闭"，
+    与该功能默认不开启保持一致，不影响任何现有行为。
+    """
+    fallback: Dict[str, object] = {
+        "enabled": False,
+        "whisper_model": "large-v3",
+    }
+    try:
+        import app_settings
+        settings = app_settings.load_settings()
+        fallback["enabled"] = bool(settings.get("qwen3_fa_use_whisperx_prepass", False))
+        model = str(settings.get("qwen3_fa_whisperx_prepass_model") or "").strip()
+        if model:
+            fallback["whisper_model"] = model
+    except Exception as e:
+        logger.debug("读取 WhisperX 粗测设置失败，使用默认值（关闭）: %s", e)
+    return fallback
+
+
+def _get_whisperx_batch_size() -> int:
+    """
+    读取 WhisperX ASR 转录使用的 batch_size 调优设置（默认 16，与
+    WhisperXAligner.__init__ 原有默认值一致）。
+
+    单独抽出来实时读取（而不是依赖 WhisperXAligner 实例构造时保存的
+    self.batch_size），是因为该实例作为跨任务复用的单例缓存（见
+    get_aligner()），用户在设置页面调完这个值之后，已经创建好的实例
+    不会重新构造——只有每次转录都重新读一次设置，修改才能在下一次
+    任务上立即生效，不需要重启进程，与其余对齐调优参数的约定一致。
+    详见 WhisperXAligner._transcribe_with_oom_retry() 顶部说明。
+
+    读取失败或配置值非法时安全回退到 16。
+    """
+    try:
+        import app_settings
+        settings = app_settings.load_settings()
+        val = int(settings.get("whisperx_batch_size", 16))
+        return max(1, val)
+    except Exception:
+        return 16
 
 # ─────────────────────────────────────────────────────────────────────────
 # SudachiPy 惰性单例；
@@ -1641,6 +1767,137 @@ class WhisperXAligner(AltAlignerBase):
             logger.info(f"[WhisperX] ✓ 对齐模型 ({lang_code}) 已加载")
         return self._align_models[lang_code]
 
+    # ── 粗测（仅 ASR 转录，不做 wav2vec2 强制对齐）─────────────────────────
+    def _transcribe_rough_segments(self, audio_path: str, language: str) -> Dict:
+        """
+        仅做一次 ASR 转录，拿到 Whisper 自身 VAD 分段给出的句级"粗略"
+        时间戳——不含 align() 后续的逐句裁剪 + wav2vec2 强制对齐 + 静音
+        精修等步骤，因此比完整的 align() 快得多。
+
+        专供 Qwen3ForcedAligner 的长音频分段规划复用（详见模块下方
+        _plan_chunks_via_whisperx_rough_pass 顶部说明）：Qwen3-FA 自己的
+        分段对齐此前完全依赖"假设语速均匀、按参考文本字符数占比反推
+        每句在全曲时间轴上的位置"这一估算方式，在演唱/拖腔/语速不均
+        的素材上系统性误差可达 1~2 秒，导致喂给 Qwen3-FA 的每一段物理
+        边界本身就没卡准，即使 Qwen3-FA 自己对这一段内部再怎么对齐也
+        无法弥补，表现为大量"自愈修复/均匀分配"退化兜底。这里借用
+        WhisperX（真实 ASR，不依赖字符比例假设）的分段结果作为更可靠的
+        边界来源；只用它的 (start, end) 时间戳和"这一段自己识别出多少
+        字"这两个信息，从不使用它识别出的文字内容本身——真正喂给
+        Qwen3-FA 做精细对齐的文本，仍然是原始参考文本按字数配额切出的
+        一个切片（见 _bind_ref_text_by_asr_count），保证不引入 ASR 识别
+        错误。
+
+        Returns
+        -------
+        {"success": True, "raw_segments": [...]}：每个元素至少含
+        "start"/"end"/"text" 三个键（whisperx transcribe() 原始输出格式；
+        "text" 是 Whisper 自己的识别文本，仅用于计算字数配额，不会被
+        当作最终对齐文本使用）。
+        失败（whisperx 未安装 / 音频加载失败 / ASR 无输出）时返回
+        {"success": False, "error": "..."}，调用方应无缝回退到旧的按
+        字符比例估算方案，不让整个对齐任务失败。
+        """
+        try:
+            import whisperx
+        except ImportError as e:
+            return {"success": False, "error": f"whisperx 未安装: {e}"}
+
+        try:
+            wx_lang = _to_whisperx_lang(language)
+
+            # 音频加载：与 align() 里的加载逻辑独立实现（而不是共用同一个
+            # 私有方法），刻意不改动已经过验证的 align() 本身，把这条新增
+            # 路径的风险完全隔离在这个新方法内部——即使这里出现任何问题，
+            # 也不会影响 WhisperX 作为独立对齐后端时的既有行为。
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message=".*torchcodec.*")
+                    audio = whisperx.load_audio(audio_path)
+            except Exception as _ffmpeg_err:
+                try:
+                    import soundfile as _sf
+                    import numpy as _np
+                    _data, _orig_sr = _sf.read(audio_path, always_2d=False)
+                    if _data.ndim > 1:
+                        _data = _data.mean(axis=1)
+                    _data = _data.astype(_np.float32)
+                    if _orig_sr != 16_000:
+                        import librosa as _librosa
+                        _data = _librosa.resample(_data, orig_sr=_orig_sr, target_sr=16_000)
+                    audio = _data
+                except Exception as _sf_err:
+                    return {
+                        "success": False,
+                        "error": f"音频加载失败 (ffmpeg: {_ffmpeg_err}; soundfile: {_sf_err})",
+                    }
+
+            self._load_asr()
+            asr_out = self._transcribe_with_oom_retry(audio, wx_lang)
+            raw_segments = asr_out.get("segments", [])
+            if not raw_segments:
+                return {"success": False, "error": "WhisperX ASR 无输出，请检查音频质量"}
+            return {"success": True, "raw_segments": raw_segments}
+        except Exception as e:
+            logger.warning(f"[WhisperX][粗测] ASR 转录失败: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _transcribe_with_oom_retry(self, audio, wx_lang: str) -> Dict:
+        """
+        对 self._asr_model.transcribe() 的一层 batch_size 自适应重试封装：
+        遇到 CUDA 显存不足时自动腰斩 batch_size 重试，直到 batch_size=1
+        仍然失败才真正把异常抛给调用方。
+
+        背景：WhisperXAligner 是跨任务复用的单例（见 get_aligner() 的
+        缓存），"这次转录用多大的 batch_size"如果只依赖 __init__ 时保存
+        的 self.batch_size，用户在设置页面调完 whisperx_batch_size 之后，
+        已经创建好的单例不会重新构造，改了也不会生效。这里每次调用都
+        实时读取最新的 whisperx_batch_size 设置（与其余对齐调优参数
+        "保存后下一次任务立即生效、无需重启"的约定一致）。
+
+        低显存卡（比如 6GB 的 P106-100 这类老卡，尤其是显存本身已经被
+        其他进程占用一部分时）在默认 batch_size=16 下很容易在 ASR 转录
+        阶段直接 CUDA OOM；自动腰斩重试可以让同一次任务在大多数情况下
+        不需要用户手动调小设置、重新提交就能跑完，只是会慢一些——真正
+        每次都在 batch_size=1 也放不下时，才说明是模型本身（而不是
+        batch_size）对这块显卡来说太大了，此时会抛出一条明确指出"降低
+        whisperx_batch_size 或换更小模型"的错误，而不是把原始难懂的
+        CUDA 报错直接抛给用户。
+        """
+        batch_size = _get_whisperx_batch_size()
+        last_exc: Optional[Exception] = None
+        while batch_size >= 1:
+            try:
+                return self._asr_model.transcribe(
+                    audio, batch_size=batch_size, language=wx_lang
+                )
+            except RuntimeError as e:
+                if "out of memory" not in str(e).lower():
+                    raise
+                last_exc = e
+                logger.warning(
+                    f"[WhisperX] ASR 转录 CUDA 显存不足（batch_size={batch_size}），"
+                    "尝试释放显存缓存并腰斩 batch_size 重试…"
+                )
+                try:
+                    import torch as _torch_oom
+                    if _torch_oom.cuda.is_available():
+                        _torch_oom.cuda.empty_cache()
+                except Exception:
+                    pass
+                if batch_size == 1:
+                    break
+                batch_size = max(1, batch_size // 2)
+
+        raise RuntimeError(
+            f"CUDA 显存不足，即使把 batch_size 降到 1 仍然失败——当前 GPU "
+            f"剩余显存可能已经不够运行 {self.whisper_model} 模型本身（与"
+            "这一条音频具体多长关系不大）。建议在设置里把 "
+            "whisperx_batch_size 调得更小，或把使用的 Whisper 模型档位"
+            "换成更小的（medium / small / base），也可以检查一下是否有"
+            f"其他进程占用了显存。原始错误: {last_exc}"
+        )
+
     # ── 核心对齐（句子隔离版）────────────────────────────────────────────────
     def align(self, audio_path: str, text: Optional[str], language: str,
               english_word_align: bool = False) -> Dict:
@@ -1715,9 +1972,7 @@ class WhisperXAligner(AltAlignerBase):
             # ── 2. ASR 转录（仅用于获取句子级时序边界）──────────────────────
             self._load_asr()
             logger.info("[WhisperX] 开始 ASR 转录...")
-            asr_out      = self._asr_model.transcribe(
-                audio, batch_size=self.batch_size, language=wx_lang
-            )
+            asr_out      = self._transcribe_with_oom_retry(audio, wx_lang)
             raw_segments = asr_out.get("segments", [])
             if not raw_segments:
                 return self._err("WhisperX ASR 无输出，请检查音频质量", t0)
@@ -2480,14 +2735,33 @@ def _apply_qwen3_fa_onset_delay(
 #     这个天然停顿点上，用短时能量曲线在估算位置附近的一个小窗口内寻找
 #     真实的安静区间，去微调物理切点该落在哪一帧——这一步只影响"喂给模型
 #     的音频从哪里剪断"，参考文本的句子边界本身不会再被这一步改变。
-#     由 _plan_sentence_aligned_chunks() 实现；_plan_audio_chunks() 与
-#     _split_text_by_duration_quota() 保留作为参考文本完全没有句末标点
-#     （无法按句切分）时的最终兜底路径。
+#     由 _plan_sentence_aligned_chunks() 实现。
 #
-#     该机制默认开启（音频超过 qwen3_fa_chunk_threshold_sec 秒时自动分段），
-#     阈值和目标分段长度均可在设置页面调整，见 app_settings.py 的
-#     qwen3_fa_chunk_threshold_sec / qwen3_fa_chunk_target_sec。
-#     音频时长未超过阈值时行为与改造前完全一致（不引入任何变化）。
+#     【v3 修正：彻底放弃按音频总时长的阈值/目标分段】旧版还留着一条"整段
+#     没有任何句末标点时，退回 _plan_audio_chunks() + _split_text_by_
+#     duration_quota() 按能量/字符比例强行切分"的兜底路径，并且是否启用
+#     分段这件事本身也由 qwen3_fa_chunk_threshold_sec（音频超过多少秒才
+#     分段）和 qwen3_fa_chunk_target_sec（每段目标多长）这两个纯时长维度
+#     的阈值决定。这两个参数的共同问题是：它们都只看音频总时长，不看文本
+#     本身的句子结构，本质上仍然是"猜"——猜语速均匀、猜句子大致落在哪个
+#     时间点。猜得不准，切点就可能落在句子中间。
+#
+#     现在完全改为只依据参考文本自身的句末标点（。！？.!?…；\n，详见
+#     _SENTENCE_END_RE）来决定切不切、切在哪——每个完整句子默认就是独立
+#     的一段，不再需要"音频够长才分段"这个前置条件，也不再需要一个目标
+#     时长去把多句"凑"成一段。_plan_audio_chunks() 与
+#     _split_text_by_duration_quota() 这两个纯时长/比例切分函数仍保留在
+#     文件里（未被删除，避免影响其他可能的调用方/后续复用），但
+#     _plan_sentence_aligned_chunks() 不再调用它们：如果参考文本连一个
+#     句末标点、逗号、顿号都没有（无法定位任何真实的句子边界），现在会
+#     直接退回"整段单次对齐"，而不是按时长强行切分——宁可不切，也不在
+#     猜出来的位置切错。
+#
+#     min_sentence_chunk_sec / max_sentence_chunk_sec 这两个参数仍然保留
+#     且可在设置页面调整（app_settings.py 对应键
+#     qwen3_fa_min_sentence_chunk_sec / qwen3_fa_max_sentence_chunk_sec），
+#     但它们只处理"单句过短需要并入相邻句子" / "单句过长需要先按句内
+#     逗号顿号再切一刀"这两种边缘情况，不影响"按句子边界切分"这个大前提。
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _compute_rms_curve(
@@ -2839,7 +3113,8 @@ def _plan_sentence_aligned_chunks(
     hop_sec: float,
     text: str,
     int_lang: str,
-    target_chunk_sec: float,
+    min_chunk_sec: float = 3.0,
+    max_chunk_sec: float = 20.0,
 ) -> Tuple[List[Tuple[float, float]], List[str]]:
     """
     按句子边界规划长音频分段（替代"先切音频、再按比例切文本"的旧方案）。
@@ -2847,22 +3122,25 @@ def _plan_sentence_aligned_chunks(
     步骤：
       1. 按句末标点（_SENTENCE_END_RE）把参考文本切成完整的句子，标点
          归属前一句，切分结果拼接后与原文本完全一致。
-      2. 若某个句子自身的估算时长就已经超过硬上限（target_chunk_sec 的
-         1.5 倍），退一步用句内逗号/顿号（_SOFT_PAUSE_RE）再切一刀——
-         仍然是标点位置，不会切在任意字符中间。
+      2. 若某个句子自身的估算时长就已经超过 max_chunk_sec，退一步用句内
+         逗号/顿号（_SOFT_PAUSE_RE）再切一刀——仍然是标点位置，不会切在
+         任意字符中间。
       3. 用各句可发音字符数占比，粗略估算每句结束时刻在全曲时间轴上的
-         位置（假设语速大致均匀；与旧版 _split_text_by_duration_quota()
-         的比例假设一致，只是这里用来定位"句子边界"而不是直接切文本）。
-      4. 按估算时长，把连续的整句分组到 target_chunk_sec 附近，分组永远
-         发生在句子与句子之间，不会拆开某一句。
+         位置（假设语速大致均匀，只用来定位"句子边界"落在物理音频的
+         大致哪个位置，不用于决定切不切、也不直接拿去切文本）。
+      4. 分组：默认每一句（可能已按软停顿拆分过）就是独立的一段——真正
+         做到"每个完整句子交给 QWEN3-FA 独立处理一次"；只有当累计时长
+         还没达到 min_chunk_sec 这个最短门槛时，才继续并入下一句，避免
+         生成过短、难以稳定对齐的独立音频片段（比如"嗯。""啊！"这类
+         单字/叹词句）。
       5. 只在组与组的分界点（两个完整句子之间的天然停顿）上，用短时能量
          曲线在估算位置附近的小窗口内搜索真实安静区间，微调物理切点；
          找不到明显安静区间时退回估算位置本身。
 
-    退化路径：如果参考文本完全没有可用的句末标点（无法按句切分，比如
-    整段是一句话到底的口水文本），退回旧版 _plan_audio_chunks() +
-    _split_text_by_duration_quota() 的纯能量/比例切分，并打印警告——
-    这种情况下确实没有"句子边界"可以依据，只能接受可能在句中切分。
+    退化路径：如果参考文本完全没有可用的标点（连句末标点、逗号、顿号都
+    没有，无法定位任何真实的句子/短语边界——比如整段是一句话到底的口水
+    文本），现在直接退回"整段单次对齐"（不切分），而不是按音频时长/字符
+    比例强行切分：宁可不切，也不在没有真实边界依据的位置猜切点。
 
     Returns
     -------
@@ -2887,16 +3165,14 @@ def _plan_sentence_aligned_chunks(
         else:
             logger.warning(
                 "[Qwen3-FA] 参考文本未检测到任何可用的标点（句末/逗号/顿号），"
-                "无法按标点切分，退回纯音频能量分段（分段处可能切在句子中间）"
+                "无法定位任何真实的句子边界——已放弃按音频时长/字符比例强行"
+                "切分的旧兜底方案（那样切点不落在任何真实边界上，反而更容易"
+                "切在句子中间），退回整段单次对齐"
             )
-            spans = _plan_audio_chunks(total_sec, rms, hop_sec, target_chunk_sec)
-            chunk_durations = [e - s for s, e in spans]
-            chunk_texts = _split_text_by_duration_quota(text, chunk_durations, int_lang)
-            return spans, chunk_texts
+            return [(0.0, total_sec)], [text]
 
-    # 单句本身过长（估算时长超过硬上限）时，先用句内软停顿标点再切一刀，
-    # 避免后续分组时出现"整组被迫超长"的情况。
-    max_chunk_sec = target_chunk_sec * 1.5
+    # 单句本身过长（估算时长超过 max_chunk_sec）时，先用句内软停顿标点
+    # 再切一刀，避免它被硬塞进一个远超预期的独立片段。
     probe_counts = [_count_spoken_units(s, int_lang) for s in sentences]
     total_probe = sum(probe_counts) or 1
     expanded: List[str] = []
@@ -2920,25 +3196,30 @@ def _plan_sentence_aligned_chunks(
     if est_boundaries:
         est_boundaries[-1] = total_sec
 
-    # ── 按估算时长，把连续整句分组到目标长度附近 ────────────────────────
+    # ── 分组：默认每句独立成组，过短的句子才与下一句合并 ─────────────────
+    # 与旧版"累积到 target_chunk_sec 才切一刀"的区别：这里判定条件反过来
+    # 用一个很小的 min_chunk_sec 下限——绝大多数句子的估算时长都会立刻
+    # 超过这个下限，所以几乎每句话都会立刻单独成组；只有明显偏短的句子
+    # （比如感叹词、单字回应）才会继续并入后面的句子，避免出现几百毫秒
+    # 的畸零独立片段。
     n = len(sentences)
     groups: List[Tuple[int, int]] = []   # [(start_idx, end_idx_exclusive), ...]
     start_idx = 0
     group_start_t = 0.0
     for i in range(n):
         cur_dur = est_boundaries[i] - group_start_t
-        if cur_dur >= target_chunk_sec or i == n - 1:
+        if cur_dur >= min_chunk_sec or i == n - 1:
             groups.append((start_idx, i + 1))
             group_start_t = est_boundaries[i]
             start_idx = i + 1
 
-    # 合并过短的收尾分组（< 目标长度的 25%），阈值与 _plan_audio_chunks()
-    # 的尾段合并逻辑保持一致。
+    # 合并过短的收尾分组，阈值同样用 min_chunk_sec 本身（不再是某个大
+    # target 的固定比例）。
     while len(groups) >= 2:
         s0, e0 = groups[-1]
         prev_end_t = est_boundaries[s0 - 1] if s0 > 0 else 0.0
         dur_last = est_boundaries[e0 - 1] - prev_end_t
-        if dur_last < target_chunk_sec * 0.25:
+        if dur_last < min_chunk_sec:
             s_prev, _e_prev = groups[-2]
             groups[-2] = (s_prev, e0)
             groups.pop()
@@ -3048,6 +3329,267 @@ def _plan_sentence_aligned_chunks(
     spans = list(zip(cut_times[:-1], cut_times[1:]))
     chunk_texts = ["".join(sentences[s:e]) for s, e in groups]
     return spans, chunk_texts
+
+
+def _merge_short_spans(
+    spans: List[Tuple[float, float]],
+    texts: List[str],
+    min_chunk_sec: float,
+) -> Tuple[List[Tuple[float, float]], List[str]]:
+    """
+    合并时长仍然低于 min_chunk_sec 的分段（常见于整个 WhisperX ASR 段
+    恰好就是一个感叹词/单字回应）到相邻分段：优先并入前一段（若存在），
+    否则并入后一段；文本按时间顺序拼接，物理区间取并集。
+
+    只做区间合并 + 文本拼接，不重新对齐、不检查合并结果是否跨越脚本
+    切换硬边界——这一层处理的是"WhisperX ASR 段"级别的收尾合并，更细
+    粒度的脚本切换/句内软停顿边界已经在每个 ASR 段内部调用
+    _plan_sentence_aligned_chunks() 时处理过；一个独立 ASR 段恰好短于
+    min_chunk_sec 且恰好在脚本切换点上，这个组合本身已经是双重边缘
+    情况，概率极低，此处不再额外处理。
+
+    Parameters
+    ----------
+    spans, texts : 长度相同、按时间顺序排列，texts[i] 对应 spans[i]。
+
+    Returns
+    -------
+    合并后的 (spans, texts)，长度可能小于输入；只要输入非空，输出也
+    非空（最少剩 1 个分段）。
+    """
+    if len(spans) <= 1:
+        return spans, texts
+
+    merged_spans = [list(s) for s in spans]
+    merged_texts = list(texts)
+
+    i = 0
+    while i < len(merged_spans) and len(merged_spans) > 1:
+        dur = merged_spans[i][1] - merged_spans[i][0]
+        if dur >= min_chunk_sec:
+            i += 1
+            continue
+        if i > 0:
+            # 并入前一段：前一段的结束时刻推到当前段结束，文本追加在后面。
+            merged_spans[i - 1][1] = merged_spans[i][1]
+            merged_texts[i - 1] = merged_texts[i - 1] + merged_texts[i]
+            merged_spans.pop(i)
+            merged_texts.pop(i)
+            # 不前进 i：原来的第 i+1 个分段现在下标变为 i，需要重新
+            # 检查它自己是否也过短（多个连续过短分段会被逐个滚入同一个
+            # 不断增长的前一段，直至累计够长或列表耗尽）。
+        else:
+            # 没有前一段（i == 0）：并入后一段，反向操作。
+            merged_spans[i + 1][0] = merged_spans[i][0]
+            merged_texts[i + 1] = merged_texts[i] + merged_texts[i + 1]
+            merged_spans.pop(i)
+            merged_texts.pop(i)
+            # i 仍为 0，重新检查合并后的新第 0 段。
+
+    return [tuple(s) for s in merged_spans], merged_texts
+
+
+def _stitch_spans_to_full_coverage(
+    spans: List[Tuple[float, float]],
+    rms,
+    hop_sec: float,
+    total_sec: float,
+) -> List[Tuple[float, float]]:
+    """
+    WhisperX 自己的 ASR 段之间通常会留有真实的停顿间隙（VAD 判定为静音，
+    不计入任何一段的 start/end），必须把这些间隙"分配"给相邻两段中的
+    一段，才能保证返回的 spans 无缝覆盖 [0, total_sec]——_align_chunked()
+    是按 spans 逐段裁剪音频喂给 Qwen3-FA 的，如果分段之间留有空隙，
+    空隙对应的那截音频会被完全跳过、永远不会被对齐或出现在最终结果里。
+
+    间隙本身几乎总是真实静音（正是 WhisperX 的 VAD 把它判定为"没有
+    语音"才没有归入任何一段），所以直接在这个间隙区间内用短时能量
+    曲线找一个安静点作为两段共同的新边界即可；找不到明显安静区间时
+    退回间隙中点兜底。开头（第一段之前）和结尾（最后一段之后）的
+    间隙没有"两侧都是真实分段"这个前提，直接扩展到 0 / total_sec。
+
+    传入的 spans 必须已按时间顺序排列；返回一份新的、彼此首尾相接、
+    完整覆盖 [0, total_sec] 的分段列表（不改变分段数量，只调整边界）。
+    """
+    if not spans:
+        return spans
+
+    stitched = [list(s) for s in spans]
+    silence_threshold = _compute_silence_threshold(rms)
+    # 间隙场景下不需要很长的静音判定（间隙本身通常就是真实停顿），
+    # 30ms 足够滤掉数值噪声，同时不会因为门槛过高而找不到候选。
+    min_pause_frames = max(1, int(round(0.03 / hop_sec)))
+
+    if stitched[0][0] > 0.0:
+        stitched[0][0] = 0.0
+    if stitched[-1][1] < total_sec:
+        stitched[-1][1] = total_sec
+
+    for i in range(len(stitched) - 1):
+        gap_start = stitched[i][1]
+        gap_end = stitched[i + 1][0]
+        if gap_end <= gap_start:
+            # 相邻两段恰好相接、或（理论上）互相重叠：直接取中点拆开，
+            # 保证不产生负长度分段。
+            mid = (gap_start + gap_end) / 2.0
+            stitched[i][1] = mid
+            stitched[i + 1][0] = mid
+            continue
+
+        ideal_t = (gap_start + gap_end) / 2.0
+        cut = _find_quiet_run_center(
+            rms, hop_sec, gap_start, gap_end, ideal_t,
+            silence_threshold, min_pause_frames, prefer_longest=True,
+        )
+        if cut is None:
+            cut = _find_quietest_point(rms, hop_sec, gap_start, gap_end)
+        if cut is None:
+            cut = ideal_t
+        stitched[i][1] = cut
+        stitched[i + 1][0] = cut
+
+    return [tuple(s) for s in stitched]
+
+
+def _plan_chunks_via_whisperx_rough_pass(
+    audio_path: str,
+    text: str,
+    int_lang: str,
+    total_sec: float,
+    rms,
+    hop_sec: float,
+    min_chunk_sec: float,
+    max_chunk_sec: float,
+    whisper_model: str = "large-v3",
+    device: str = "auto",
+) -> Tuple[Optional[List[Tuple[float, float]]], Optional[List[str]]]:
+    """
+    用 WhisperX 的"粗测"ASR 转录结果规划 Qwen3-FA 长音频分段边界，替代
+    _plan_sentence_aligned_chunks() 里"假设语速均匀、按参考文本字符数
+    占比反推每句在全曲时间轴上的位置"这一纯估算方案。
+
+    【动机】_plan_sentence_aligned_chunks() 的边界估算本质上仍是"猜"：
+    只知道全曲总时长和每句的字符数占比，不知道音频里真实的语音在哪。
+    演唱/拖腔/语速不均的素材上，这个估算的系统性误差可达 1~2 秒——
+    对切分后再各自独立跑一次 Qwen3-FA 的架构来说，误差直接体现为
+    "喂给某一段的物理音频，开头/结尾多带了或少带了半句话"，Qwen3-FA
+    自己在这一段内部的对齐再精细也无法纠正一个从一开始就错的物理
+    边界，这正是长音频对齐日志里大量"自愈修复/均匀分配"退化兜底的
+    根本原因，而不是 Qwen3-FA 本身对齐能力的问题。
+
+    【思路】WhisperX 是真正跑一遍语音识别，Whisper 自身的 VAD 分段
+    天然落在真实语音的起止点上（不依赖字符比例假设）。这里只用它的
+    ASR 转录步骤（_transcribe_rough_segments，不做后续 wav2vec2 强制
+    对齐，更快）拿到这些真实分段时间戳，再用 _bind_ref_text_by_asr_count()
+    把原始参考文本（保留标点，不用 WhisperX 自己识别出的文字）按各段
+    自己识别出的字数配额切给对应分段——分段的物理边界来自真实 ASR，
+    分段的对齐文本仍然是用户提供的原始参考文本，两者结合但互不污染。
+
+    每个 WhisperX 分段内部仍可能包含多句参考文本、或时长仍然超过
+    max_chunk_sec；这里递归复用 _plan_sentence_aligned_chunks() 本身
+    对每个分段单独再做一次精细规划——区别在于这次喂给它的 total_sec
+    是这一个 WhisperX 段自己的真实时长（通常几秒到二十秒量级），而不
+    是整曲总时长，字符比例估算的误差范围从"整首歌"缩小到"这一个
+    真实分段"，句子切分/脚本切换硬边界/句内软停顿再切一刀/组间能量
+    精修等全部逻辑原样复用，不需要重新实现。跨 WhisperX 段之间可能
+    残留的过短分段，最后用 _merge_short_spans() 再合并一次。
+
+    Returns
+    -------
+    (spans, chunk_texts)：格式、约定与 _plan_sentence_aligned_chunks()
+    完全一致，可直接替换其调用处。任何一步失败（WhisperX 未安装/加载
+    失败、ASR 无输出、参考文本或识别内容为空导致无法按字数配额绑定等）
+    都返回 (None, None)，调用方应无缝回退到 _plan_sentence_aligned_
+    chunks()，不让整个对齐任务失败——这条路径纯粹是"锦上添花"，任何
+    环节出问题都不应该影响任务本身能否成功。
+    """
+    try:
+        wx_ok, wx_msg = WhisperXAligner.check_available()
+        if not wx_ok:
+            logger.warning(
+                f"[Qwen3-FA][WhisperX 粗测] WhisperX 不可用（{wx_msg}），"
+                "回退到按参考文本字符比例估算的分段方案"
+            )
+            return None, None
+
+        whisperx_aligner = get_aligner("whisperx", device=device, whisper_model=whisper_model)
+        rough = whisperx_aligner._transcribe_rough_segments(audio_path, int_lang)
+        if not rough.get("success"):
+            logger.warning(
+                f"[Qwen3-FA][WhisperX 粗测] ASR 转录失败（{rough.get('error')}），"
+                "回退到按参考文本字符比例估算的分段方案"
+            )
+            return None, None
+
+        raw_segments = sorted(
+            rough["raw_segments"], key=lambda s: float(s.get("start", 0.0))
+        )
+
+        # 按各段自身识别出的字数为配额，把原始参考文本（保留标点）顺序
+        # 切给对应段——只借用 WhisperX 的时间戳和字数，不使用它识别出
+        # 的文字内容本身（原地修改 raw_segments[i]["text"]，此后就是
+        # 原始参考文本的切片，不再是 WhisperX 自己的识别结果）。
+        bound_ok = _bind_ref_text_by_asr_count(text, raw_segments, int_lang)
+        if not bound_ok:
+            logger.warning(
+                "[Qwen3-FA][WhisperX 粗测] 参考文本或 ASR 识别内容为空，"
+                "无法按字数配额绑定，回退到按参考文本字符比例估算的分段方案"
+            )
+            return None, None
+
+        spans: List[Tuple[float, float]] = []
+        chunk_texts: List[str] = []
+        n_frames = len(rms)
+
+        for seg in raw_segments:
+            seg_start = max(0.0, float(seg.get("start", 0.0)))
+            seg_end = min(total_sec, float(seg.get("end", seg_start)))
+            seg_text = (seg.get("text") or "").strip()
+            if seg_end <= seg_start or not seg_text:
+                continue
+
+            seg_dur = seg_end - seg_start
+            start_idx = max(0, min(int(round(seg_start / hop_sec)), n_frames))
+            end_idx = max(start_idx + 1, min(int(round(seg_end / hop_sec)), n_frames))
+            local_rms = rms[start_idx:end_idx] if n_frames else rms
+
+            local_spans, local_texts = _plan_sentence_aligned_chunks(
+                seg_dur, local_rms, hop_sec, seg_text, int_lang,
+                min_chunk_sec, max_chunk_sec,
+            )
+            for (ls, le), lt in zip(local_spans, local_texts):
+                spans.append((seg_start + ls, seg_start + le))
+                chunk_texts.append(lt)
+
+        if not spans:
+            logger.warning(
+                "[Qwen3-FA][WhisperX 粗测] 所有 ASR 段绑定参考文本后均为空，"
+                "回退到按参考文本字符比例估算的分段方案"
+            )
+            return None, None
+
+        # WhisperX 的 ASR 段之间通常留有真实停顿间隙（VAD 判定的静音，
+        # 不计入任何一段）；必须先把这些间隙缝合掉，spans 才能像
+        # _plan_sentence_aligned_chunks() 的输出一样无缝覆盖 [0, total_sec]
+        # ——否则间隙对应的音频会被 _align_chunked() 完全跳过。
+        spans = _stitch_spans_to_full_coverage(spans, rms, hop_sec, total_sec)
+
+        spans, chunk_texts = _merge_short_spans(spans, chunk_texts, min_chunk_sec)
+
+        logger.info(
+            f"[Qwen3-FA][WhisperX 粗测] 基于 {len(raw_segments)} 个 WhisperX "
+            f"ASR 段（真实语音边界）规划出 {len(spans)} 个分段，"
+            "不再依赖字符比例估算"
+        )
+        return spans, chunk_texts
+
+    except Exception as e:
+        logger.warning(
+            f"[Qwen3-FA][WhisperX 粗测] 分段规划异常（{e}），"
+            "回退到按参考文本字符比例估算的分段方案",
+            exc_info=True,
+        )
+        return None, None
 
 
 def _split_text_by_duration_quota(
@@ -3220,24 +3762,33 @@ class Qwen3ForcedAligner(AltAlignerBase):
             total_sec = self._get_audio_duration_100ns(audio_path) / 1e7
 
             tuning = _get_alignment_tuning()
-            chunk_threshold_sec = float(tuning.get("qwen3_fa_chunk_threshold_sec", 180.0))
-            chunk_target_sec = float(tuning.get("qwen3_fa_chunk_target_sec", 150.0))
+            # 【v3：不再用音频总时长的阈值/目标时长来决定要不要分段】旧版
+            # qwen3_fa_chunk_threshold_sec（超过多少秒才分段）/
+            # qwen3_fa_chunk_target_sec（每段目标多长）都已放弃使用——这两
+            # 个参数只看音频总时长，不看文本本身的句子结构，本质上仍是
+            # "猜"语速、猜切点。现在统一交给 _align_chunked ->
+            # _plan_sentence_aligned_chunks 按参考文本自身的句末标点
+            # （。！？.!?…；\n）决定切不切、切在哪：只要文本能按标点切出
+            # 2 句及以上，就会分段独立对齐；如果只有 1 句（或短到需要与
+            # 相邻句合并成 1 组）、或完全没有可用标点，_align_chunked 内部
+            # 会自动退化为整段单次对齐——因此这里不需要、也不应该再用一个
+            # 单独的时长阈值去"提前"决定是否进入分段路径。
+            # min/max 这两个值只处理"单句过短需要并入相邻句子"（min）/
+            # "单句过长需要先按句内逗号顿号再切一刀"（max）这两种边缘
+            # 情况，不影响"按句子边界切分"这个大前提本身。
+            min_sentence_chunk_sec = float(tuning.get("qwen3_fa_min_sentence_chunk_sec", 3.0))
+            max_sentence_chunk_sec = float(tuning.get("qwen3_fa_max_sentence_chunk_sec", 20.0))
 
-            # 【长音频分段处理】详见本文件"6c. Qwen3-ForcedAligner 长音频
-            # 分段处理"一节的说明：音频超过阈值时先切成若干短片段分别对齐，
-            # 避免整段喂给模型导致时间戳随时长推进逐渐漂移/错位。
-            # chunk_target_sec <= 0 视为用户主动关闭该功能，保持旧行为。
-            if chunk_target_sec > 0 and total_sec > max(chunk_threshold_sec, 0.0):
-                logger.info(
-                    f"[Qwen3-FA] 音频时长 {total_sec:.1f}s 超过分段阈值 "
-                    f"{chunk_threshold_sec:.1f}s，启用长音频分段对齐"
-                    f"（目标分段长度 {chunk_target_sec:.1f}s）"
-                )
-                word_entries = self._align_chunked(
-                    audio_path, text, lang_name, int_lang, total_sec, chunk_target_sec,
-                )
-            else:
-                word_entries = self._align_single_chunk(audio_path, text, lang_name, int_lang)
+            logger.info(
+                f"[Qwen3-FA] 音频时长 {total_sec:.1f}s，按参考文本句末标点"
+                f"规划分段（单句下限 {min_sentence_chunk_sec:.1f}s / 上限 "
+                f"{max_sentence_chunk_sec:.1f}s；仅 1 句或无可用标点时会"
+                "自动退化为整段单次对齐）"
+            )
+            word_entries = self._align_chunked(
+                audio_path, text, lang_name, int_lang, total_sec,
+                min_sentence_chunk_sec, max_sentence_chunk_sec,
+            )
 
             if not word_entries:
                 return {
@@ -3574,12 +4125,32 @@ class Qwen3ForcedAligner(AltAlignerBase):
     # 真正物理切开音频的切点 split_t，是在这个估算点附近另外做静音搜索
     # 选出来的，两者并不保证严丝合缝。如果某一段实际语速比估算的平均语
     # 速慢（或者相邻两段语速差异较大），就会出现"这一段自己的音频其实
-    # 比分配给它的参考文本要长"——多出来的那截真实语音，其对应的文字被
-    # 分给了下一段。强制对齐只能对齐"给它的文本"，本段文本提前用完之后，
-    # 自己音频里剩下的那一截真实语音就没有任何文本可对应，最终被后续
-    # fill_silences 逻辑整段填成一个和真实停顿毫无关系、但看起来"合理"
-    # 的巨大 SIL——播放时就是一段明显比其他停顿长得多、里面其实还有人声
-    # 的"死区"。
+    # 比分配给它的参考文本要长"——多出来的那截真实语音，其实是下一句话
+    # 提前说出来的开头部分，物理上被划进了当前段的音频范围。强制对齐
+    # 只能对齐"给它的文本"，本段文本提前用完之后，自己音频里剩下的那
+    # 一截真实语音就没有任何文本可对应，最终被后续 fill_silences 逻辑
+    # 整段填成一个和真实停顿毫无关系、但看起来"合理"的巨大 SIL——播放
+    # 时就是一段明显比其他停顿长得多、里面其实还有人声的"死区"。
+    #
+    # 【v2 修正：不再跨段借文本】旧版做法是把下一段参考文本开头一小截
+    # "借"过来拼到本段文本末尾、用本段音频重新对齐一次，再尝试从下一段
+    # 文本里裁掉"估计被借走的部分"。这个"估计"依赖用新旧对齐结果的条目
+    # 数量差反推消费了多少个可发音单元，本质上是近似值——一旦数量估计
+    # 有偏差，下一段文本就会被裁多或裁少一点：下一段自己的音频裁剪范围
+    # 完全没有变（还是从旧的 split_t 开始），只是文本被裁短了，裁剪数量
+    # 一旦对不上，下一段开头就会出现"文本比音频少一点/多一点"的局部
+    # 错位——这正是用户反馈的"边界一旦互相借用，局部就会歪"的根源。
+    #
+    # 新做法只搬运时间边界，完全不碰任何一段的文本：本段的对齐结果（到
+    # last_end 为止）已经是正确的，不需要重新对齐；那截"死区"里的真实
+    # 语音，物理上大概率就是下一句话的开头——所以只需要把本段与下一段
+    # 之间的物理切点，从原来的估算位置 seg_dur，收紧到 [last_end,
+    # seg_dur] 区间内一个真正安静的位置（找不到就直接退到 last_end，把
+    # 这一整截疑似人声原样让给下一段）。调用方 (_align_chunked) 据此把
+    # 下一段的音频裁剪起点相应前移，下一段自己的参考文本完全不用动——
+    # 它本来就是完整的下一句话，音频起点往前挪一点之后，反而能覆盖到
+    # 它提前说出来的开头部分。
+    # ============================================================
 
     # 尾部空白超过这个时长（相对该段自身音频总长）才需要怀疑是死区，而
     # 不是真实的长停顿（实测这批音频里真实停顿基本都在 1 秒以内）。
@@ -3587,178 +4158,81 @@ class Qwen3ForcedAligner(AltAlignerBase):
     # 判断死区里是不是"真的有声音"用的 RMS 门限（输入是 float32 [-1,1]
     # 归一化后的采样点）；纯静音/底噪通常远低于这个值。
     _DEAD_ZONE_RMS_FLOOR = 0.01
-    # 出现死区时，从下一段参考文本开头"借"多少个可发音单元，拼到本段
-    # 文本末尾重新对齐一次。
-    _DEAD_ZONE_BORROW_UNITS = 60
-    # 重新对齐后，尾部必须比修复前至少往后推进这么多秒，才认为确实把
-    # 死区填上了；否则视为真实的长停顿，放弃修复、保留原结果。
-    _DEAD_ZONE_MIN_IMPROVEMENT_SEC = 0.3
 
-    def _fix_trailing_dead_zone(
+    def _resolve_trailing_dead_zone_boundary(
         self,
         local_entries: List[Tuple[float, float, str]],
         cropped_audio,
         sr: int,
-        chunk_text: str,
-        next_chunk_text: str,
-        lang_name: str,
-        int_lang: str,
+        start_sec: float,
         seg_dur: float,
-    ) -> Tuple[List[Tuple[float, float, str]], Optional[str]]:
+        global_rms,
+        hop_sec: float,
+    ) -> Optional[float]:
         """
-        检测并修复"这一段末尾出现一大截本不该存在的空白，但那截音频里其实
-        还有真实人声"的情况（细节见上方模块说明）。
+        检测"这一段末尾出现一大截本不该存在的空白，但那截音频里其实还有
+        真实人声"的情况（细节见上方模块说明），如果确认存在，返回一个
+        新的、应该收紧到的物理切点（本曲全局时间轴，单位秒）；调用方
+        (_align_chunked) 用这个值前移下一段音频裁剪的起点即可，不需要
+        对任何一段的参考文本做任何修改。
 
         Returns
         -------
-        (repaired_entries, new_next_chunk_text)
-            repaired_entries：修复后的局部对齐结果（本段自身时间轴，从 0
-            开始）；没有检测到死区、或修复失败时原样返回 local_entries。
-            new_next_chunk_text：为 None 时表示"不需要修改下一段的参考
-            文本"（包括没有触发修复、触发了但没能确认具体借用了多少内容
-            两种情况）；否则是已经裁掉被借用部分之后、下一段应该使用的
-            剩余参考文本，调用方直接整体替换 chunk_texts[idx + 1] 即可，
-            不需要再做任何字符串匹配。
+        Optional[float]：全局时间轴上的新切点。None 表示未检测到需要
+        处理的死区（尾部空白不够长，或那截空白确实是真安静）——此时
+        调用方应保持原有物理切点不变。
         """
         if not local_entries:
-            return local_entries, None
+            return None
 
-        last_end = local_entries[-1][1]
-        tail_gap = seg_dur - last_end
+        last_end_local = local_entries[-1][1]
+        tail_gap = seg_dur - last_end_local
         if tail_gap < self._DEAD_ZONE_MIN_SEC:
-            return local_entries, None  # 尾部空白不够长，不值得怀疑
-
-        next_text = (next_chunk_text or "").strip()
-        if not next_text:
-            return local_entries, None  # 已经是最后一段，没有文本可借
+            return None  # 尾部空白不够长，不值得怀疑
 
         # 用简单的 RMS 快速判断这截"疑似死区"是不是真的安静。
-        st = max(0, int(round(last_end * sr)))
+        st = max(0, int(round(last_end_local * sr)))
         en = min(len(cropped_audio), int(round(seg_dur * sr)))
         tail_audio = cropped_audio[st:en]
         if len(tail_audio) == 0:
-            return local_entries, None
+            return None
         try:
-            rms = float((tail_audio.astype("float64") ** 2).mean()) ** 0.5
+            rms_val = float((tail_audio.astype("float64") ** 2).mean()) ** 0.5
         except Exception:
-            return local_entries, None
-        if rms < self._DEAD_ZONE_RMS_FLOOR:
-            return local_entries, None  # 确实是真安静，不是死区
+            return None
+        if rms_val < self._DEAD_ZONE_RMS_FLOOR:
+            return None  # 确实是真安静，不是死区，物理切点不需要调整
 
-        # units 保留下一段参考文本里的每一个原始字符（含标点），后面裁剪
-        # 下一段文本时要按这个"含标点"的原始下标来切，不能用过滤完标点
-        # 之后的字符数，否则会因为标点不产生对齐条目而算错该裁多少。
-        units = (
-            list(next_text) if int_lang in ("zh", "yue", "ja", "ko")
-            else next_text.split()
+        # 在 [last_end, seg_dur] 这个区间内（换算到全局时间轴）找一个真正
+        # 安静的位置，作为新的物理切点；复用与句子边界微调完全相同的
+        # "安静阈值 + 连续安静区间"判定标准（_compute_silence_threshold /
+        # _find_quiet_run_center），确保全文件"何为安静"的标准统一。
+        last_end_global = start_sec + last_end_local
+        nominal_end_global = start_sec + seg_dur
+        silence_threshold = _compute_silence_threshold(global_rms)
+        min_pause_frames = max(1, int(round(0.12 / hop_sec)))
+        quiet_t = _find_quiet_run_center(
+            global_rms, hop_sec, last_end_global, nominal_end_global,
+            last_end_global, silence_threshold, min_pause_frames,
+            prefer_longest=False,
         )
-        borrow_units = units[: self._DEAD_ZONE_BORROW_UNITS]
-        if not borrow_units:
-            return local_entries, None
-        borrow_text = (
-            "".join(borrow_units) if int_lang in ("zh", "yue", "ja", "ko")
-            else " ".join(borrow_units)
-        )
-        sep = "" if int_lang in ("zh", "yue", "ja", "ko") else " "
-        extended_text = (chunk_text or "").strip() + sep + borrow_text
-
-        import tempfile
-        import os as _os
-        try:
-            import soundfile as sf
-        except ImportError:
-            logger.warning("[Qwen3-FA][死区修复] 缺少 soundfile，跳过死区修复")
-            return local_entries, None
-
-        tmp_wav = None
-        try:
-            fd, tmp_wav = tempfile.mkstemp(suffix=".wav", prefix="qwen3_fa_deadzone_")
-            _os.close(fd)
-            sf.write(tmp_wav, cropped_audio, sr)
-            retried = self._align_single_chunk(tmp_wav, extended_text, lang_name, int_lang)
-        except Exception as exc:
-            logger.warning(f"[Qwen3-FA][死区修复] 借用下一段文本重新对齐失败（{exc}），保留原结果")
-            return local_entries, None
-        finally:
-            if tmp_wav:
-                try:
-                    _os.remove(tmp_wav)
-                except OSError:
-                    pass
-
-        if not retried:
-            return local_entries, None
-
-        # 【越界/倒退防护】借用的文本有可能比这一段音频实际能承载的语音
-        # 还多；模型仍然被强制要求给所有输入文本安排时间戳，对于超出
-        # 音频真实内容的多余文本，可能会外推出一些落在 [0, seg_dur] 之
-        # 外、甚至不再随顺序单调递增的"幻觉"时间戳。这类条目一旦混进
-        # 最终结果，会让后面的退化检测算出语无伦次的区间（例如某个条目
-        # 的"结束时间"反而比后一个条目的"开始时间"更晚）。这里直接从头
-        # 扫描，一旦遇到越界或倒退就整体截断，只保留前面确认可信的部分。
-        clipped: List[Tuple[float, float, str]] = []
-        prev_end = 0.0
-        for s, e, tok in retried:
-            if s < prev_end - 1e-6 or s >= seg_dur:
-                break
-            clipped.append((s, min(e, seg_dur), tok))
-            prev_end = min(e, seg_dur)
-        retried = clipped
-        if not retried:
-            return local_entries, None
-
-        new_last_end = retried[-1][1]
-        if new_last_end < last_end + self._DEAD_ZONE_MIN_IMPROVEMENT_SEC:
-            # 借了文本也没能把尾部填上，大概率真的是一段很长的停顿
-            # （比如说话人真的换气/停顿了很久），放弃修复、保留原结果。
-            logger.info(
-                f"[Qwen3-FA][死区修复] 尾部 {tail_gap:.2f}s 疑似死区（RMS={rms:.4f}），"
-                "借用下一段文本重新对齐后仍无改善，视为真实长停顿，保留原结果"
+        if quiet_t is None:
+            quiet_t = _find_quietest_point(
+                global_rms, hop_sec, last_end_global, nominal_end_global,
             )
-            return local_entries, None
+        # 找不到任何候选时，直接退到 last_end——把这一整截疑似人声原样
+        # 让给下一段，既不生成额外的假静音，也不会丢失任何内容。
+        new_boundary_global = quiet_t if quiet_t is not None else last_end_global
+        new_boundary_global = max(last_end_global, min(new_boundary_global, nominal_end_global))
 
-        # 估算这次重新对齐"吃掉"了下一段文本开头多少个可发音单元：用新
-        # 结果里非 SIL 条目数减去本段原本应有的单元数。
-        original_units = (
-            [u for u in (chunk_text or "").strip() if u.strip() and not _is_cjk_punct(u)]
-            if int_lang in ("zh", "yue", "ja", "ko")
-            else [u for u in (chunk_text or "").strip().split() if u.strip()]
-        )
-        new_non_sil = [tok for _, _, tok in retried if tok != "SIL"]
-        recognized_borrowed = max(0, len(new_non_sil) - len(original_units))
-
-        if recognized_borrowed <= 0:
-            logger.info(
-                f"[Qwen3-FA][死区修复] 尾部 {tail_gap:.2f}s 死区已通过重新对齐改善，"
-                "但无法确定具体消费了下一段的多少内容，下一段文本不做裁剪"
-            )
-            return retried, None
-
-        # 把"消费了多少个可发音单元"换算成 units（含标点）里的原始下标：
-        # 从头数，跳过标点，数满 recognized_borrowed 个可发音字符后，
-        # 其后的位置就是应该裁掉的原始字符范围的右边界。这样标点符号
-        # 本身不产生对齐条目也不会导致裁剪长度算错。
-        raw_cut_idx = len(units)  # 默认：全部借用的都被消费掉了
-        pronounceable_seen = 0
-        for idx, u in enumerate(units):
-            if not u.strip() or _is_cjk_punct(u):
-                continue
-            pronounceable_seen += 1
-            if pronounceable_seen >= recognized_borrowed:
-                raw_cut_idx = idx + 1
-                break
-
-        remaining_units = units[raw_cut_idx:]
-        new_next_text = (
-            "".join(remaining_units) if int_lang in ("zh", "yue", "ja", "ko")
-            else " ".join(remaining_units)
-        )
         logger.info(
-            f"[Qwen3-FA][死区修复] 尾部 {tail_gap:.2f}s 死区确认存在真实语音（RMS={rms:.4f}），"
-            f"借用下一段开头 {recognized_borrowed} 个可发音单元（原始 {raw_cut_idx} 个字符，"
-            f"含标点）后重新对齐成功，尾部空白收窄为 {seg_dur - new_last_end:.2f}s"
+            f"[Qwen3-FA][死区修复] 尾部 {tail_gap:.2f}s 确认存在真实语音"
+            f"（RMS={rms_val:.4f}），把本段与下一段的物理切点从 "
+            f"{nominal_end_global:.2f}s 收紧到 {new_boundary_global:.2f}s"
+            "（本段对齐结果不变，多出的这一截音频整体让给下一段，"
+            "不借用/不修改任何一段的参考文本）"
         )
-        return retried, new_next_text
+        return new_boundary_global
 
     def _align_chunked(
         self,
@@ -3767,21 +4241,30 @@ class Qwen3ForcedAligner(AltAlignerBase):
         lang_name: str,
         int_lang: str,
         total_sec: float,
-        chunk_target_sec: float,
+        min_sentence_chunk_sec: float = 3.0,
+        max_sentence_chunk_sec: float = 20.0,
     ) -> List[Tuple[float, float, str]]:
         """
         长音频分段对齐主流程：
 
           1. 读取整段音频，计算短时能量曲线。
           2. 按句子边界规划分段（_plan_sentence_aligned_chunks）：先按
-             标点把参考文本切成完整的句子/句子组，永远不在句子内部
-             下刀；分段之间的物理切点再用短时能量曲线在句子边界附近
-             微调到真实安静区间。参考文本完全没有标点、无法按句切分时，
-             才退回旧版纯能量/比例切分（_plan_audio_chunks +
-             _split_text_by_duration_quota）。
+             标点把参考文本切成完整的句子，默认每一句就是独立的一段
+             （只有短于 min_sentence_chunk_sec 的过短句子才会与相邻句子
+             合并；长于 max_sentence_chunk_sec 的过长句子会先按句内软
+             停顿再切一刀），永远不在句子内部下刀；分段之间的物理切点
+             再用短时能量曲线在句子边界附近微调到真实安静区间。参考
+             文本完全没有标点、无法按句切分时，直接退回整段单次对齐
+             （不再按音频时长/字符比例强行切分）。
           3. 逐段物理裁剪音频、写临时 wav，分别调用
-             _align_single_chunk() 做局部对齐。
-          4. 局部时间戳 + 该段起始偏移 = 全局绝对时间戳，按顺序拼接。
+             _align_single_chunk() 做局部对齐——每一段只知道自己的音频
+             和自己的文本，互相之间完全独立（同 DialogueBatch.vue 批量
+             独立对轨的思路一致）。
+          4. 若某段结果末尾检测到"死区"（见 _resolve_trailing_dead_zone_
+             boundary 顶部说明），只前移下一段的物理裁剪起点，不修改
+             任何一段的参考文本。
+          5. 局部时间戳 + 该段起始偏移 = 全局绝对时间戳，按顺序拼接
+             （只做时间平移，不做文本补偿）。
 
         任何一步意外失败（音频读取失败、规划出的分段数 <= 1、某一段对齐
         异常等）都不会让整个任务失败：分别退化为"整段单次对齐"或"该段
@@ -3833,9 +4316,30 @@ class Qwen3ForcedAligner(AltAlignerBase):
         audio = np.asarray(audio, dtype=np.float32)
 
         rms, hop_sec = _compute_rms_curve(audio, sr)
-        spans, chunk_texts = _plan_sentence_aligned_chunks(
-            total_sec, rms, hop_sec, text, int_lang, chunk_target_sec,
-        )
+
+        # 【WhisperX 粗测预处理，可选，默认关闭】见设置项
+        # qwen3_fa_use_whisperx_prepass 说明与 _plan_chunks_via_whisperx_
+        # rough_pass() 顶部说明：开启后先用 WhisperX 的 ASR 转录结果（真实
+        # 语音边界）规划分段，只有在 WhisperX 不可用/失败/无法绑定参考
+        # 文本时，才回退到下面 _plan_sentence_aligned_chunks() 这套按
+        # 字符比例估算的旧方案——两条路径的输出格式完全一致，回退过程
+        # 对调用方透明，不影响任务本身是否成功。
+        spans: Optional[List[Tuple[float, float]]] = None
+        chunk_texts: Optional[List[str]] = None
+        prepass = _get_whisperx_prepass_settings()
+        if prepass.get("enabled"):
+            spans, chunk_texts = _plan_chunks_via_whisperx_rough_pass(
+                audio_path, text, int_lang, total_sec, rms, hop_sec,
+                min_sentence_chunk_sec, max_sentence_chunk_sec,
+                whisper_model=str(prepass.get("whisper_model", "large-v3")),
+                device=getattr(self, "_device", "auto"),
+            )
+
+        if spans is None:
+            spans, chunk_texts = _plan_sentence_aligned_chunks(
+                total_sec, rms, hop_sec, text, int_lang,
+                min_sentence_chunk_sec, max_sentence_chunk_sec,
+            )
 
         if len(spans) <= 1:
             logger.info("[Qwen3-FA] 规划结果无需分段，按整段单次对齐处理")
@@ -3849,8 +4353,14 @@ class Qwen3ForcedAligner(AltAlignerBase):
         tmp_dir = tempfile.mkdtemp(prefix="qwen3_fa_chunk_")
         all_entries: List[Tuple[float, float, str]] = []
         try:
-            for idx, ((start_sec, end_sec), chunk_text) in enumerate(zip(spans, chunk_texts)):
-                chunk_text = (chunk_text or "").strip()
+            # 注意：spans 在循环体内可能被就地修改（死区修复只前移"下一段"
+            # 的起点，不会改变已经处理过的段），用 range(len(spans)) 顺序
+            # 索引读取，而不是提前用 zip() 打包一份快照，确保每次都读到
+            # 最新值。
+            n_spans = len(spans)
+            for idx in range(n_spans):
+                start_sec, end_sec = spans[idx]
+                chunk_text = (chunk_texts[idx] or "").strip()
                 seg_dur = end_sec - start_sec
 
                 st_samp = max(0, int(round(start_sec * sr)))
@@ -3860,37 +4370,42 @@ class Qwen3ForcedAligner(AltAlignerBase):
                 local_entries: List[Tuple[float, float, str]] = []
                 if not chunk_text:
                     logger.warning(
-                        f"[Qwen3-FA] 第 {idx + 1}/{len(spans)} 段未分配到参考文本，跳过对齐"
+                        f"[Qwen3-FA] 第 {idx + 1}/{n_spans} 段未分配到参考文本，跳过对齐"
                     )
                 elif len(cropped) < int(0.05 * sr):
                     logger.warning(
-                        f"[Qwen3-FA] 第 {idx + 1}/{len(spans)} 段裁剪后过短，跳过对齐"
+                        f"[Qwen3-FA] 第 {idx + 1}/{n_spans} 段裁剪后过短，跳过对齐"
                     )
                 else:
                     chunk_wav = _os.path.join(tmp_dir, f"chunk_{idx:03d}.wav")
                     try:
                         sf.write(chunk_wav, cropped, sr)
+                        # 每一段只喂给自己的音频 + 自己的文本，彼此完全
+                        # 独立，互不知道对方的存在（不借用、不跨段修复）。
                         local_entries = self._align_single_chunk(chunk_wav, chunk_text, lang_name, int_lang)
                     except Exception as exc:
                         logger.error(
-                            f"[Qwen3-FA] 第 {idx + 1}/{len(spans)} 段对齐失败（{exc}），"
+                            f"[Qwen3-FA] 第 {idx + 1}/{n_spans} 段对齐失败（{exc}），"
                             "该段退化为按时长均匀分配（精度较低）"
                         )
                         local_entries = []
 
-                # 【尾部死区检测与修复】见 _fix_trailing_dead_zone 顶部说明：
-                # 这一段自己已经对齐出结果，但结果末尾比这一段自己的音频
-                # 总时长明显短一截，且那一截里其实还有真实人声——大概率是
-                # 参考文本被多分给了下一段。尝试借下一段开头一小截文本
-                # 重新对齐；如果借用成功，还要把已经被"借走"的这部分文本
-                # 从下一段的参考文本里裁掉，避免下一段重复对齐同一段内容。
-                if local_entries and chunk_text and idx + 1 < len(chunk_texts):
-                    local_entries, new_next_text = self._fix_trailing_dead_zone(
-                        local_entries, cropped, sr, chunk_text, chunk_texts[idx + 1],
-                        lang_name, int_lang, seg_dur,
+                # 【尾部死区检测与修复】见 _resolve_trailing_dead_zone_boundary
+                # 顶部说明：这一段自己已经对齐出结果，但结果末尾比这一段
+                # 自己的音频总时长明显短一截，且那一截里其实还有真实
+                # 人声——大概率是下一句话提前说出来的开头部分，物理上被
+                # 划进了当前段。只前移下一段的物理裁剪起点，不修改任何
+                # 一段的参考文本（不借用、不重新对齐、不做数量估计）。
+                if local_entries and idx + 1 < n_spans:
+                    new_boundary = self._resolve_trailing_dead_zone_boundary(
+                        local_entries, cropped, sr, start_sec, seg_dur, rms, hop_sec,
                     )
-                    if new_next_text is not None:
-                        chunk_texts[idx + 1] = new_next_text
+                    if new_boundary is not None:
+                        next_start, next_end = spans[idx + 1]
+                        # 只收紧，不越界：新边界必须落在 [本段起点, 下一段
+                        # 终点) 之间，避免下一段音频被挤压成空/负长度。
+                        new_boundary = max(start_sec, min(new_boundary, next_end - 0.05))
+                        spans[idx + 1] = (new_boundary, next_end)
 
                 if not local_entries and chunk_text:
                     # 降级：该段内按可发音单元均匀分配时长，保证时间轴不断裂。
@@ -4231,22 +4746,13 @@ _SINGLETON: Dict[str, AltAlignerBase] = {}
 
 
 def get_aligner(backend: str, device: str = "auto", **kwargs) -> AltAlignerBase:
-    """
-    工厂函数：按 backend 名称创建或复用对齐器单例。
-    backend: "whisperx" | "qwen3_asr" | "qwen3_aligner" | "nemo_aligner"
-
-    对于 "whisperx"，额外识别 whisper_model 关键字参数（默认 "large-v3"）。
-    对于 "nemo_aligner"，额外识别 nemo_model 关键字参数（默认 None →
-    由 nemo_server.py 按语言使用内置默认模型）；device 会原样转发给
-    nemo_server.py 的 /align 接口，由该独立进程决定实际运行设备
-    （nemo_aligner 本身不在当前进程内加载任何模型）。
-    不同 model 使用独立缓存键，切换模型会创建新实例（旧实例保留在内存中，
-    避免重复初始化开销）。
-    """
     global _SINGLETON
+    resolved_device = _safe_device(device)   # 提前解析一次，用真实设备做 key
+
     if backend == "whisperx":
         whisper_model = kwargs.pop("whisper_model", "large-v3")
-        cache_key = f"whisperx:{whisper_model}"
+        batch_size = kwargs.get("batch_size", 16)
+        cache_key = f"whisperx:{whisper_model}:{resolved_device}:{batch_size}"
         if cache_key not in _SINGLETON:
             _SINGLETON[cache_key] = WhisperXAligner(
                 whisper_model=whisper_model, device=device, **kwargs
@@ -4255,21 +4761,43 @@ def get_aligner(backend: str, device: str = "auto", **kwargs) -> AltAlignerBase:
 
     if backend == "nemo_aligner":
         nemo_model = kwargs.pop("nemo_model", None)
-        cache_key = f"nemo_aligner:{nemo_model or 'default'}"
+        cache_key = f"nemo_aligner:{nemo_model or 'default'}:{resolved_device}"
         if cache_key not in _SINGLETON:
             _SINGLETON[cache_key] = NeMoForcedAligner(
                 device=device, nemo_model=nemo_model, **kwargs
             )
         return _SINGLETON[cache_key]
 
-    if backend not in _SINGLETON:
+    cache_key = f"{backend}:{resolved_device}"
+    if cache_key not in _SINGLETON:
         if backend == "qwen3_asr":
-            _SINGLETON[backend] = Qwen3ASRAligner(device=device, **kwargs)
+            _SINGLETON[cache_key] = Qwen3ASRAligner(device=device, **kwargs)
         elif backend == "qwen3_aligner":
-            _SINGLETON[backend] = Qwen3ForcedAligner(device=device, **kwargs)
+            _SINGLETON[cache_key] = Qwen3ForcedAligner(device=device, **kwargs)
         else:
             raise ValueError(f"未知对齐后端: {backend}")
-    return _SINGLETON[backend]
+    return _SINGLETON[cache_key]
+
+
+def clear_aligner_cache(backend: Optional[str] = None) -> int:
+    """
+    清理单例缓存，释放旧设备/旧配置留下的实例（及其显存/内存占用）。
+
+    - backend=None: 清空所有缓存的 aligner 实例
+    - backend="whisperx" / "nemo_aligner" / "qwen3_asr" / "qwen3_aligner":
+      只清理该 backend 前缀对应的所有缓存条目（不同 model/device/batch_size 的都会被清掉）
+    返回被清理的条目数。
+    """
+    global _SINGLETON
+    if backend is None:
+        n = len(_SINGLETON)
+        _SINGLETON.clear()
+        return n
+
+    keys_to_drop = [k for k in _SINGLETON if k == backend or k.startswith(f"{backend}:")]
+    for k in keys_to_drop:
+        del _SINGLETON[k]
+    return len(keys_to_drop)
 
 
 def get_alt_aligner_status() -> Dict:
