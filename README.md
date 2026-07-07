@@ -6,7 +6,7 @@
 
 它的目标不是做 SVS，也不是替代歌声合成引擎本身，而是作为一座桥梁，帮助歌姬“假装擅长说话”：
 
-- 先用 **[Qwen3-ForcedAligner-0.6B](https://github.com/QwenLM/Qwen3-ASR)** 将音频与文本自动对齐，生成 `.lab`
+- 先用 **[Qwen3-FA](https://github.com/QwenLM/Qwen3-ASR)** 将音频与文本自动对齐，生成 `.lab`
 - 再用 **[PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)** 提取 F0 音高
 - 最后输出歌声合成工程文件，便于在软件中继续编辑和播放
 
@@ -21,7 +21,7 @@
 ## ✨ 主要功能
 
 * **仅标注（快速）**
-  只执行 Qwen3-ForcedAligner-0.6B 自动对齐，快速生成 `.lab`。
+  只执行 Qwen3-FA 自动对齐，快速生成 `.lab`。
 
 * **完整处理（标注 + F0 + 工程文件）**
   自动完成标注、音高提取，并输出歌声合成工程文件。
