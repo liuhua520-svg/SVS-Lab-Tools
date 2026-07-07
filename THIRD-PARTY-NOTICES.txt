@@ -3,7 +3,7 @@ THIRD-PARTY-NOTICES
 This repository includes third-party software and data packages in addition to the project source code.
 
 Project source code:
-- Repository: liuhua520-svg/SVS-Lab-Tools-WebUI
+- Repository: liuhua520-svg/gpt-sovits-mfa-aligner-tsubaki
 - Upstream project license: MIT
 
 Keep this notice together with the project LICENSE file in any distribution.
@@ -14,7 +14,7 @@ Keep this notice together with the project LICENSE file in any distribution.
 
 The project itself is licensed under the MIT License.
 
-Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools-WebUI)
+Copyright (c) 2026 xiaohuang12345-ts
 
 See the repository LICENSE file for the full text of the MIT License.
 
@@ -151,6 +151,12 @@ Based on backend/requirements.txt
   Copyright (c) 2013-2024 Ole Martin Bjørndalen
   License: MIT
   Link: https://github.com/SpotlightKid/mido
+
+=== TTS模块 ===
+- edge-tts>=6.1.12
+  Copyright (c) 2025- rany <rany@riseup.net>
+  License: LGPL-3.0
+  Link: https://github.com/rany2/edge-tts
 
 === 其他 ===
 - requests
