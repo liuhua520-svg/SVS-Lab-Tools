@@ -495,6 +495,25 @@
           </el-select>
         </el-form-item>
 
+        <!-- 对齐辅助移调：只生成一份临时移调音频副本喂给对齐后端做时间戳
+             识别，不影响最终 WAV / F0 / 工程文件的音高，也不影响 LAB 时间
+             戳（纯移调不改变时长）。高音音频/高音色 TTS 偶发导致对齐模型
+             内部特征错位时可以尝试调低（负值）。 -->
+        <el-form-item
+          v-if="processingMode !== 'project-only'"
+          :label="t('processor.alignPitchShift')"
+        >
+          <el-input-number
+            v-model="advancedConfig.align_pitch_shift_semitones"
+            :min="-24" :max="24" :step="1"
+            controls-position="right"
+            style="width: 160px"
+          />
+          <span class="option-hint">
+            {{ t('processor.alignPitchShiftHint') }}
+          </span>
+        </el-form-item>
+
         <!-- 英语单词级对齐：仅当语言非日语时显示 -->
         <el-form-item
           v-if="processingMode !== 'project-only' && formData.language !== 'jpn'"
@@ -1123,6 +1142,9 @@ interface AdvancedConfig {
   f0_method: 'dio' | 'harvest' | 'crepe' | 'rmvpe'
   f0_device: 'auto' | 'cpu' | 'cuda'
   aligner_device: 'auto' | 'cpu' | 'cuda'  // WhisperX / Qwen3 对齐工具运行设备
+  align_pitch_shift_semitones: number       // 对齐辅助移调（半音，正数升调/负数降调）
+                                              // 仅影响送入对齐后端的临时音频副本，不影响
+                                              // 最终 LAB 时间戳换算、F0 提取或工程文件音高
   whisperx_model: string                    // WhisperX Whisper 模型选择
   whisperx_batch_size: number                // WhisperX 推理批大小（仅 aligner_device=cuda 时有实际意义）
   nemo_model: string                        // NeMo Forced Aligner 模型覆盖（可选，留空用语言默认模型）
@@ -1291,6 +1313,7 @@ const advancedConfig = ref<AdvancedConfig>({
   f0_method: 'dio',
   f0_device: 'auto',
   aligner_device: 'auto',
+  align_pitch_shift_semitones: 0,
   whisperx_model: 'large-v3',
   whisperx_batch_size: 16,
   nemo_model: '',
@@ -2103,6 +2126,7 @@ const processAudio = async () => {
       formDataObj.append('pitch', `${ttsConfig.value.pitchNum >= 0 ? '+' : ''}${ttsConfig.value.pitchNum}Hz`)
       formDataObj.append('volume', `${ttsConfig.value.volumeNum >= 0 ? '+' : ''}${ttsConfig.value.volumeNum}%`)
       formDataObj.append('aligner_device', advancedConfig.value.aligner_device)
+      formDataObj.append('align_pitch_shift_semitones', advancedConfig.value.align_pitch_shift_semitones.toString())
       formDataObj.append('english_word_align', (englishWordAlign.value && formData.value.language !== 'jpn').toString())
       formDataObj.append('processing_mode', processingMode.value === 'full' ? 'full' : 'mfa-only')
       // 如果之前手动点过"生成预览"且文本/参数之后未再变化，previewId 仍然
@@ -2341,6 +2365,7 @@ if (processingMode.value === 'project-only') {
     formDataObj.append('language', formData.value.language)
     formDataObj.append('aligner_backend', alignerBackend.value)
     formDataObj.append('aligner_device', advancedConfig.value.aligner_device)
+    formDataObj.append('align_pitch_shift_semitones', advancedConfig.value.align_pitch_shift_semitones.toString())
     formDataObj.append('whisperx_model', advancedConfig.value.whisperx_model)
     formDataObj.append('whisperx_batch_size', advancedConfig.value.whisperx_batch_size.toString())
     formDataObj.append('nemo_model', advancedConfig.value.nemo_model || '')

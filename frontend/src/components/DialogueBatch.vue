@@ -577,6 +577,24 @@
                     <el-text type="danger" size="small">{{ box.ttsSegmentPreviewError }}</el-text>
                   </div>
                 </div>
+
+                <!-- 对齐辅助移调：每个对话框独立生效，只在该框的对齐阶段
+                     使用临时移调音频副本，不影响最终 WAV / F0 / 工程文件
+                     音高。"仅生成工程"模式跳过对齐，故隐藏。 -->
+                <div v-if="processingMode !== 'project-only'" class="box-pitch-shift">
+                  <span class="tts-mini-label">{{ t('processor.alignPitchShift') }}</span>
+                  <el-input-number
+                    v-model="box.align_pitch_shift_semitones"
+                    :min="-24" :max="24" :step="1"
+                    size="small"
+                    controls-position="right"
+                    :disabled="processing"
+                    style="width: 110px"
+                  />
+                  <el-tooltip :content="t('processor.alignPitchShiftHint')" placement="top">
+                    <span class="option-hint-icon">❓</span>
+                  </el-tooltip>
+                </div>
               </template>
 
               <template v-else>
@@ -596,6 +614,24 @@
                 <div v-if="box.audioFile" class="file-info">
                   🎵 {{ box.audioFile.name }} ({{ formatFileSize(box.audioFile.size) }})
                   <el-button link type="danger" size="small" :disabled="processing" @click="box.audioFile = null">✖</el-button>
+                </div>
+
+                <!-- 对齐辅助移调：每个对话框独立生效，只在该框的对齐阶段
+                     使用临时移调音频副本，不影响最终 WAV / F0 / 工程文件
+                     音高。"仅生成工程"模式跳过对齐，故隐藏。 -->
+                <div v-if="processingMode !== 'project-only'" class="box-pitch-shift">
+                  <span class="tts-mini-label">{{ t('processor.alignPitchShift') }}</span>
+                  <el-input-number
+                    v-model="box.align_pitch_shift_semitones"
+                    :min="-24" :max="24" :step="1"
+                    size="small"
+                    controls-position="right"
+                    :disabled="processing"
+                    style="width: 110px"
+                  />
+                  <el-tooltip :content="t('processor.alignPitchShiftHint')" placement="top">
+                    <span class="option-hint-icon">❓</span>
+                  </el-tooltip>
                 </div>
               </template>
             </el-col>
@@ -758,6 +794,10 @@ interface DialogueBox {
   audioUploadKey: number
   status: BoxStatus
   error: string
+  // 对齐辅助移调（半音）：每个对话框独立生效，只在该框的对齐阶段使用
+  // 临时移调音频副本，不影响最终 WAV / F0 / 工程文件音高。TTS跟读与
+  // 音频跟读两种输入模式共用同一个字段。
+  align_pitch_shift_semitones: number
   // ── TTS跟读专属（inputMode='tts' 时生效，替代 audioFile） ──────────
   ttsNarratorId: string   // 语音预设 id，空字符串表示"自定义"（手动选引擎+音色）
   ttsEngine: string       // 选择的 TTS 引擎（讲述人 / EdgeTTS / 未来可扩展），每个对话框可独立选择
@@ -1284,6 +1324,7 @@ const createBox = (): DialogueBox => ({
   audioUploadKey: 0,
   status: 'idle',
   error: '',
+  align_pitch_shift_semitones: 0,
   ttsNarratorId: '',
   ttsEngine: 'edge_tts',
   ttsVoice: '',
@@ -1603,6 +1644,8 @@ const buildFormData = (): FormData => {
   fd.append('input_mode', inputMode.value)
   boxes.value.forEach((box, i) => {
     if (box.text.trim()) fd.append(`text_${i}`, box.text)
+    // 对齐辅助移调：每个对话框独立提交，只在该框自身的对齐阶段生效。
+    fd.append(`align_pitch_shift_${i}`, String(box.align_pitch_shift_semitones))
 
     if (inputMode.value === 'tts') {
       if (box.text.trim() && box.ttsVoice) {
@@ -1995,6 +2038,19 @@ onMounted(() => {
   font-size: 12px;
   color: #909399;
   white-space: nowrap;
+}
+
+.box-pitch-shift {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.option-hint-icon {
+  cursor: help;
+  font-size: 12px;
+  color: #909399;
 }
 
 .box-error {
