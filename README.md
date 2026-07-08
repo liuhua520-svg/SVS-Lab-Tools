@@ -1,4 +1,4 @@
-# SVS Lab Tools
+  # SVS Lab Tools
 
 **Singing Voice Synthesis Lab Tools**
 
@@ -74,7 +74,7 @@
 ## 🛠️ 工作原理
 
 1. 输入音频文件与文本
-2. 使用 **[Qwen3-ForcedAligner-0.6B](https://github.com/QwenLM/Qwen3-ASR)** 进行自动时间对齐
+2. 使用 **[Qwen3-FA](https://github.com/QwenLM/Qwen3-ASR)** 进行自动时间对齐
 3. 生成 `.lab` 标注文件
 4. 使用 **[PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)** 提取 F0 音高
 5. 根据处理模式输出工程文件
