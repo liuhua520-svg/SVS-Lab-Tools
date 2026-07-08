@@ -429,6 +429,12 @@ const messages = {
       ttsMaxSegmentLen: '分段长度上限（字符数）',
       ttsMaxSegmentLenHint: '单行文本长度超过该值才会被二次切割成多段，每段尽量接近但不超过该值。默认 500。',
       ttsSegmentLenOrderWarning: '分段长度下限已大于上限，保存时会自动交换两者的值。',
+      ttsDisableNewlineSplit: '禁用换行切分文本',
+      ttsDisableNewlineSplitHint: '打开后，"讲述人 / TTS跟读"不再按换行分段——整段输入文本先合并为一个整体，是否切割、在哪切割完全交给下面的"分段长度"规则决定（除非同时禁用了分段长度切割）。默认关闭（保持按换行分段）。',
+      ttsNewlineSplitEveryN: '每几个换行切分文本',
+      ttsNewlineSplitEveryNHint: '每达到设定数量的换行才切一段；未达到该数量的换行会被当作段内换行，与相邻内容合并为同一段。默认 1，即每遇到一个换行就切一段（与原有行为一致）。仅在"禁用换行切分文本"关闭时生效。',
+      ttsDisableSegmentLenSplit: '禁用 TTS 跟读逐句合成分段长度',
+      ttsDisableSegmentLenSplitHint: '打开后，不管分段多长都不会再按下面的分段长度区间寻找标点二次切割，每个分段保持原样合成。默认关闭（保持二次切割）。',
     },
     dialogue: {
       pageTitle: '对话文本框批量处理',
@@ -906,6 +912,12 @@ const messages = {
       ttsMaxSegmentLen: '分段長度上限（字元數）',
       ttsMaxSegmentLenHint: '單行文本長度超過該值才會被二次切割成多段，每段盡量接近但不超過該值。預設 500。',
       ttsSegmentLenOrderWarning: '分段長度下限已大於上限，儲存時會自動交換兩者的值。',
+      ttsDisableNewlineSplit: '停用換行切分文本',
+      ttsDisableNewlineSplitHint: '開啟後，「講述人 / TTS跟讀」不再按換行分段——整段輸入文本先合併為一個整體，是否切割、在哪切割完全交給下面的「分段長度」規則決定（除非同時停用了分段長度切割）。預設關閉（保持按換行分段）。',
+      ttsNewlineSplitEveryN: '每幾個換行切分文本',
+      ttsNewlineSplitEveryNHint: '每達到設定數量的換行才切一段；未達到該數量的換行會被當作段內換行，與相鄰內容合併為同一段。預設 1，即每遇到一個換行就切一段（與原有行為一致）。僅在「停用換行切分文本」關閉時生效。',
+      ttsDisableSegmentLenSplit: '停用 TTS 跟讀逐句合成分段長度',
+      ttsDisableSegmentLenSplitHint: '開啟後，不管分段多長都不會再按下面的分段長度區間尋找標點二次切割，每個分段保持原樣合成。預設關閉（保持二次切割）。',
     },
     dialogue: {
       pageTitle: '對話文字框批次處理',
@@ -1385,6 +1397,12 @@ const messages = {
 	    ttsMaxSegmentLen: 'Maximum Segment Length (characters)',
 	    ttsMaxSegmentLenHint: 'A line longer than this value gets split into multiple segments, each kept as close to this value as possible without exceeding it. Default 500.',
 	    ttsSegmentLenOrderWarning: 'The minimum segment length is greater than the maximum — the two values will be swapped automatically when saved.',
+	    ttsDisableNewlineSplit: 'Disable Newline-Based Text Splitting',
+	    ttsDisableNewlineSplitHint: 'When enabled, the "Narrator / TTS Follow-Along" feature no longer splits text on newlines — the whole input text is first merged into a single block, and whether/where it gets split is left entirely to the segment-length rule below (unless that is also disabled). Off by default (newline splitting stays on).',
+	    ttsNewlineSplitEveryN: 'Split Text Every N Newlines',
+	    ttsNewlineSplitEveryNHint: 'A new segment is only started once this many newlines have been reached; newlines short of that count are treated as line breaks within the same segment and merged with the surrounding text. Default 1, i.e. a new segment on every newline (matches the original behavior). Only takes effect when "Disable Newline-Based Text Splitting" is off.',
+	    ttsDisableSegmentLenSplit: 'Disable TTS Follow-Along Sentence Segment Length',
+	    ttsDisableSegmentLenSplitHint: 'When enabled, segments are never split further by the segment-length range below no matter how long they are — each segment is synthesized as-is. Off by default (length-based splitting stays on).',
 	  },
 	  dialogue: {
 		pageTitle: 'Dialogue Batch Processing',
@@ -1863,7 +1881,13 @@ const messages = {
 	  ttsMinSegmentLenHint: '1行のテキストが分割長の上限を超えたときのみ再分割されます。分割位置は [下限, 上限] の範囲内でできるだけ上限に近い文末記号の位置が優先されます。下限は「分割してよい」下限であり、「必ずそこまで詰める」下限ではありません。デフォルトは 250。',
 	  ttsMaxSegmentLen: '分割長の上限（文字数）',
 	  ttsMaxSegmentLenHint: 'この値を超える長さの1行は複数の断片に分割され、各断片はこの値を超えない範囲でできるだけ近づけられます。デフォルトは 500。',
-	  ttsSegmentLenOrderWarning: '分割長の下限が上限を超えています。保存時に自動的に両者が入れ替えられます。'
+	  ttsSegmentLenOrderWarning: '分割長の下限が上限を超えています。保存時に自動的に両者が入れ替えられます。',
+	  ttsDisableNewlineSplit: '改行によるテキスト分割を無効にする',
+	  ttsDisableNewlineSplitHint: '有効にすると、「ナレーター / TTS読み上げ追従」機能は改行での分割を行わなくなります——入力テキスト全体がまず1つのブロックにまとめられ、分割するかどうか・どこで分割するかはすべて下の分割長ルールに委ねられます（分割長ルールも無効化されている場合を除く）。デフォルトはオフ（改行分割を維持）。',
+	  ttsNewlineSplitEveryN: '何個の改行ごとにテキストを分割するか',
+	  ttsNewlineSplitEveryNHint: '設定した数だけ改行が現れて初めて新しい断片に分割されます。その数に満たない改行は段落内の改行として扱われ、前後のテキストと同じ断片にまとめられます。デフォルトは 1（改行が1つ現れるごとに分割——従来の動作と同じ）。「改行によるテキスト分割を無効にする」がオフのときのみ有効です。',
+	  ttsDisableSegmentLenSplit: 'TTS読み上げ追従の文単位分割長を無効にする',
+	  ttsDisableSegmentLenSplitHint: '有効にすると、断片がどれだけ長くても下の分割長の範囲で句読点を探して再分割することはなくなり、各断片はそのままの形で合成されます。デフォルトはオフ（分割長による再分割を維持）。'
 	},
     dialogue: {
       pageTitle: '対話テキストボックス一括処理',
@@ -2342,7 +2366,13 @@ const messages = {
 	  ttsMinSegmentLenHint: '한 줄의 텍스트가 분할 길이 상한을 초과할 때만 다시 분할됩니다. 분할 지점은 [하한, 상한] 구간 내에서 상한에 가장 가까운 문장 종결 부호 위치가 우선됩니다. 하한은 "분할이 허용되는" 하한일 뿐, "반드시 채워야 하는" 하한이 아닙니다. 기본값 250.',
 	  ttsMaxSegmentLen: '분할 길이 상한 (글자 수)',
 	  ttsMaxSegmentLenHint: '이 값을 초과하는 길이의 한 줄은 여러 조각으로 분할되며, 각 조각은 이 값을 넘지 않는 범위에서 최대한 가깝게 유지됩니다. 기본값 500.',
-	  ttsSegmentLenOrderWarning: '분할 길이 하한이 상한보다 큽니다. 저장 시 두 값이 자동으로 교체됩니다.'
+	  ttsSegmentLenOrderWarning: '분할 길이 하한이 상한보다 큽니다. 저장 시 두 값이 자동으로 교체됩니다.',
+	  ttsDisableNewlineSplit: '줄바꿈 기준 텍스트 분할 비활성화',
+	  ttsDisableNewlineSplitHint: '이 옵션을 켜면 "내레이터 / TTS 따라읽기" 기능이 더 이상 줄바꿈으로 분할하지 않습니다——전체 입력 텍스트가 먼저 하나로 합쳐지고, 분할 여부와 위치는 아래의 분할 길이 규칙에 완전히 맡겨집니다(분할 길이 규칙도 함께 비활성화한 경우는 제외). 기본값은 꺼짐(줄바꿈 분할 유지)입니다.',
+	  ttsNewlineSplitEveryN: '몇 개의 줄바꿈마다 텍스트를 분할할지',
+	  ttsNewlineSplitEveryNHint: '설정한 개수만큼 줄바꿈이 나타나야 새 조각으로 분할됩니다. 그 개수에 못 미치는 줄바꿈은 같은 조각 안의 줄바꿈으로 취급되어 주변 텍스트와 합쳐집니다. 기본값은 1로, 줄바꿈이 하나 나올 때마다 분할됩니다(기존 동작과 동일). "줄바꿈 기준 텍스트 분할 비활성화"가 꺼져 있을 때만 적용됩니다.',
+	  ttsDisableSegmentLenSplit: 'TTS 따라읽기 문장 분할 길이 비활성화',
+	  ttsDisableSegmentLenSplitHint: '이 옵션을 켜면 조각이 아무리 길어도 아래의 분할 길이 구간에서 구두점을 찾아 다시 분할하지 않으며, 각 조각이 그대로 합성됩니다. 기본값은 꺼짐(길이 기준 분할 유지)입니다.'
 	},
     dialogue: {
       pageTitle: '대화 텍스트 박스 일괄 처리',

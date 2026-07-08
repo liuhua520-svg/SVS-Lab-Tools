@@ -237,7 +237,26 @@
           <template #title>{{ t('settings.tuningNoRestartHint') }}</template>
         </el-alert>
 
-        <el-row :gutter="16">
+        <el-form-item :label="t('settings.ttsDisableNewlineSplit')">
+          <el-switch v-model="form.tts_disable_newline_split" />
+          <p class="help-text">{{ t('settings.ttsDisableNewlineSplitHint') }}</p>
+        </el-form-item>
+
+        <el-form-item v-if="!form.tts_disable_newline_split" :label="t('settings.ttsNewlineSplitEveryN')">
+          <el-input-number
+            v-model="form.tts_newline_split_every_n"
+            :min="1" :max="100" :step="1" :precision="0"
+            controls-position="right" style="width: 100%; max-width: 240px"
+          />
+          <p class="help-text">{{ t('settings.ttsNewlineSplitEveryNHint') }}</p>
+        </el-form-item>
+
+        <el-form-item :label="t('settings.ttsDisableSegmentLenSplit')">
+          <el-switch v-model="form.tts_disable_segment_len_split" />
+          <p class="help-text">{{ t('settings.ttsDisableSegmentLenSplitHint') }}</p>
+        </el-form-item>
+
+        <el-row v-if="!form.tts_disable_segment_len_split" :gutter="16">
           <el-col :xs="24" :sm="12">
             <el-form-item :label="t('settings.ttsMinSegmentLen')">
               <el-input-number
@@ -261,7 +280,7 @@
         </el-row>
 
         <el-alert
-          v-if="form.tts_min_segment_len > form.tts_max_segment_len"
+          v-if="!form.tts_disable_segment_len_split && form.tts_min_segment_len > form.tts_max_segment_len"
           type="warning" :closable="false" show-icon class="restart-hint"
         >
           <template #title>{{ t('settings.ttsSegmentLenOrderWarning') }}</template>
@@ -341,6 +360,15 @@ interface AppSettings {
   // [tts_min_segment_len, tts_max_segment_len] 区间内。
   tts_min_segment_len: number
   tts_max_segment_len: number
+  // 每多少个换行才切一段（默认 1，与改造前行为一致）。仅在
+  // tts_disable_newline_split 为 false 时生效。
+  tts_newline_split_every_n: number
+  // 完全禁用"按换行分段"这一步；打开后整段文本先合并为一个整体，是否
+  // 切割完全交给 tts_disable_segment_len_split / 长度区间决定。
+  tts_disable_newline_split: boolean
+  // 完全禁用"单段过长再二次切割"这一步；打开后每个分段保持原样，不再
+  // 按 tts_min_segment_len / tts_max_segment_len 区间寻找标点切割。
+  tts_disable_segment_len_split: boolean
 }
 
 type RestartStatus = 'restarted' | 'not_running' | 'failed'
@@ -378,6 +406,13 @@ const TTS_SEGMENT_LEN_DEFAULTS = {
   tts_max_segment_len: 500,
 } as const
 
+// TTS 换行/分段开关默认值：与 app_settings.py 的 DEFAULT_SETTINGS 保持一致。
+const TTS_SPLIT_OPTION_DEFAULTS = {
+  tts_newline_split_every_n: 1,
+  tts_disable_newline_split: false,
+  tts_disable_segment_len_split: false,
+} as const
+
 // 与 alt_aligners.py 里 WhisperXAligner.SUPPORTED_MODELS 保持一致，
 // 复用 processor.whisperModelXxx 系列翻译（单文件处理页已有同一份模型列表）。
 const WHISPERX_MODEL_OPTIONS = [
@@ -407,6 +442,7 @@ const form = ref<AppSettings>({
   ...TUNING_DEFAULTS,
   ...WHISPERX_DEFAULTS,
   ...TTS_SEGMENT_LEN_DEFAULTS,
+  ...TTS_SPLIT_OPTION_DEFAULTS,
 })
 
 const resetTuningToDefaults = () => {
@@ -415,7 +451,7 @@ const resetTuningToDefaults = () => {
 }
 
 const resetTtsSegmentLenToDefaults = () => {
-  Object.assign(form.value, TTS_SEGMENT_LEN_DEFAULTS)
+  Object.assign(form.value, TTS_SEGMENT_LEN_DEFAULTS, TTS_SPLIT_OPTION_DEFAULTS)
   ElMessage.info(t('settings.tuningResetHint'))
 }
 
@@ -465,6 +501,12 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
   if (ttsMinLen > ttsMaxLen) {
     ;[ttsMinLen, ttsMaxLen] = [ttsMaxLen, ttsMinLen]
   }
+  // tts_newline_split_every_n：整数校验 + 钳制到 [1, 100]，与后端
+  // save_settings() 的钳制范围一致。
+  const rawNewlineEveryN = Number(settings?.tts_newline_split_every_n)
+  const newlineEveryN = Number.isFinite(rawNewlineEveryN)
+    ? Math.min(Math.max(Math.round(rawNewlineEveryN), 1), 100)
+    : TTS_SPLIT_OPTION_DEFAULTS.tts_newline_split_every_n
   form.value = {
     auto_update_models: !!settings?.auto_update_models,
     use_mirror: !!settings?.use_mirror,
@@ -492,6 +534,9 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
       : WHISPERX_DEFAULTS.whisperx_batch_size,
     tts_min_segment_len: ttsMinLen,
     tts_max_segment_len: ttsMaxLen,
+    tts_newline_split_every_n: newlineEveryN,
+    tts_disable_newline_split: !!settings?.tts_disable_newline_split,
+    tts_disable_segment_len_split: !!settings?.tts_disable_segment_len_split,
   }
 }
 
