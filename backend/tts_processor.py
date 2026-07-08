@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import sys
 import tempfile
@@ -841,20 +842,14 @@ def synthesize_segments_only(
       1. 把 text 切分成句子列表（分段规则见 split_sentences() 顶部说明：优先
          按换行分段，单行过长时再按长度区间落在句号/逗号处二次切割；
          sentences 非空时直接复用调用方传入的句子列表，跳过内部切分）；
-      2. 对切分好的每一句做数字 → 读法文字转换（规则见
-         pipeline._convert_digits_to_words() 顶部说明，与 MFA / WhisperX /
-         Qwen3-ASR / Qwen3-FA / NeMo-FA 对齐后端共用同一份转换逻辑）——
-         必须在合成之前完成，否则 TTS 引擎会把阿拉伯数字按自己内置的规则
-         读出来，与 language 选择的语种读法不一致（也不受用户控制）；
-      3. 逐句调用所选 engine 合成为独立的物理音频片段，统一转换成
+      2. 逐句调用所选 engine 合成为独立的物理音频片段，统一转换成
          16-bit PCM WAV 后保留在 segments_dir 下（seg_0000.wav,
-         seg_0001.wav, ... 与返回的 sentences 列表按下标一一对应，这里的
-         sentences 已经是数字转换后的文字），供
+         seg_0001.wav, ... 与返回的 sentences 列表按下标一一对应），供
          align_segments() 之后复用——这是"预览"和"开始处理"之间不用把
          同一段文本合成两遍的关键：预览阶段先调这个函数拿到分句音频，
          用户点"开始处理"时只需再跑 align_segments()；如果用户没有先
          手动预览，则由 synthesize_and_align() 把这两步接起来一次做完；
-      4. 把保留下来的分句音频依次拼接（句间插入 sentence_gap_sec 静音）
+      3. 把保留下来的分句音频依次拼接（句间插入 sentence_gap_sec 静音）
          成一份完整 WAV，供前端 <audio> 直接播放试听，也作为最终产物的
          音频文件（对齐阶段不会重新合成或改动这份音频）。
 
@@ -865,8 +860,7 @@ def synthesize_segments_only(
         "success": True,
         "wav_path": str,          # 拼接后的完整音频（预览播放 / 最终产物共用）
         "segments_dir": str,      # 分句音频所在目录，align_segments() 需要
-        "sentences": [str, ...],  # 实际合成成功的句子列表（已做数字→读法文字
-                                   # 转换），与 segments_dir 一一对应
+        "sentences": [str, ...],  # 实际合成成功的句子列表，与 segments_dir 一一对应
         "sentence_count": int,
         "audio_duration": int,    # 100ns 单位
         "warnings": [str, ...],   # 个别分句合成失败时的提示（已跳过，不计入 sentences）
@@ -884,24 +878,21 @@ def synthesize_segments_only(
     if not voice:
         return {"success": False, "error": "未指定音色"}
 
+    # 数字 → 读法文字转换：必须在切句 / 合成之前统一做一次，且切句与后续
+    # Qwen3-FA 对齐（align_segments）用的是同一份 sentences 列表——如果只
+    # 在对齐阶段转换（如 pipeline._run_alignment 对"音频跟读"所做的那样），
+    # TTS 引擎会照着原始阿拉伯数字合成语音（各引擎对纯数字的朗读方式不
+    # 受控、可能与目标语种的读法完全不同），而对齐阶段却用转换后的文字
+    # 去匹配，导致参考文本与实际发音的字符数/内容不一致，触发
+    # _word_entries_to_lab 里的"可发音字符数 ≠ 对齐条目数"警告甚至错位。
+    # 复用 pipeline.py 里的实现，避免同一套转换规则在两个模块各写一遍、
+    # 未来只改了一处导致行为不一致。
+    from pipeline import _convert_digits_to_words
+    text = _convert_digits_to_words(text, language)
+
     sentence_list = sentences if sentences is not None else split_sentences(text)
     if not sentence_list:
         return {"success": False, "error": "未能从输入文本中切分出任何句子"}
-
-    # 数字 → 读法文字转换：必须在合成之前对每一句分别转换（转换规则见
-    # pipeline._convert_digits_to_words() 顶部说明），复用与 MFA / WhisperX
-    # / Qwen3-ASR / Qwen3-FA / NeMo-FA 完全相同的一份转换逻辑（同一个函数），
-    # 不在这里重新实现一遍规则，避免两处规则后续走漏、不一致。
-    #
-    # 转换放在 split_sentences() 之后逐句进行，而不是先转换整段 text 再切
-    # 分——这样换行 / 长度二次切割的字符数计算仍然基于用户原始输入（数字
-    # 转成文字后字符数会变化，会让切分点偏离用户在原文里看到的位置）；
-    # 同时转换后送入 TTS 引擎合成的文本，与之后 align_segments() 里送入
-    # Qwen3-ForcedAligner 的参考文本（同一个 sentence_list）保持完全一致，
-    # 保证发音内容与对齐参考文本不会出现"听到的是文字，标注的是数字"这种
-    # 不一致。
-    from pipeline import _convert_digits_to_words
-    sentence_list = [_convert_digits_to_words(s, language) for s in sentence_list]
 
     rate = _normalize_percent(rate)
     volume = _normalize_percent(volume)
@@ -975,6 +966,32 @@ def synthesize_segments_only(
         return {"success": False, "error": str(e)}
 
 
+def _make_alignment_pitch_shifted_copy(src_wav_path: str, semitones: float) -> str:
+    """
+    对齐辅助移调：读取 src_wav_path，整体移调 semitones 个半音后另存为临时
+    wav 文件，返回临时文件路径（调用方负责用完后删除）。
+
+    与 pipeline.py 里的同名工具函数职责一致（TTS跟读固定使用 Qwen3-FA，
+    走的是本模块自己的对齐循环，不经过 pipeline._run_alignment，因此这里
+    单独保留一份，避免两个模块产生循环导入）。librosa.effects.pitch_shift
+    是纯移调（phase-vocoder），不改变音频时长，因此对齐后端返回的时间戳
+    可以直接用于原始（未移调）分句音频，不需要任何换算。
+    """
+    import tempfile
+    import uuid as _uuid
+    import librosa
+    import soundfile as sf
+
+    y, sr = librosa.load(src_wav_path, sr=None, mono=True)
+    y = librosa.effects.pitch_shift(y, sr=sr, n_steps=semitones)
+
+    tmp_path = os.path.join(
+        tempfile.gettempdir(), f"_tts_align_pitch_shift_{_uuid.uuid4().hex[:8]}.wav"
+    )
+    sf.write(tmp_path, y, sr, subtype="PCM_16")
+    return tmp_path
+
+
 def align_segments(
     segments_dir: str,
     sentences: List[str],
@@ -982,6 +999,7 @@ def align_segments(
     aligner_device: Optional[str] = None,
     english_word_align: bool = False,
     sentence_gap_sec: float = DEFAULT_SENTENCE_GAP_SEC,
+    align_pitch_shift_semitones: float = 0.0,
     progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> Dict:
     """
@@ -993,6 +1011,16 @@ def align_segments(
 
     不会重新调用 TTS 引擎合成——这是"先点预览生成分句音频，再点开始处理
     只需对齐"这条路径的核心，避免同一段文本被合成两遍。
+
+    align_pitch_shift_semitones：对齐辅助移调（半音，正数升调/负数降调）。
+    高音色 TTS（尤其是女声/童声 EdgeTTS 音色叠加正向"音调"滑块）逐句合成
+    的短音频，偶发导致 Qwen3-FA 内部把若干 token 的时间戳识别成错误顺序
+    （块级换位，见 alt_aligners.py 对"退化区间"的说明；这类错位往往不会
+    触发现有的退化检测，因为每个 token 自身的时长仍然正常，只是顺序错了）。
+    此参数非 0 时，每一句只在送入 aligner.align() 前生成一份临时移调副本
+    用于识别时间戳；真正保留进最终 WAV 产物的仍是 synthesize_segments_only()
+    早先生成、未做任何处理的原始 seg_wav，且用于计算句间偏移量的
+    seg_duration_100ns 也一律从原始 seg_wav 读取，不受移调影响。
 
     Returns
     -------
@@ -1025,13 +1053,32 @@ def align_segments(
                 progress_cb(i + 1, total)
             continue
 
+        # 时长/偏移量计算始终基于原始未移调的 seg_wav，与是否启用对齐辅助
+        # 移调无关——保证最终 LAB 在合并音频里的位置不受该功能影响。
         seg_duration_100ns = _get_wav_duration_100ns(str(seg_wav))
 
+        align_target = str(seg_wav)
+        shifted_path: Optional[str] = None
+        if align_pitch_shift_semitones:
+            try:
+                shifted_path = _make_alignment_pitch_shifted_copy(
+                    str(seg_wav), align_pitch_shift_semitones
+                )
+                align_target = shifted_path
+            except Exception as e:
+                logger.warning(f"[TTS] 第 {i + 1}/{total} 句对齐辅助移调失败，回退为原始音频对齐: {e}")
+
         try:
-            align_result = aligner.align(str(seg_wav), sentence, language,
+            align_result = aligner.align(align_target, sentence, language,
                                           english_word_align=english_word_align)
         except Exception as e:
             align_result = {"success": False, "error": str(e)}
+        finally:
+            if shifted_path:
+                try:
+                    os.remove(shifted_path)
+                except OSError:
+                    pass
 
         if align_result.get("success"):
             local_entries = _parse_lab_lines(align_result.get("lab_content", ""))
@@ -1077,6 +1124,7 @@ def synthesize_and_align(
     english_word_align: bool = False,
     sentence_gap_sec: float = DEFAULT_SENTENCE_GAP_SEC,
     sentences: Optional[List[str]] = None,
+    align_pitch_shift_semitones: float = 0.0,
     progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> Dict:
     """
@@ -1114,7 +1162,9 @@ def synthesize_and_align(
         align_result = align_segments(
             segments_dir=segments_dir, sentences=seg_result["sentences"], language=language,
             aligner_device=aligner_device, english_word_align=english_word_align,
-            sentence_gap_sec=sentence_gap_sec, progress_cb=progress_cb,
+            sentence_gap_sec=sentence_gap_sec,
+            align_pitch_shift_semitones=align_pitch_shift_semitones,
+            progress_cb=progress_cb,
         )
     finally:
         shutil.rmtree(str(segments_dir), ignore_errors=True)

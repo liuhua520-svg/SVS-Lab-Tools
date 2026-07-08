@@ -233,6 +233,38 @@ class TsubakiProcessor:
         return float(lab_time) / 10_000_000.0
 
     @staticmethod
+    def _midi_notes_overlap_segment(
+        start_sec: float,
+        end_sec: float,
+        midi_notes: List[Tuple[float, float, int]],
+        min_overlap_sec: float = 0.01,
+    ) -> bool:
+        """
+        判断 [start_sec, end_sec) 是否与 midi_notes 中的某个音符存在重叠。
+
+        用途：批量顺序合并（build_multitrack_project）会把多个对话框的段落
+        拼接到同一条时间轴，其中只有部分对话框可能提供了 MIDI（其余对话框
+        走 LAB + F0 细化 / base_pitch）。若只用 "midi_notes is not None" 判断
+        是否走 MIDI 音高分支，会导致合并后 midi_notes 变成非空列表，进而让
+        本不属于任何 MIDI 对话框的段落也被"劫持"进入 MIDI 分支——而这些段落
+        与 midi_notes 里的音符毫无时间重叠，map_segment_to_midi_pitch 会
+        静默地退回 base_pitch，而不是它们本该使用的 F0 细化音高。
+        这里先显式检查真实重叠，只有确有重叠时才使用 MIDI 音高，否则让
+        调用方继续走 refine_pitch / base_pitch 分支（单一对话框场景下
+        midi_notes 覆盖整条音轨，本检查恒为 True，不影响原有行为）。
+        """
+        if not midi_notes:
+            return False
+        for m_start, m_end, _pitch in midi_notes:
+            if m_end < start_sec:
+                continue
+            if m_start > end_sec:
+                break
+            if min(end_sec, m_end) - max(start_sec, m_start) >= min_overlap_sec:
+                return True
+        return False
+
+    @staticmethod
     def _is_true_silence(label: str) -> bool:
         """判断是否为真正的静音段（会被 '-' 填充，不生成可见音符）。
         注意：'-' 本身不是静音，它是 consonant phoneme onset 标记，应保留为音符。
@@ -868,16 +900,22 @@ class TsubakiProcessor:
 
             # 下面不再需要 else，原本 else 内部的代码直接靠左对齐正常运行即可
             tone = base_tone
-            if midi_notes is not None:
+            _start_sec = self._lab_time_to_seconds(seg.start_time)
+            _end_sec   = self._lab_time_to_seconds(seg.end_time)
+            _seg_has_midi = midi_notes is not None and self._midi_notes_overlap_segment(
+                _start_sec, _end_sec, midi_notes
+            )
+            if _seg_has_midi:
                 # ── MIDI 模式：直接从 MIDI 文件读取该段的音符音高 ──
+                # （仅当该段时间范围内确有 MIDI 音符重叠时才采用；顺序合并
+                # 多个对话框时，没有 MIDI 的对话框段落不会被其它对话框的
+                # midi_notes 误判命中，见 _midi_notes_overlap_segment）
                 from midi_processor import map_segment_to_midi_pitch
-                _start_sec = self._lab_time_to_seconds(seg.start_time)
-                _end_sec   = self._lab_time_to_seconds(seg.end_time)
                 tone = map_segment_to_midi_pitch(_start_sec, _end_sec, midi_notes,
                                                  base_pitch=base_tone)
             elif config.refine_pitch and t is not None and f0 is not None and len(f0) > 0:
-                start_sec = self._lab_time_to_seconds(seg.start_time)
-                end_sec   = self._lab_time_to_seconds(seg.end_time)
+                start_sec = _start_sec
+                end_sec   = _end_sec
                 mask      = (t >= start_sec) & (t < end_sec)
                 seg_f0    = f0[mask]
                 voiced    = seg_f0[seg_f0 > 0]
@@ -1269,6 +1307,141 @@ class TsubakiProcessor:
 
         return json.dumps(project, ensure_ascii=False, indent=2)
 
+    def _build_svp_project_text_sequenced(
+        self,
+        project_title: str,
+        resolved_tracks: List[Dict],
+        config: AudioProcessingConfig,
+        word_phoneme_map: bool = False,
+        language: str = "",
+        dict_source: str = "default",
+    ) -> str:
+        """
+        对话文本框批量处理功能的 SVP 生成入口（"独立序列 + 时间轴定位"模式）：
+        每个对话框对应 library 里一个独立的 group（notes / pitchDelta 均使用
+        该对话框自身的局部时间，不做整体平移），全部挂在*同一条*音轨的
+        groups[] 列表下，各自通过 blickOffset 定位到时间轴上的位置——而不是
+        像旧版 build_multitrack_project 那样把全部对话框的音符拍平合并进
+        同一个 group 的 notes 列表（整体平移后再拼接）。
+
+        这样每个对话框在 SV 编辑器里仍是一段可独立拖动/编辑的"序列"
+        （group/clip），只是排列在同一条时间轴上，与 build_multitrack_project
+        原有的"背靠背"累计定位规则完全一致：
+            groups[i].blickOffset = 前面所有对话框真实 wav 时长之和
+                                     （换算成 blick），即
+                                     resolved_tracks[i]["offset_sec"] × blicks/秒。
+
+        Parameters
+        ----------
+        resolved_tracks : 每个元素为 build_multitrack_project 里已解析好的
+            单个对话框数据：
+            {
+                "title": str,
+                "segments": List[LabelSegment],   # 局部时间，未整体平移
+                "f0": Optional[np.ndarray],       # 局部时间
+                "t": Optional[np.ndarray],        # 局部时间
+                "native_english_words": Optional[set],
+                "midi_notes": Optional[List],     # 局部时间 (start_sec, end_sec, pitch)
+                "offset_sec": float,              # 该对话框在合并时间轴上的起始秒数
+            }
+        config : 全局共享的音频处理配置（bpm 决定 blicks/秒 换算，需与
+            time.tempo 写入的 bpm 一致，否则各 group 摆放位置会与实际
+            播放时的节拍不对齐）
+
+        Returns
+        -------
+        str : SVP JSON 文本；library 长度 == len(resolved_tracks)，
+              tracks 长度固定为 1（单音轨、多序列）。
+        """
+        import uuid
+
+        offset_ratio = config.bpm * 705600000 / 60   # blicks/秒，与 _build_svp_track_payload 换算公式一致
+
+        library: List[Dict] = []
+        group_refs: List[Dict] = []
+
+        for tr in resolved_tracks:
+            tr_title = tr.get("title") or ""
+
+            all_notes, pitch_data = self._build_svp_track_payload(
+                segments=tr.get("segments") or [],
+                f0=tr.get("f0"),
+                t=tr.get("t"),
+                config=config,
+                midi_notes=tr.get("midi_notes"),
+                word_phoneme_map=word_phoneme_map,
+                language=language,
+                native_english_words=tr.get("native_english_words"),
+                dict_source=dict_source,
+            )
+
+            group_uuid = str(uuid.uuid4()).lower()
+            library.append({
+                "name": tr_title or group_uuid,
+                "uuid": group_uuid,
+                "parameters": {
+                    "pitchDelta": {"mode": "cubic", "points": pitch_data},
+                    "vibratoEnv":  {"mode": "cubic", "points": []},
+                    "loudness":    {"mode": "cubic", "points": []},
+                    "tension":     {"mode": "cubic", "points": []},
+                    "breathiness": {"mode": "cubic", "points": []},
+                    "voicing":     {"mode": "cubic", "points": []},
+                    "gender":      {"mode": "cubic", "points": []},
+                    "toneShift":   {"mode": "cubic", "points": []},
+                },
+                "notes": all_notes,
+            })
+
+            ref = self._group_ref(group_uuid)
+            ref["blickOffset"] = int(round(float(tr.get("offset_sec") or 0.0) * offset_ratio))
+            group_refs.append(ref)
+
+        main_uuid = str(uuid.uuid4()).lower()
+        main_group = {
+            "name":       "main",
+            "uuid":       main_uuid,
+            "parameters": self._empty_svp_parameters(),
+            "notes":      [],
+        }
+
+        project = {
+            "version": 119,
+            "time": {
+                "meter": [{"index": 0, "numerator": 4, "denominator": 4}],
+                "tempo": [{"position": 0, "bpm": float(config.bpm)}],
+            },
+            "library": library,
+            "tracks": [
+                {
+                    "name":          project_title,
+                    "dispColor":     "ff7db235",
+                    "dispOrder":     0,
+                    "renderEnabled": False,
+                    "mixer": {
+                        "gainDecibel": 0,
+                        "pan":         0,
+                        "mute":        False,
+                        "solo":        False,
+                        "display":     True,
+                    },
+                    "mainGroup": main_group,
+                    "mainRef":   self._group_ref(main_uuid),
+                    "groups":    group_refs,
+                }
+            ],
+            "renderConfig": {
+                "destination":     "./",
+                "filename":        project_title,
+                "numChannels":     1,
+                "aspirationFormat":"noAspiration",
+                "bitDepth":        16,
+                "sampleRate":      48000,
+                "exportMixDown":   True,
+            },
+        }
+
+        return json.dumps(project, ensure_ascii=False, indent=2)
+
     # ----------------------------
     # USTX 生成（修复版）
     # ----------------------------
@@ -1349,8 +1522,14 @@ class TsubakiProcessor:
             dur_tick = max(1, end_pos - pos)
 
             tone = int(config.base_pitch)
-            if midi_notes is not None:
+            _seg_has_midi = midi_notes is not None and self._midi_notes_overlap_segment(
+                start_sec, end_sec, midi_notes
+            )
+            if _seg_has_midi:
                 # ── MIDI 模式：直接从 MIDI 文件读取该段的音符音高 ──
+                # （仅当该段时间范围内确有 MIDI 音符重叠时才采用；顺序合并
+                # 多个对话框时，没有 MIDI 的对话框段落不会被其它对话框的
+                # midi_notes 误判命中，见 _midi_notes_overlap_segment）
                 from midi_processor import map_segment_to_midi_pitch
                 tone = map_segment_to_midi_pitch(start_sec, end_sec, midi_notes,
                                                  base_pitch=int(config.base_pitch))
@@ -1586,6 +1765,99 @@ class TsubakiProcessor:
             "tempos":          [{"position": 0, "bpm": float(config.bpm)}],
             "expressions":      self._get_default_expressions(),
             "tracks":           ustx_tracks,
+            "voice_parts":      voice_parts,
+            "wave_parts":       [],
+        }
+
+        yaml = YAML()
+        yaml.default_flow_style               = False
+        yaml.allow_unicode                    = True
+        yaml.sort_base_mapping_type_on_output = False
+
+        stream = StringIO()
+        yaml.dump(project_obj, stream)
+        return stream.getvalue()
+
+    def _build_ustx_project_text_sequenced(
+        self,
+        project_title: str,
+        resolved_tracks: List[Dict],
+        config: AudioProcessingConfig,
+    ) -> str:
+        """
+        对话文本框批量处理功能的 USTX 生成入口（"独立序列 + 时间轴定位"模式）：
+        每个对话框对应一个独立的 voice_part（notes / curves 均使用该对话框
+        自身的局部时间，不做整体平移），全部挂在*同一条* track_no=0 下，
+        各自通过 voice_part["position"]（tick）定位到时间轴上的位置——而不是
+        像旧版 build_multitrack_project 那样把全部对话框的音符拍平合并进
+        同一个 voice_part 的 notes 列表。
+
+        OpenUtau 原生支持一条 track_no 下挂多个 voice_part（每个 part 都是
+        可独立拖动的片段，part 内 note.position 相对 part 自身的 position
+        为 0），因此这里不需要像 build_utau_project_text_multitrack 那样
+        为每个对话框分配独立的 track_no（那是旧版"背靠背多音轨"的做法）。
+
+        Parameters
+        ----------
+        resolved_tracks : 每个元素为 build_multitrack_project 里已解析好的
+            单个对话框数据（含局部时间的 segments/f0/t/midi_notes），额外
+            需要 "offset_sec" 字段（该对话框在合并时间轴上的起始秒数，
+            用于换算成 voice_part["position"]）。
+
+        Returns
+        -------
+        str : USTX（YAML）文本；tracks 长度固定为 1，
+              voice_parts 长度 == len(resolved_tracks)。
+        """
+        from ruamel.yaml import YAML
+        from io import StringIO
+
+        resolution = 480
+        ticks_per_sec = (float(config.bpm) / 60.0) * resolution
+
+        voice_parts: List[Dict] = []
+        for tr in resolved_tracks:
+            notes, curves, voice_duration = self._build_ustx_track_payload(
+                segments=tr.get("segments") or [],
+                f0=tr.get("f0"),
+                t=tr.get("t"),
+                config=config,
+                midi_notes=tr.get("midi_notes"),
+            )
+
+            position = int(round(float(tr.get("offset_sec") or 0.0) * ticks_per_sec))
+            voice_parts.append({
+                "name":     tr.get("title") or "",
+                "comment":  "",
+                "duration": voice_duration,
+                "track_no": 0,
+                "position": position,
+                "notes":    notes,
+                "curves":   curves,
+            })
+
+        track = {
+            "phonemizer":        "OpenUtau.Core.DefaultPhonemizer",
+            "renderer_settings": {},
+            "mute":   False,
+            "solo":   False,
+            "volume": 0,
+        }
+
+        project_obj = {
+            "name":        project_title,
+            "comment":     "",
+            "output_dir":  "Vocal",
+            "cache_dir":   "UCache",
+            "ustx_version": "0.6",
+            "resolution":  resolution,
+            "bpm":         float(config.bpm),
+            "beat_per_bar": 4,
+            "beat_unit":    4,
+            "time_signatures": [{"bar_position": 0, "beat_per_bar": 4, "beat_unit": 4}],
+            "tempos":          [{"position": 0, "bpm": float(config.bpm)}],
+            "expressions":      self._get_default_expressions(),
+            "tracks":           [track],
             "voice_parts":      voice_parts,
             "wave_parts":       [],
         }
@@ -1848,7 +2120,7 @@ class TsubakiProcessor:
             return {"success": False, "error": str(e)}
 
     # ----------------------------
-    # 多音轨工程文件生成（对话文本框批量处理功能专用）
+    # 批量顺序合并工程文件生成（对话文本框批量处理功能专用）
     # ----------------------------
     def build_multitrack_project(
         self,
@@ -1865,39 +2137,58 @@ class TsubakiProcessor:
         phoneme_mode: str = "none",
     ) -> Dict:
         """
-        对话文本框批量处理功能的工程文件生成入口：每个对话框对应一条音轨，
-        全部写入同一个工程文件（而非分别导出多个独立工程文件）。
+        对话文本框批量处理功能的工程文件生成入口：不再为每个对话框生成
+        独立音轨（多音轨工程），而是把全部对话框写入*同一个*单音轨工程
+        文件——但每个对话框仍是该音轨下一段独立的序列（SVP: library
+        group；USTX: voice_part；VSQX: vsPart），只是通过各自的时间轴
+        偏移量摆放到对应位置，*不会*把多个对话框的音符拍平合并进同一个
+        序列的 notes 列表里。这样每个对话框在编辑器里仍可被单独拖动、
+        编辑、静音，不会和相邻对话框的音符纠缠在一起。
+
+        时间轴定位规则（音频推断分段起始时间）：
+            第 i 个对话框所在序列的起始时间 = 排在它前面的全部对话框的
+            真实音频时长（由磁盘上的 wav 文件时长决定）之和，即"上一段
+            结束的瞬间就是下一段的开始"，无缝衔接、不裁剪首尾静音、也不
+            与任何原始完整音频做互相关比对——每个对话框自身的 LAB / MIDI
+            时间戳保持局部（相对该对话框自身为 0），只通过这个整体偏移量
+            定位，不会被改写。
 
         Parameters
         ----------
         project_title : 工程文件标题 / 输出文件名（不含扩展名）
         track_inputs : 每个元素描述一个已完成对齐（或已导入 LAB/MIDI）的对话框：
             {
-                "title": str,             # 音轨名称（对话框文本前若干字符，或文件名）
-                "wav_path": str,          # 该对话框的音频文件路径（必须存在）
+                "title": str,             # 段落标题（对话框文本前若干字符，或文件名），
+                                           # 目前仅用于日志/兜底歌词来源，不再对应工程文件里的音轨名
+                "wav_path": str,          # 该对话框的音频文件路径（必须存在；其真实时长
+                                           # 决定下一个对话框在合并时间轴上的起始位置）
                 "lab_path": str,          # 该对话框的 LAB 标注文件路径（可选，与 midi_path 二选一/优先）
                 "midi_path": str,         # 该对话框的 MIDI 文件路径（可选；无 lab_path 时用于生成段落+音高）
                 "original_text": str,     # 原始歌词/台词文本，用于 word_phoneme_map 防误判（可选）
             }
-            调用方负责保证列表顺序即为对话框顺序（tNo / dispOrder 按此顺序递增）。
+            调用方负责保证列表顺序即为对话框顺序（决定合并后时间轴上的先后位置）。
         output_format : 支持 "sv"（Synthesizer V .svp）/ "vsqx"（VOCALOID4 .vsqx）/
-            "ustx"（OpenUtau .ustx，原生多音轨，见 build_utau_project_text_multitrack）。
-            不支持 "midi"（MIDI 标准文件是单一音轨概念，多音轨无意义）。
+            "ustx"（OpenUtau .ustx）。不支持 "midi"（调用方应改用单文件流程逐个导出）。
         config : 全局共享的音频处理配置（对话文本框页面顶部"高级设置"统一生效，
-            所有音轨共用同一个 bpm / F0 提取参数）
+            全部对话框共用同一个 bpm / F0 提取参数）
         word_phoneme_map / language / dict_source : 全局共享的单词→音素映射设置
             （仅 sv / vsqx 使用；USTX 没有 phonemes 字段，调用方应确保输出为
              ustx 时前端已隐藏这两个控件，这里也不会对 ustx 生效）
-        vsqx_singer / vsqx_singer_id / vsqx_singer_bs : 全部音轨共用同一个 VSQX 声库
-        phoneme_mode : "none" / "merge" / "hiragana" / "katakana"，应用于每条音轨的
-            LAB 段落（与单文件"仅生成工程"模式语义一致）。仅在音轨来自 LAB 且
+        vsqx_singer / vsqx_singer_id / vsqx_singer_bs : 合并后单音轨共用的 VSQX 声库
+        phoneme_mode : "none" / "merge" / "hiragana" / "katakana"，应用于每个对话框的
+            LAB 段落（与单文件"仅生成工程"模式语义一致）。仅在段落来自 LAB 且
             输出格式为 sv / vsqx 时生效；USTX 始终使用原始音素/文字，不应用转换
             （与用户预期一致：USTX 侧重歌词音节而非音素级精修）；来自 MIDI 的
             段落（歌词文本）同样不应用音素转换。
+        音高解析说明（混合 MIDI / 非 MIDI 对话框场景）：
+            部分对话框提供 MIDI、部分没有时，没有 MIDI 的对话框段落仍然按
+            该对话框自身的 refine_pitch / base_pitch 规则解析音高，不会被
+            其它对话框的 MIDI 音符列表影响（见 _midi_notes_overlap_segment）。
 
         Returns
         -------
-        Dict : {"success": True, "output_path": str, "format": str, "track_count": int}
+        Dict : {"success": True, "output_path": str, "format": str,
+                "track_count": 1, "segment_count": int}
                或 {"success": False, "error": str}
         """
         try:
@@ -1905,11 +2196,11 @@ class TsubakiProcessor:
             if fmt not in ("sv", "vsqx", "ustx"):
                 return {
                     "success": False,
-                    "error": f"对话文本框批量处理暂不支持多音轨输出格式: {output_format}（仅支持 sv / vsqx / ustx）",
+                    "error": f"对话文本框批量处理暂不支持的输出格式: {output_format}（仅支持 sv / vsqx / ustx）",
                 }
 
             if not track_inputs:
-                return {"success": False, "error": "没有可用于生成工程文件的音轨（所有对话框均被跳过）"}
+                return {"success": False, "error": "没有可用于生成工程文件的对话框（所有对话框均被跳过）"}
 
             if phoneme_mode not in ("none", "merge", "hiragana", "katakana"):
                 phoneme_mode = "none"
@@ -2007,6 +2298,21 @@ class TsubakiProcessor:
                     except Exception as _nee_err:
                         logger.warning("[多音轨] 音轨 %r 预提取英语单词失败: %s，回退词典查询", tr_title, _nee_err)
 
+                # ── 该对话框在合并时间轴上的"时长贡献"：优先用磁盘上的真实
+                # wav 时长（音频推断的分段起始时间即基于此累加）；若因文件
+                # 损坏等原因读取失败（返回 0），退化为该对话框段落的最大
+                # end_time 作为估计时长，保证后续对话框仍能获得合理的起始
+                # 位置，不会因为一个对话框异常就把后续内容全部压到时间 0。
+                duration_sec = self._read_audio_duration_sec(str(wav_path))
+                if duration_sec <= 0:
+                    duration_sec = self._lab_time_to_seconds(
+                        max((s.end_time for s in segments), default=0)
+                    )
+                    logger.warning(
+                        "[顺序合并] 对话框 %r 无法读取 wav 真实时长，退化使用段落末尾时间估计 (%.3fs)",
+                        tr_title, duration_sec,
+                    )
+
                 resolved_tracks.append({
                     "title": tr_title,
                     "segments": segments,
@@ -2014,15 +2320,29 @@ class TsubakiProcessor:
                     "t": t_arr,
                     "native_english_words": native_english_words,
                     "midi_notes": midi_notes,
+                    "duration_sec": duration_sec,
                 })
 
             if not resolved_tracks:
-                return {"success": False, "error": "没有任何音轨成功加载（WAV/LAB/MIDI 缺失或无法读取）"}
+                return {"success": False, "error": "没有任何对话框成功加载（WAV/LAB/MIDI 缺失或无法读取）"}
+
+            # ── 按累计音频时长计算每个对话框在时间轴上的起始位置
+            # （offset_sec），但*不*把段落 / F0 / MIDI 音符整体平移拍平进
+            # 同一个序列——每个对话框保持自身局部时间不变，只在下面调用
+            # _sequenced builder 时通过各自的 offset_sec 定位到时间轴上
+            # （SVP: groups[i].blickOffset；USTX: voice_parts[i].position；
+            # VSQX: vsPart[i].<t>）。这样每个对话框在编辑器里仍是一段独立
+            # 可拖动/编辑的序列，而不是被合并成一条连续音符列表 ─────────
+            cursor_sec = 0.0
+            for item in resolved_tracks:
+                item["offset_sec"] = cursor_sec
+                cursor_sec += float(item.get("duration_sec") or 0.0)
+            total_duration_sec = cursor_sec
 
             if fmt == "sv":
-                project_text = self.build_svp_project_text_multitrack(
+                project_text = self._build_svp_project_text_sequenced(
                     project_title=project_title,
-                    tracks=resolved_tracks,
+                    resolved_tracks=resolved_tracks,
                     config=config,
                     word_phoneme_map=word_phoneme_map,
                     language=language,
@@ -2030,16 +2350,16 @@ class TsubakiProcessor:
                 )
                 out_path = self.work_dir / f"{project_title}.svp"
             elif fmt == "ustx":
-                project_text = self.build_utau_project_text_multitrack(
+                project_text = self._build_ustx_project_text_sequenced(
                     project_title=project_title,
-                    tracks=resolved_tracks,
+                    resolved_tracks=resolved_tracks,
                     config=config,
                 )
                 out_path = self.work_dir / f"{project_title}.ustx"
             else:  # fmt == "vsqx"
-                project_text = self.build_vsqx_project_text_multitrack(
+                project_text = self._build_vsqx_project_text_sequenced(
                     project_title=project_title,
-                    tracks=resolved_tracks,
+                    resolved_tracks=resolved_tracks,
                     config=config,
                     vsqx_singer=vsqx_singer,
                     vsqx_singer_id=vsqx_singer_id,
@@ -2053,14 +2373,16 @@ class TsubakiProcessor:
             out_path.write_text(project_text, encoding="utf-8")
 
             return {
-                "success":     True,
-                "output_path": str(out_path),
-                "format":      fmt,
-                "track_count": len(resolved_tracks),
+                "success":       True,
+                "output_path":   str(out_path),
+                "format":        fmt,
+                "track_count":   1,
+                "segment_count": len(resolved_tracks),
+                "total_duration_sec": total_duration_sec,
             }
 
         except Exception as e:
-            logger.error(f"多音轨工程文件生成失败: {e}", exc_info=True)
+            logger.error(f"批量顺序拼接工程文件生成失败: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
     def _midi_lyrics_to_words(self, midi_lyrics) -> List[str]:
@@ -2130,10 +2452,10 @@ class TsubakiProcessor:
     # ----------------------------
     # VSQX 生成
     # ----------------------------
-    def _build_vsqx_track_block(
+    _VSQX_PART_OFFSET = 1920   # vsPart 默认起始 tick（preMeasure=1, 4/4）
+
+    def _build_vsqx_part_xml(
         self,
-        tNo: int,
-        name: str,
         segments: List[LabelSegment],
         f0: Optional[np.ndarray],
         t: Optional[np.ndarray],
@@ -2144,18 +2466,27 @@ class TsubakiProcessor:
         language: str = "",
         native_english_words: Optional[set] = None,
         dict_source: str = "default",
+        t_start: Optional[int] = None,
+        part_name: str = "NewPart",
     ) -> str:
         """
-        构建单条 VSQX <vsTrack> XML 块（tNo / vsPart / 音符 / 音高曲线）。
+        构建单个 VSQX <vsPart> XML 块（音符 / 音高曲线），供：
+        · _build_vsqx_track_block()（单文件 / "背靠背"多音轨旧逻辑，每条
+          vsTrack 恰好一个 vsPart，固定挂在 t_start=_VSQX_PART_OFFSET）
+        · _build_vsqx_project_text_sequenced()（"独立序列 + 时间轴定位"
+          新逻辑，一条 vsTrack 下挂多个 vsPart，每个 vsPart 各自的
+          t_start = _VSQX_PART_OFFSET + 该对话框在时间轴上的累计偏移量）
+        共用，避免逻辑重复导致行为不一致。
 
-        供单音轨 (_build_vsqx_project_text) 与多音轨
-        (build_vsqx_project_text_multitrack，对话文本框批量处理功能) 共用，
-        避免逻辑重复导致行为不一致。tNo 由调用方指定（单音轨固定为 0，
-        多音轨按对话框顺序 0..N-1 递增）。
+        segments / f0 / t / midi_notes 全部使用"局部时间"（相对该 vsPart
+        自身起点为 0，不做整体平移）——vsPart 内 <note><t> 是相对 vsPart
+        自身 <t> 的偏移量，音符的绝对时间轴位置 = vsPart.<t> + note.<t>，
+        因此只需通过 t_start 整体挪动 vsPart，不需要改动 segments 本身。
         """
         RESOLUTION  = 480        # ticks per quarter note
         PBS         = 12         # pitch bend sensitivity (semitones)
-        PART_OFFSET = 1920       # vsPart start tick (preMeasure=1, 4/4)
+        if t_start is None:
+            t_start = self._VSQX_PART_OFFSET
         VELOCITY    = 64
         bpm = float(config.bpm)
 
@@ -2201,7 +2532,13 @@ class TsubakiProcessor:
 
             # 音高：MIDI / F0细化 / base_pitch 三级优先
             tone = base_tone
-            if midi_notes is not None:
+            _seg_has_midi = midi_notes is not None and self._midi_notes_overlap_segment(
+                start_sec, end_sec, midi_notes
+            )
+            if _seg_has_midi:
+                # 仅当该段时间范围内确有 MIDI 音符重叠时才采用；顺序合并
+                # 多个对话框时，没有 MIDI 的对话框段落不会被其它对话框的
+                # midi_notes 误判命中，见 _midi_notes_overlap_segment
                 from midi_processor import map_segment_to_midi_pitch
                 tone = map_segment_to_midi_pitch(
                     start_sec, end_sec, midi_notes, base_pitch=base_tone)
@@ -2404,15 +2741,11 @@ class TsubakiProcessor:
                 f'\t\t\t</note>\n'
             )
 
-        track_xml = (
-            '\t<vsTrack>\n'
-            f'\t\t<tNo>{tNo}</tNo>\n'
-            f'\t\t<name><![CDATA[{name}]]></name>\n'
-            '\t\t<comment><![CDATA[Track]]></comment>\n'
+        part_xml = (
             '\t\t<vsPart>\n'
-            f'\t\t\t<t>{PART_OFFSET}</t>\n'
+            f'\t\t\t<t>{t_start}</t>\n'
             f'\t\t\t<playTime>{play_time}</playTime>\n'
-            '\t\t\t<name><![CDATA[NewPart]]></name>\n'
+            f'\t\t\t<name><![CDATA[{part_name}]]></name>\n'
             '\t\t\t<comment><![CDATA[New Musical Part]]></comment>\n'
             '\t\t\t<sPlug>\n'
             '\t\t\t\t<id><![CDATA[ACA9C502-A04B-42b5-B2EB-5CEA36D16FCE]]></id>\n'
@@ -2436,9 +2769,55 @@ class TsubakiProcessor:
             + pit_block
             + note_block
             + '\t\t</vsPart>\n'
+        )
+        return part_xml
+
+    def _build_vsqx_track_block(
+        self,
+        tNo: int,
+        name: str,
+        segments: List[LabelSegment],
+        f0: Optional[np.ndarray],
+        t: Optional[np.ndarray],
+        config: AudioProcessingConfig,
+        midi_notes: Optional[List] = None,
+        vsqx_singer_bs: int = 4,
+        word_phoneme_map: bool = False,
+        language: str = "",
+        native_english_words: Optional[set] = None,
+        dict_source: str = "default",
+    ) -> str:
+        """
+        构建单条 VSQX <vsTrack> XML 块（tNo + 恰好一个 vsPart）。
+
+        供单音轨 (_build_vsqx_project_text) 与"背靠背"旧版多音轨
+        (build_vsqx_project_text_multitrack，每个对话框一条独立 vsTrack) 共用。
+        实际的 vsPart / 音符 / 音高曲线构建已提取到 _build_vsqx_part_xml()，
+        与新版 _build_vsqx_project_text_sequenced()（同一条 vsTrack 下挂多个
+        vsPart，各自定位到时间轴）共用，避免逻辑重复导致行为不一致。
+        """
+        part_xml = self._build_vsqx_part_xml(
+            segments=segments,
+            f0=f0,
+            t=t,
+            config=config,
+            midi_notes=midi_notes,
+            vsqx_singer_bs=vsqx_singer_bs,
+            word_phoneme_map=word_phoneme_map,
+            language=language,
+            native_english_words=native_english_words,
+            dict_source=dict_source,
+            t_start=self._VSQX_PART_OFFSET,
+            part_name="NewPart",
+        )
+        return (
+            '\t<vsTrack>\n'
+            f'\t\t<tNo>{tNo}</tNo>\n'
+            f'\t\t<name><![CDATA[{name}]]></name>\n'
+            '\t\t<comment><![CDATA[Track]]></comment>\n'
+            + part_xml +
             '\t</vsTrack>\n'
         )
-        return track_xml
 
     @staticmethod
     def _vsqx_vs_unit_block(tNo: int) -> str:
@@ -2561,6 +2940,142 @@ class TsubakiProcessor:
             '\t</mixer>\n'
             '\t<masterTrack>\n'
             f'\t\t<seqName><![CDATA[{title}]]></seqName>\n'
+            '\t\t<comment><![CDATA[New VSQ File]]></comment>\n'
+            '\t\t<resolution>480</resolution>\n'
+            '\t\t<preMeasure>1</preMeasure>\n'
+            '\t\t<timeSig><m>0</m><nu>4</nu><de>4</de></timeSig>\n'
+            f'\t\t<tempo><t>0</t><v>{tempo_v}</v></tempo>\n'
+            '\t</masterTrack>\n'
+            + track_xml
+            + '\t<monoTrack>\n'
+            '\t</monoTrack>\n'
+            '\t<stTrack>\n'
+            '\t</stTrack>\n'
+            '\t<aux>\n'
+            '\t\t<id><![CDATA[AUX_VST_HOST_CHUNK_INFO]]></id>\n'
+            '\t\t<content>'
+            '<![CDATA[VlNDSwAAAAADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=]]>'
+            '</content>\n'
+            '\t</aux>\n'
+            '</vsq4>\n'
+        )
+        return xml
+
+    def _build_vsqx_project_text_sequenced(
+        self,
+        project_title: str,
+        resolved_tracks: List[Dict],
+        config: AudioProcessingConfig,
+        vsqx_singer: str = "MIKU_V4_Chinese",
+        vsqx_singer_id: str = "BNGE7CP7EMTRSNC3",
+        vsqx_singer_bs: int = 4,
+        word_phoneme_map: bool = False,
+        language: str = "",
+        dict_source: str = "default",
+    ) -> str:
+        """
+        对话文本框批量处理功能的 VSQX 生成入口（"独立序列 + 时间轴定位"模式）：
+        全部对话框写入*同一条* <vsTrack>（tNo=0），但每个对话框各自占一个
+        独立的 <vsPart>（而不是把音符拍平合并进同一个 vsPart），每个 vsPart
+        的音符仍使用该对话框自身的局部时间（相对该 vsPart 起点为 0），
+        只通过 vsPart.<t> 整体定位到时间轴上的位置：
+            vsPart[i].<t> = _VSQX_PART_OFFSET + 该对话框在合并时间轴上的
+                            起始时间（resolved_tracks[i]["offset_sec"]，
+                            由调用方按累计 wav 时长算好，转换为 tick）
+        这样每个对话框在 VOCALOID Editor 里仍是可独立拖动/编辑的 Part，
+        而不是被合并成一条连续音符列表。
+
+        Parameters
+        ----------
+        resolved_tracks : 每个元素为 build_multitrack_project 里已解析好的
+            单个对话框数据（segments / f0 / t / midi_notes 均为该对话框
+            自身的局部时间，未做整体平移），额外需要 "offset_sec" 字段
+            （该对话框在合并时间轴上的起始秒数）。
+
+        Returns
+        -------
+        str : VSQX XML 文本，仅含一条 <vsTrack>，其下有 len(resolved_tracks)
+              个 <vsPart>。
+        """
+        bpm = float(config.bpm)
+        tempo_v = int(round(bpm * 100))
+        ticks_per_sec = (bpm / 60.0) * 480.0
+
+        part_blocks = ""
+        for tr in resolved_tracks:
+            t_start = self._VSQX_PART_OFFSET + int(round(float(tr.get("offset_sec") or 0.0) * ticks_per_sec))
+            part_blocks += self._build_vsqx_part_xml(
+                segments=tr.get("segments") or [],
+                f0=tr.get("f0"),
+                t=tr.get("t"),
+                config=config,
+                midi_notes=tr.get("midi_notes"),
+                vsqx_singer_bs=vsqx_singer_bs,
+                word_phoneme_map=word_phoneme_map,
+                language=language,
+                native_english_words=tr.get("native_english_words"),
+                dict_source=dict_source,
+                t_start=t_start,
+                part_name=(tr.get("title") or "NewPart"),
+            )
+
+        track_xml = (
+            '\t<vsTrack>\n'
+            '\t\t<tNo>0</tNo>\n'
+            f'\t\t<name><![CDATA[{project_title}]]></name>\n'
+            '\t\t<comment><![CDATA[Track]]></comment>\n'
+            + part_blocks +
+            '\t</vsTrack>\n'
+        )
+
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
+            '<vsq4 xmlns="http://www.yamaha.co.jp/vocaloid/schema/vsq4/"\n'
+            '      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"\n'
+            '      xsi:schemaLocation="http://www.yamaha.co.jp/vocaloid/schema/vsq4/'
+            ' vsq4.xsd">\n'
+            '\t<vender><![CDATA[Yamaha corporation]]></vender>\n'
+            '\t<version><![CDATA[4.0.0.3]]></version>\n'
+            '\t<vVoiceTable>\n'
+            '\t\t<vVoice>\n'
+            f'\t\t\t<bs>{vsqx_singer_bs}</bs>\n'
+            '\t\t\t<pc>0</pc>\n'
+            f'\t\t\t<id><![CDATA[{vsqx_singer_id}]]></id>\n'
+            f'\t\t\t<name><![CDATA[{vsqx_singer}]]></name>\n'
+            '\t\t\t<vPrm>\n'
+            '\t\t\t\t<bre>0</bre>\n'
+            '\t\t\t\t<bri>0</bri>\n'
+            '\t\t\t\t<cle>0</cle>\n'
+            '\t\t\t\t<gen>0</gen>\n'
+            '\t\t\t\t<ope>0</ope>\n'
+            '\t\t\t</vPrm>\n'
+            '\t\t</vVoice>\n'
+            '\t</vVoiceTable>\n'
+            '\t<mixer>\n'
+            '\t\t<masterUnit>\n'
+            '\t\t\t<oDev>0</oDev>\n'
+            '\t\t\t<rLvl>0</rLvl>\n'
+            '\t\t\t<vol>0</vol>\n'
+            '\t\t</masterUnit>\n'
+            + self._vsqx_vs_unit_block(0)
+            + '\t\t<monoUnit>\n'
+            '\t\t\t<iGin>0</iGin>\n'
+            '\t\t\t<sLvl>-898</sLvl>\n'
+            '\t\t\t<sEnable>0</sEnable>\n'
+            '\t\t\t<m>0</m>\n'
+            '\t\t\t<s>0</s>\n'
+            '\t\t\t<pan>64</pan>\n'
+            '\t\t\t<vol>0</vol>\n'
+            '\t\t</monoUnit>\n'
+            '\t\t<stUnit>\n'
+            '\t\t\t<iGin>0</iGin>\n'
+            '\t\t\t<m>0</m>\n'
+            '\t\t\t<s>0</s>\n'
+            '\t\t\t<vol>-129</vol>\n'
+            '\t\t</stUnit>\n'
+            '\t</mixer>\n'
+            '\t<masterTrack>\n'
+            f'\t\t<seqName><![CDATA[{project_title}]]></seqName>\n'
             '\t\t<comment><![CDATA[New VSQ File]]></comment>\n'
             '\t\t<resolution>480</resolution>\n'
             '\t\t<preMeasure>1</preMeasure>\n'

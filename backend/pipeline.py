@@ -121,6 +121,43 @@ def _convert_digits_to_words(text: str, language: str) -> str:
     return converted
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# 对齐辅助音调偏移（"移调对齐"）
+#   高音音频（如歌声跟读、高音色 TTS）在送入强制对齐模型时，偶发导致对齐
+#   模型内部的语音特征提取出现错位（例如 Qwen3-FA 在处理高音/中英混合短
+#   音频时，个别 token 的时间戳整体错序——详见 alt_aligners.py 里对
+#   "退化区间"的说明）。这里提供一个可选的"对齐专用"移调预处理：只生成
+#   一份音高整体升高/降低若干半音的临时音频副本，喂给对齐后端做时间戳
+#   识别；识别完成后临时副本立即丢弃，不会写回任何落盘产物。
+#
+#   关键点：librosa.effects.pitch_shift 是"纯移调"（phase-vocoder 实现），
+#   只改变基频，不改变音频时长——所以对齐后端返回的时间戳（无论是逐字符
+#   还是逐词）可以直接原样使用，不需要任何时间轴换算或缩放，最终 LAB /
+#   F0 曲线 / 工程文件仍然全部基于原始未处理的音频生成。这正是本功能被
+#   设计为"仅影响送入对齐器的这一份临时拷贝"而不是全局重采样的原因。
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _make_alignment_pitch_shifted_copy(src_wav_path: str, semitones: float) -> str:
+    """
+    读取 src_wav_path，整体移调 semitones 个半音后另存为临时 wav 文件，
+    返回临时文件路径（调用方负责用完后删除）。semitones 为 0 时不会被
+    调用方触发（各调用点均已提前判断），这里仍保留纯净的单一职责实现。
+    """
+    import tempfile
+    import uuid as _uuid
+    import librosa
+    import soundfile as sf
+
+    y, sr = librosa.load(src_wav_path, sr=None, mono=True)
+    y = librosa.effects.pitch_shift(y, sr=sr, n_steps=semitones)
+
+    tmp_path = os.path.join(
+        tempfile.gettempdir(), f"_align_pitch_shift_{_uuid.uuid4().hex[:8]}.wav"
+    )
+    sf.write(tmp_path, y, sr, subtype="PCM_16")
+    return tmp_path
+
+
 def _run_alignment(
     audio_file,             # Flask FileStorage 或 FileStorageWrapper
     text: str,
@@ -135,6 +172,9 @@ def _run_alignment(
                                              # 与 f0_device（F0 提取设备，CREPE/RMVPE 专用）
                                              # 彻底解耦。None 时为向后兼容回退到 f0_device，
                                              # 但正常链路（app.py）应始终显式传入。
+    align_pitch_shift_semitones: float = 0.0,   # 新增：对齐辅助移调（半音，正数升调/负数降调，
+                                                 # 仅影响送入对齐后端的临时音频副本，不影响
+                                                 # 最终 LAB 时间戳换算、F0 提取或工程文件音高）
 ) -> Dict:
     """
     统一调度对齐后端，返回与 MFAProcessor.process() 格式兼容的字典。
@@ -146,13 +186,39 @@ def _run_alignment(
     # 参考文本）时 _convert_digits_to_words 内部直接原样返回，不受影响。
     text = _convert_digits_to_words(text, language)
 
+    import tempfile, shutil, os
+
     if backend == "mfa":
-        processor = MFAProcessor()
-        return processor.process(audio_file, text, language,
-                                 english_word_align=english_word_align)
+        # MFA 走 Kaldi 音素级强制对齐，不像 Qwen3-FA/NeMo 那样直接对原始
+        # 波形做端到端神经网络推理，历史上未观测到"高音导致错位"的问题；
+        # 但既然移调预处理本身对时间戳无损，这里仍然统一支持，交由用户
+        # 自行决定是否对 MFA 也启用（默认 0 半音即完全不生效，行为不变）。
+        if not align_pitch_shift_semitones:
+            processor = MFAProcessor()
+            return processor.process(audio_file, text, language,
+                                     english_word_align=english_word_align)
+
+        tmp_dir = tempfile.mkdtemp(prefix="mfa_pitch_align_")
+        try:
+            filename = getattr(audio_file, "filename", "audio.wav")
+            tmp_wav = os.path.join(tmp_dir, filename)
+            audio_file.save(tmp_wav)
+            shifted_path = _make_alignment_pitch_shifted_copy(
+                tmp_wav, align_pitch_shift_semitones
+            )
+            try:
+                processor = MFAProcessor()
+                return processor.process(
+                    _LocalFileAdapter(shifted_path), text, language,
+                    english_word_align=english_word_align,
+                )
+            finally:
+                if os.path.exists(shifted_path):
+                    os.remove(shifted_path)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # ── 替代后端 ──────────────────────────────────────────────────────────
-    import tempfile, shutil, os
     from alt_aligners import get_aligner
 
     # 【2026-07 修复】此前这里一直误用 f0_device（F0 音高提取设备，只有
@@ -171,6 +237,19 @@ def _run_alignment(
         tmp_wav = os.path.join(tmp_dir, filename)
         audio_file.save(tmp_wav)
 
+        # 对齐辅助移调：只替换喂给 aligner.align() 的音频路径，音频时长
+        # 严格不变，因此返回的时间戳无需任何换算即可直接使用；原始
+        # tmp_wav（未移调）在本函数作用域内不再被使用，但调用方
+        # process_full / process_mfa_only 等仍然基于各自独立保存的原始
+        # wav_path 做后续 F0 提取和工程文件生成，两者互不影响。
+        align_target_path = tmp_wav
+        shifted_path: Optional[str] = None
+        if align_pitch_shift_semitones:
+            shifted_path = _make_alignment_pitch_shifted_copy(
+                tmp_wav, align_pitch_shift_semitones
+            )
+            align_target_path = shifted_path
+
         extra = {}
         if backend == "whisperx":
             extra["whisper_model"] = whisperx_model
@@ -178,8 +257,15 @@ def _run_alignment(
         elif backend == "nemo_aligner" and nemo_model:
             extra["nemo_model"] = nemo_model
         aligner = get_aligner(backend, device=resolved_aligner_device, **extra)
-        return aligner.align(tmp_wav, text or None, language,
-                             english_word_align=english_word_align)
+        try:
+            return aligner.align(align_target_path, text or None, language,
+                                 english_word_align=english_word_align)
+        finally:
+            if shifted_path:
+                try:
+                    os.remove(shifted_path)
+                except OSError:
+                    pass
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -233,6 +319,7 @@ class AudioProcessingPipeline:
         vsqx_singer_bs: int = 4,                         # ← VSQX 声库 Bank Select（VOCALOID4 内部编号）
         word_phoneme_map: bool = False,                  # ← 英语单词 → 音素写入（SVP/VSQX）
         dict_source: str = "default",                     # ← 单词→音素词典来源
+        align_pitch_shift_semitones: float = 0.0,        # ← 对齐辅助移调（半音），不影响最终产物音高
     ) -> Dict:
         config = AudioProcessingConfig(
             bpm=bpm,
@@ -275,7 +362,8 @@ class AudioProcessingPipeline:
                                            whisperx_batch_size=whisperx_batch_size,
                                            english_word_align=english_word_align,
                                            nemo_model=nemo_model,
-                                           aligner_device=aligner_device)
+                                           aligner_device=aligner_device,
+                                           align_pitch_shift_semitones=align_pitch_shift_semitones)
             if not align_result.get("success"):
                 error = align_result.get("error", "对齐处理失败")
                 logger.error(f"✗ 对齐失败: {error}")
@@ -291,7 +379,9 @@ class AudioProcessingPipeline:
                 f.write(lab_content)
             logger.info(f"✓ LAB 标注完成: {lab_path}")
 
-            # ── 步骤 2：F0 提取 ──────────────────────────────────────────
+            # ── 步骤 2：F0 提取（注意：始终基于步骤开头保存的原始 wav_path，
+            #    不受 align_pitch_shift_semitones 影响——移调只发生在对齐
+            #    阶段内部的临时副本上，此处 wav_path 从未被替换过）───────
             logger.info("[ 步骤 2/3 ] 音高提取...")
             try:
                 audio_data = self.tsubaki_processor.process_audio_f0(wav_path, config)
@@ -375,6 +465,7 @@ class AudioProcessingPipeline:
         whisperx_batch_size: int = 16,           # ← WhisperX 推理批大小（仅 device=cuda 时有意义）
         nemo_model: Optional[str] = None,        # ← NeMo Forced Aligner 模型覆盖（可选）
         english_word_align: bool = False,        # ← 英语单词级对齐
+        align_pitch_shift_semitones: float = 0.0,   # ← 对齐辅助移调（半音），不影响 LAB 时间戳换算
     ) -> Dict:
         """仅执行对齐标注（不生成工程文件）"""
         import time
@@ -388,7 +479,8 @@ class AudioProcessingPipeline:
                                     whisperx_batch_size=whisperx_batch_size,
                                     english_word_align=english_word_align,
                                     nemo_model=nemo_model,
-                                    aligner_device=aligner_device)
+                                    aligner_device=aligner_device,
+                                    align_pitch_shift_semitones=align_pitch_shift_semitones)
 
             if result.get("success"):
                 lab_content = result.get("lab_content", "")
@@ -564,19 +656,29 @@ class AudioProcessingPipeline:
         dict_source: str = "default",
         processing_mode: str = "full",
         phoneme_mode: str = "none",
+        align_pitch_shift_semitones: float = 0.0,   # ← 兼容旧调用方的全局默认值；现推荐通过每个
+                                                     #   box 自带的 "align_pitch_shift_semitones"
+                                                     #   字段传入，per-box 优先，此参数仅在该字段
+                                                     #   缺失时兜底
         progress_cb: Optional[Callable[[int, int, Dict], None]] = None,
     ) -> Dict:
         """
         对话文本框批量处理入口：逐个对话框顺序处理（对齐/LAB/MIDI 导入 + 音高提取），
-        最终把全部成功的对话框合并写入*同一个*多音轨工程文件（每个对话框
-        对应一条独立音轨），而不是分别导出多个独立工程文件。
+        最终把全部成功的对话框写入*同一个*单音轨工程文件（而不是分别导出
+        多个独立工程文件，也不再为每个对话框生成独立音轨）——但每个对话框
+        仍是该音轨下一段独立的序列（SVP group / USTX voice_part / VSQX
+        vsPart），只按顺序"背靠背"定位到时间轴上，*不会*把多个对话框的
+        音符拍平合并进同一段序列：第 i 个对话框所在序列的起始时间 = 排在
+        它前面的全部对话框的真实音频时长之和（音频推断的分段起始时间，
+        无缝衔接），详见 build_multitrack_project。
 
         顶部"高级设置"（对齐后端 / 语种 / BPM / F0 参数 / word_phoneme_map /
         dict_source 等）对全部对话框统一生效，与单文件处理页面语义一致。
 
         Parameters
         ----------
-        boxes : 每个元素描述一个对话框，按前端展示顺序排列（决定最终音轨顺序）：
+        boxes : 每个元素描述一个对话框，按前端展示顺序排列（决定其在合并后
+            时间轴上的先后位置）：
             {
                 "index": int,                  # 对话框序号（用于结果回填，从 0 开始）
                 "text": str,                    # 台词文本（可选；MFA/Qwen3-FA/NeMo-FA 需要）
@@ -585,6 +687,9 @@ class AudioProcessingPipeline:
                                                  # （LAB 优先级高于 MIDI，两者都提供时以 LAB 为准）
                 "midi_path": Optional[str],     # 已保存到磁盘的 MIDI 路径；无 LAB 时提供则跳过对齐，
                                                  # 从 MIDI 音符自动生成段落（并读取 MIDI BPM/音高）
+                "align_pitch_shift_semitones": Optional[float],  # 该对话框自己的对齐辅助移调
+                                                 # （半音），每框独立生效，仅在该框走对齐后端时
+                                                 # 使用；缺失时按 0（不移调）处理。
             }
         processing_mode : "full"（完整处理：对齐 + F0 提取 + 工程文件生成，
             没有 LAB/MIDI 的对话框会走 aligner_backend 对齐）或
@@ -649,6 +754,12 @@ class AudioProcessingPipeline:
             lab_path_in = box.get("lab_path")
             midi_path_in = box.get("midi_path")
             text = (box.get("text") or "").strip()
+            # 每框独立的对齐辅助移调：优先使用该框自带的值；缺失时（如
+            # 旧版调用方仍只传统一的 align_pitch_shift_semitones 参数）
+            # 回退到方法级默认值，保持向后兼容。
+            box_align_pitch_shift_semitones = box.get(
+                "align_pitch_shift_semitones", align_pitch_shift_semitones
+            )
 
             box_result: Dict = {"index": idx}
 
@@ -718,6 +829,7 @@ class AudioProcessingPipeline:
                         english_word_align=english_word_align,
                         nemo_model=nemo_model,
                         aligner_device=aligner_device,
+                        align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                     )
                     if not align_result.get("success"):
                         box_result.update(
@@ -792,7 +904,7 @@ class AudioProcessingPipeline:
         if not project_result.get("success"):
             return {
                 "success": False,
-                "error": project_result.get("error", "多音轨工程文件生成失败"),
+                "error": project_result.get("error", "批量顺序合并工程文件生成失败"),
                 "boxes": results,
                 "processed_count": processed_count,
                 "failed_count": failed_count,

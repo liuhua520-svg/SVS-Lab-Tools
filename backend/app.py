@@ -43,6 +43,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _parse_align_pitch_shift(raw) -> float:
+    """
+    解析"对齐辅助移调"表单字段（半音，浮点数，正数升调/负数降调）。
+    夹到 [-24, 24] 半音（两个八度）防止极端输入把 librosa.pitch_shift
+    的相位声码器算法拖入明显失真区间；0（默认值）表示完全不启用，
+    与该功能上线前的行为保持一致。
+    """
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if v != v:  # NaN
+        return 0.0
+    return max(-24.0, min(24.0, v))
+
+
 def _normalize_dict_source(raw: str) -> str:
     """
     校验前端传来的 dict_source。
@@ -771,6 +787,7 @@ def run_pipeline_job(
     vsqx_pitch_smooth_window: int = 5,
     whisperx_batch_size: int = 16,
     aligner_device: str = "auto",
+    align_pitch_shift_semitones: float = 0.0,
 ):
     try: # <--- Added the missing try block here
         class FileStorageWrapper:
@@ -822,6 +839,7 @@ def run_pipeline_job(
             vsqx_singer_bs=vsqx_singer_bs,
             word_phoneme_map=word_phoneme_map,
             dict_source=dict_source,
+            align_pitch_shift_semitones=align_pitch_shift_semitones,
         )
 
         if result.get("success"):
@@ -933,6 +951,12 @@ def pipeline_full_process():
         english_word_align = request.form.get("english_word_align", "false").lower() == "true"
         word_phoneme_map   = request.form.get("word_phoneme_map",   "false").lower() == "true"
 
+        # 对齐辅助移调（半音）：仅影响送入对齐后端的临时音频副本，不影响
+        # F0 提取或最终工程文件音高。
+        align_pitch_shift_semitones = _parse_align_pitch_shift(
+            request.form.get("align_pitch_shift_semitones", 0)
+        )
+
         # 【解耦】前端不再要求用户手动开启"英语单词级对齐"开关才能使用
         # "单词映射音素"/词典来源功能——只要用户开启了 word_phoneme_map，
         # 就在后端自动补上 english_word_align=True（日语除外，前端本就不
@@ -1007,6 +1031,11 @@ def pipeline_full_process():
                 vsqx_pitch_smooth_window,
                 whisperx_batch_size,
             ),
+            # 用关键字参数追加新增字段，避开 run_pipeline_job 尾部
+            # aligner_device 的位置参数陷阱（该路由此前一直没有解析/透传
+            # aligner_device，一直隐性按默认值 "auto" 运行——这是已存在的
+            # 行为，这里不额外修正，只保证新增字段不会因为位置错位而串位）。
+            kwargs=dict(align_pitch_shift_semitones=align_pitch_shift_semitones),
         ).start()
 
         return jsonify(
@@ -1032,7 +1061,8 @@ def run_mfa_only_job(job_id: str, wav_path: str, text: str, language: str,
                      nemo_model: str = "",
                      english_word_align: bool = False,
                      whisperx_batch_size: int = 16,
-                     aligner_device: Optional[str] = None):
+                     aligner_device: Optional[str] = None,
+                     align_pitch_shift_semitones: float = 0.0):
     try:
         set_job(
             job_id,
@@ -1064,7 +1094,8 @@ def run_mfa_only_job(job_id: str, wav_path: str, text: str, language: str,
                                            whisperx_model=whisperx_model,
                                            whisperx_batch_size=whisperx_batch_size,
                                            nemo_model=(nemo_model or None),
-                                           english_word_align=english_word_align)
+                                           english_word_align=english_word_align,
+                                           align_pitch_shift_semitones=align_pitch_shift_semitones)
 
         if result.get("success"):
             set_job(
@@ -1128,6 +1159,11 @@ def pipeline_mfa_only():
 
         english_word_align = request.form.get("english_word_align", "false").lower() == "true"
 
+        # 对齐辅助移调（半音）：仅影响送入对齐后端的临时音频副本。
+        align_pitch_shift_semitones = _parse_align_pitch_shift(
+            request.form.get("align_pitch_shift_semitones", 0)
+        )
+
         # WhisperX / Qwen3-ASR 支持纯 ASR 模式，文本可选；
         # Qwen3-ForcedAligner / NeMo Forced Aligner 都是强制对齐，必须提供参考文本
         text_optional = aligner_backend in ("whisperx", "qwen3_asr")
@@ -1154,7 +1190,7 @@ def pipeline_mfa_only():
             daemon=True,
             args=(job_id, str(wav_path), text, language, aligner_backend, f0_device,
                   whisperx_model, nemo_model, english_word_align, whisperx_batch_size,
-                  aligner_device),
+                  aligner_device, align_pitch_shift_semitones),
         ).start()
 
         # 4. 立即返回 job_id 供前端轮询
@@ -1518,6 +1554,8 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
             total_tts = len(tts_boxes)
             for done_tts, box in enumerate(tts_boxes, start=1):
                 tts_info = box["tts"]
+                # 对齐辅助移调（半音）：每个对话框独立生效，未提交时默认 0。
+                box_align_pitch_shift_semitones = box.get("align_pitch_shift_semitones", 0.0)
                 set_job(
                     job_id, status="running",
                     progress={"done": 0, "total": len(boxes)},
@@ -1535,6 +1573,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         language=language,
                         aligner_device=aligner_device,
                         english_word_align=english_word_align,
+                        align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                     )
                     shutil.rmtree(preview_segments_dir, ignore_errors=True)
 
@@ -1568,6 +1607,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         pitch=tts_info.get("pitch", "+0Hz"),
                         aligner_device=aligner_device,
                         english_word_align=english_word_align,
+                        align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                     )
 
                 if tts_result.get("success"):
@@ -1753,6 +1793,13 @@ def dialogue_process():
         english_word_align = request.form.get("english_word_align", "false").lower() == "true"
         word_phoneme_map   = request.form.get("word_phoneme_map",   "false").lower() == "true"
 
+        # 对齐辅助移调（半音）：现为每个对话框独立生效，见下方
+        # "逐个对话框保存音频 / LAB / MIDI 文件" 循环里的 align_pitch_shift_{i}
+        # 解析（音频跟读走 pipeline._run_alignment，TTS跟读走
+        # tts_processor.align_segments / synthesize_and_align，均已支持
+        # 按每个对话框传入各自的移调值；仅影响送入对齐后端的临时音频
+        # 副本，不影响最终 WAV / F0 / 工程文件音高）。
+
         # USTX 没有 phonemes 字段，词典/单词映射对其无意义；即便前端已隐藏
         # 相关控件，这里仍显式兜底关闭，防止残留表单值被误提交生效。
         if output_format == "ustx":
@@ -1790,6 +1837,11 @@ def dialogue_process():
             lab_file = request.files.get(f"lab_{i}")
             mid_file = request.files.get(f"mid_{i}")
             notation_file = request.files.get(f"notation_{i}")
+            # 对齐辅助移调（半音）：每个对话框独立提交，未提交时（如旧版
+            # 前端缓存）默认为 0，与该功能上线前行为一致。
+            box_align_pitch_shift_semitones = _parse_align_pitch_shift(
+                request.form.get(f"align_pitch_shift_{i}", 0)
+            )
 
             audio_path = None
             lab_path = None
@@ -1878,6 +1930,7 @@ def dialogue_process():
                 "lab_path": lab_path,
                 "midi_path": midi_path,
                 "tts": tts_info,
+                "align_pitch_shift_semitones": box_align_pitch_shift_semitones,
             })
 
         if input_mode == "tts":
@@ -2184,6 +2237,7 @@ def run_tts_pipeline_job(
     vsqx_singer_bs: int,
     word_phoneme_map: bool,
     dict_source: str,
+    align_pitch_shift_semitones: float = 0.0,
     preview_segments_dir: Optional[str] = None,
     preview_sentences: Optional[list] = None,
     preview_wav_path: Optional[str] = None,
@@ -2204,7 +2258,9 @@ def run_tts_pipeline_job(
             align_result = tts_processor.align_segments(
                 segments_dir=preview_segments_dir, sentences=preview_sentences,
                 language=language, aligner_device=aligner_device,
-                english_word_align=english_word_align, progress_cb=_progress_cb,
+                english_word_align=english_word_align,
+                align_pitch_shift_semitones=align_pitch_shift_semitones,
+                progress_cb=_progress_cb,
             )
             shutil.rmtree(preview_segments_dir, ignore_errors=True)
 
@@ -2238,6 +2294,7 @@ def run_tts_pipeline_job(
                 work_dir=str(WORK_DIR), stem=stem,
                 rate=rate, volume=volume, pitch=pitch,
                 aligner_device=aligner_device, english_word_align=english_word_align,
+                align_pitch_shift_semitones=align_pitch_shift_semitones,
                 progress_cb=_progress_cb,
             )
 
@@ -2357,6 +2414,13 @@ def tts_process():
         if word_phoneme_map and language != "jpn":
             english_word_align = True
 
+        # 对齐辅助移调（半音）：TTS跟读固定使用 Qwen3-FA，高音色（尤其是
+        # 叠加了正向"音调"滑块的女声/童声音色）逐句短音频偶发触发块级
+        # 时间戳错序，可通过该参数在对齐前临时降调规避，不影响最终产物。
+        align_pitch_shift_semitones = _parse_align_pitch_shift(
+            payload.get("align_pitch_shift_semitones", 0)
+        )
+
         dict_source = _normalize_dict_source(payload.get("dict_source", "default"))
 
         vsqx_singer = payload.get("vsqx_singer", "MIKU_V4_Chinese")
@@ -2404,6 +2468,7 @@ def tts_process():
                 vsqx_singer=vsqx_singer, vsqx_singer_id=vsqx_singer_id,
                 vsqx_singer_bs=vsqx_singer_bs,
                 word_phoneme_map=word_phoneme_map, dict_source=dict_source,
+                align_pitch_shift_semitones=align_pitch_shift_semitones,
                 preview_segments_dir=(preview_entry or {}).get("segments_dir"),
                 preview_sentences=(preview_entry or {}).get("sentences"),
                 preview_wav_path=(preview_entry or {}).get("wav_path"),
