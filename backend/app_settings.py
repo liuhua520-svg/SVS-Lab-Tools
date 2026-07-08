@@ -127,6 +127,36 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     # 已知自己的显卡显存有限，也可以在这里直接调低这个值，跳过重试直接
     # 一次成功、减少无谓的重试耗时；反之显存充裕的显卡可以调大以提速。
     "whisperx_batch_size": 16,
+
+    # ── tts_processor.py 逐句合成分段长度（字符数）───────────────────────
+    # 详见 tts_processor.py split_sentences() / _split_long_line() 顶部
+    # 说明：单行文本超过 tts_max_segment_len 才会被二次切割，切割点优先
+    # 落在 [tts_min_segment_len, tts_max_segment_len] 区间内最靠近上限的
+    # 句末标点（找不到则退化为逗号类标点）。默认值与原硬编码常量一致
+    # （250 / 500）。这两项只影响"TTS 跟读"逐句合成的分段粒度，不涉及
+    # Qwen3 / NeMo 两个独立子服务，保存后无需重启任何进程。
+    "tts_min_segment_len": 250,
+    "tts_max_segment_len": 500,
+
+    # 每多少个换行才切一段（默认 1，即每遇到一个换行就分段，与改造前行为
+    # 一致）。例如设为 2 表示每两个换行才断开一次分段，未达到该数量的换行
+    # 会被当作段内换行保留，不再单独触发切分。仅在 tts_disable_newline_split
+    # 为 False 时生效。
+    "tts_newline_split_every_n": 1,
+
+    # True  → 完全禁用"按换行分段"这一步，整段输入文本先被当成一整段
+    #         文本处理，是否切割、在哪切割完全交给下面的长度区间二次
+    #         切割规则（tts_min_segment_len / tts_max_segment_len）决定。
+    # False → 保持按换行分段（默认，行为与改造前一致，换行切分粒度由
+    #         tts_newline_split_every_n 控制）。
+    "tts_disable_newline_split": False,
+
+    # True  → 完全禁用"单段过长再二次切割"这一步：不管文本多长，都不会
+    #         再按 tts_min_segment_len / tts_max_segment_len 区间寻找标点
+    #         切割点，每个分段保持原样（分段仍然可能来自换行切分，除非
+    #         上面 tts_disable_newline_split 也同时打开）。
+    # False → 保持二次切割（默认，行为与改造前一致）。
+    "tts_disable_segment_len_split": False,
 }
 
 # 对齐调优参数的合法取值范围（秒），用于 save_settings() 里的边界钳制。
@@ -199,6 +229,41 @@ def save_settings(new_settings: Dict[str, object]) -> Dict[str, object]:
         except (TypeError, ValueError):
             wx_bs = int(DEFAULT_SETTINGS["whisperx_batch_size"])
         current["whisperx_batch_size"] = min(max(wx_bs, 1), 128)
+
+        # TTS 逐句合成分段长度（字符数）：转 int 并各自钳制到 [1, 5000]，
+        # 非法/缺失值回退为默认值；钳制后若 min > max，交换两者，避免
+        # split_sentences() 内部区间倒置导致行为异常（例如永远找不到切
+        # 割点、二次切割死循环）。上限 5000 只是防呆，正常使用场景里
+        # 段落长度远小于此值。
+        try:
+            tts_min_len = int(current.get("tts_min_segment_len", DEFAULT_SETTINGS["tts_min_segment_len"]))
+        except (TypeError, ValueError):
+            tts_min_len = int(DEFAULT_SETTINGS["tts_min_segment_len"])
+        try:
+            tts_max_len = int(current.get("tts_max_segment_len", DEFAULT_SETTINGS["tts_max_segment_len"]))
+        except (TypeError, ValueError):
+            tts_max_len = int(DEFAULT_SETTINGS["tts_max_segment_len"])
+        tts_min_len = min(max(tts_min_len, 1), 5000)
+        tts_max_len = min(max(tts_max_len, 1), 5000)
+        if tts_min_len > tts_max_len:
+            tts_min_len, tts_max_len = tts_max_len, tts_min_len
+        current["tts_min_segment_len"] = tts_min_len
+        current["tts_max_segment_len"] = tts_max_len
+
+        # 每多少个换行才切一段：转 int 并钳制到 [1, 100]，非法/缺失值回退
+        # 为默认值 1。上限 100 只是防呆（正常场景很少需要连续攒几十个换行
+        # 才分段）。
+        try:
+            newline_every_n = int(current.get(
+                "tts_newline_split_every_n", DEFAULT_SETTINGS["tts_newline_split_every_n"]
+            ))
+        except (TypeError, ValueError):
+            newline_every_n = int(DEFAULT_SETTINGS["tts_newline_split_every_n"])
+        current["tts_newline_split_every_n"] = min(max(newline_every_n, 1), 100)
+
+        # 两个新增开关：与其它布尔项一样做基本校验。
+        current["tts_disable_newline_split"] = bool(current.get("tts_disable_newline_split"))
+        current["tts_disable_segment_len_split"] = bool(current.get("tts_disable_segment_len_split"))
 
         # 对齐调优参数：转 float 并钳制到 _TUNING_RANGES 定义的合法区间，
         # 非法/缺失/无法解析的值一律回退为默认值，避免脏数据写入导致
@@ -350,3 +415,63 @@ def get_alignment_tuning() -> Dict[str, float]:
         _tuning_cache_mtime = mtime
 
     return tuning
+
+
+def get_tts_segment_len() -> Dict[str, int]:
+    """
+    供 tts_processor.py 调用：实时读取逐句合成分段长度设置
+    （tts_min_segment_len / tts_max_segment_len，均为字符数）。
+
+    与 get_alignment_tuning() 同样的"实时生效、无需重启"模型——不使用
+    单独的 mtime 缓存（tts_processor 调用频率远低于 alt_aligners 的
+    对齐热路径），每次直接调用 load_settings()，成本可忽略。
+
+    Returns
+    -------
+    Dict[str, int]，键为 "min_len" / "max_len"，保证 min_len <= max_len
+    （save_settings() 已做过交换钳制，这里再兜底一次防御性排序）。
+    """
+    settings = load_settings()
+    try:
+        min_len = int(settings.get("tts_min_segment_len", DEFAULT_SETTINGS["tts_min_segment_len"]))
+    except (TypeError, ValueError):
+        min_len = int(DEFAULT_SETTINGS["tts_min_segment_len"])
+    try:
+        max_len = int(settings.get("tts_max_segment_len", DEFAULT_SETTINGS["tts_max_segment_len"]))
+    except (TypeError, ValueError):
+        max_len = int(DEFAULT_SETTINGS["tts_max_segment_len"])
+    if min_len > max_len:
+        min_len, max_len = max_len, min_len
+    return {"min_len": min_len, "max_len": max_len}
+
+
+def get_tts_split_options() -> Dict[str, object]:
+    """
+    供 tts_processor.py 的 split_sentences() 调用：实时读取"分段"这一步
+    相关的三个开关/参数（与 get_tts_segment_len() 分开，是因为那两个是
+    "二次切割"的长度区间，这三个是"要不要按换行分段/ 按多少个换行分段 /
+    要不要二次切割"本身的开关，语义上是两组不同的设置）。
+
+    同样不使用 mtime 缓存，保存设置后下一次 split_sentences() 调用立即
+    生效，无需重启任何进程。
+
+    Returns
+    -------
+    Dict[str, object]，键：
+      - "newline_split_every_n" (int)：每多少个换行才切一段，>= 1。
+      - "disable_newline_split" (bool)：True 时完全不按换行分段。
+      - "disable_segment_len_split" (bool)：True 时完全不做长度二次切割。
+    """
+    settings = load_settings()
+    try:
+        every_n = int(settings.get(
+            "tts_newline_split_every_n", DEFAULT_SETTINGS["tts_newline_split_every_n"]
+        ))
+    except (TypeError, ValueError):
+        every_n = int(DEFAULT_SETTINGS["tts_newline_split_every_n"])
+    every_n = max(every_n, 1)
+    return {
+        "newline_split_every_n": every_n,
+        "disable_newline_split": bool(settings.get("tts_disable_newline_split")),
+        "disable_segment_len_split": bool(settings.get("tts_disable_segment_len_split")),
+    }

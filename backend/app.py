@@ -2074,10 +2074,11 @@ def tts_preview():
 def tts_synthesize_preview():
     """
     手动分段预览：由前端"生成预览"按钮触发（不再随输入自动防抖触发）。
-    输入文本按句末标点切分 → 每句用所选 TTS 引擎合成 → 按偏移拼接成完整
-    音频返回给前端做即时试听。这一步只做 TTS 合成，不调用 Qwen3-FA 对齐
-    ——对齐推迟到用户点击"开始处理"时才做（见 /api/tts/process），避免
-    "只是想听听音色/语速"也要跑一次对齐。
+    输入文本切分（优先按换行分段，单行过长时再按长度区间在句号/逗号处二次
+    切割，规则见 tts_processor.split_sentences()）→ 每句用所选 TTS 引擎
+    合成 → 按偏移拼接成完整音频返回给前端做即时试听。这一步只做 TTS 合成，
+    不调用 Qwen3-FA 对齐——对齐推迟到用户点击"开始处理"时才做（见
+    /api/tts/process），避免"只是想听听音色/语速"也要跑一次对齐。
 
     不再有句子数量上限：预览会合成完整输入文本（不再只取前 N 句）。
 
@@ -2300,7 +2301,7 @@ def tts_process():
     pipeline 路由共用 /api/pipeline/job/<job_id> 轮询进度）。
 
     请求为 application/x-www-form-urlencoded 或 multipart/form-data：
-      - text              : 全文本（必填，将按句末标点自动切分）
+      - text              : 全文本（必填，将优先按换行自动分段，单行过长时再按句号/逗号二次切割）
       - voice             : EdgeTTS 音色 ShortName（必填，如 zh-CN-XiaoxiaoNeural）
       - rate / pitch / volume : 语速 / 音调 / 音量，格式分别为 "+N%"/"+NHz"/"+N%"
       - language          : 语种短代码，默认 cmn

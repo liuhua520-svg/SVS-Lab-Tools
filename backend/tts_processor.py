@@ -12,8 +12,10 @@ TTS 文本转语音模块（"讲述人" / "TTS跟读" 功能后端）
                           通过 SAPI5 / pywin32 驱动，纯本地、不需要联网）；
      后续新增引擎只需要在 _ENGINES 里注册一个新的适配条目即可，不需要改动
      synthesize_and_align() / synthesize_preview() 等上层流程。
-  3. 把整段输入文本按句末标点切分成句子，逐句合成 → 逐句对齐 → 按各句在
-     合并音频中的时间偏移量整体平移该句 LAB 时间戳 → 拼接成完整 LAB。
+  3. 把整段输入文本切分成句子（分段规则见 split_sentences() 顶部说明：优先
+     按换行分段，单行过长时再按长度区间落在句号/逗号处二次切割），逐句合成
+     → 逐句对齐 → 按各句在合并音频中的时间偏移量整体平移该句 LAB 时间戳 →
+     拼接成完整 LAB。
 
 为什么"逐句合成 + 逐句对齐"而不是"整段合成 + 整段对齐"：
   TTS 合成的整段音频里，句子之间的停顿时长完全由 TTS 引擎自行决定，与参考
@@ -35,7 +37,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import shutil
 import sys
 import tempfile
@@ -43,6 +44,8 @@ import threading
 import uuid
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
+
+import app_settings
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +66,28 @@ SAMPLE_RATE = 44100
 # 合成音频的语感更自然（避免上一句尾音直接贴上下一句开头）。
 DEFAULT_SENTENCE_GAP_SEC = 0.35
 
-# 句末标点分段：中/英/日/韩常见句末停顿符号 + 换行。
-# 与 alt_aligners._SENTENCE_END_RE（r'[。！？；\n…!?]+'）的区别：这里额外
-# 收录英文句点 "."——因为本模块每一句都会变成一次独立的 TTS 合成 + 独立
-# 对齐调用，不存在"句子中间的小数点/缩写点"需要被保留在同一句内的顾虑，
-# 用户需求也明确写的是"按句号分段"。
-_SENTENCE_SPLIT_RE = re.compile(r'([。！？；.!?…\n]+)')
+# 分段规则（详见 split_sentences() 的实现说明）：
+#   1. 优先按换行分段——换行是用户最明确的"这里要断开"的信号；
+#   2. 单行文本若长度超过 _MAX_SEGMENT_LEN（默认 500 字符，可在设置页调整），
+#      才在 [_MIN_SEGMENT_LEN, _MAX_SEGMENT_LEN]（默认 [250, 500]）这个区间
+#      内找一个切割点：优先找区间内离右边界最近（即"最远"）的句末标点，让
+#      每段尽量接近但不超过上限；区间内找不到句末标点时，退化为区间内离右
+#      边界最近的逗号类标点。
+# 句末标点（视作"句号"一类）：中文句号/叹号/问号/省略号 + 英文句点/叹号/问号。
+# 沿用旧版 _SENTENCE_SPLIT_RE 的取舍：英文句点 "." 也算作句末标点——虽然
+# "Mr. Smith" 这类缩写里的句点理论上可能被当成切割点，但这里的切割只在单行
+# 超过上限长度时才会触发（而不是像旧版那样逐句必切），命中概率很低，不必
+# 为此引入额外的缩写词表增加复杂度。
+_FULLSTOP_CHARS = "。！？…!?."
+# 逗号类标点（句末标点在区间内找不到时的退化选项）：中/英文逗号、顿号、分号。
+_COMMA_CHARS = "，,、；;"
+# 下面两个常量是 tts_min_segment_len / tts_max_segment_len 在设置文件不存在
+# 时的内置默认值，同时也是 app_settings.DEFAULT_SETTINGS 里对应项的取值来源
+# ——实际生效的分段长度以 app_settings.get_tts_segment_len() 的实时读取结果
+# 为准（设置页可调，保存后无需重启进程），这两个常量不再被 split_sentences()
+# / _split_long_line() 直接引用，仅保留作为文档说明 / 极端兜底默认值。
+_MIN_SEGMENT_LEN = 250
+_MAX_SEGMENT_LEN = 500
 
 # 讲述人默认音色（按内部语言短代码），仅用于新建讲述人时给一个合理默认值，
 # 用户在前端仍可自由更换为 list_voices() 返回的任意其它音色。
@@ -505,24 +524,165 @@ def _sapi_synth_to_file(text: str, voice_id: str, rate: str, volume: str,
 # 句子切分
 # ═════════════════════════════════════════════════════════════════════════
 
+def _find_split_point(text: str, min_len: int, max_len: int) -> int:
+    """
+    为一段长度超过 max_len 的文本，在 [min_len, max_len] 区间内找一个切割点
+    （返回值是切割点的下标，切割时标点保留在前一段末尾，即前一段为
+    text[:cut]、剩余部分为 text[cut:]）。
+
+    优先级：
+      1. 区间内离右边界（max_len）最近的句末标点（_FULLSTOP_CHARS）；
+      2. 区间内没有句末标点时，退化为区间内离右边界最近的逗号类标点
+         （_COMMA_CHARS）；
+      3. 区间内两类标点都没有时，向右边界外继续搜索最近的一个可用标点
+         （句末优先、逗号其次），避免把句子从字词中间硬切断；
+      4. 一直搜到文本末尾都没有任何可用标点，只能在 max_len 处硬切。
+    """
+    window_end = min(max_len, len(text))
+    window = text[min_len:window_end]
+
+    last_fullstop = -1
+    last_comma = -1
+    for i, ch in enumerate(window):
+        if ch in _FULLSTOP_CHARS:
+            last_fullstop = i
+        elif ch in _COMMA_CHARS:
+            last_comma = i
+    if last_fullstop != -1:
+        return min_len + last_fullstop + 1
+    if last_comma != -1:
+        return min_len + last_comma + 1
+
+    # 区间内一个标点都没有：继续向后找最近的一个句末/逗号标点，宁可让这一段
+    # 略超过 max_len，也不要在字词中间硬切。
+    for i in range(window_end, len(text)):
+        if text[i] in _FULLSTOP_CHARS or text[i] in _COMMA_CHARS:
+            return i + 1
+
+    return max_len
+
+
+def _split_long_line(line: str, min_len: Optional[int] = None,
+                      max_len: Optional[int] = None) -> List[str]:
+    """把超过 max_len 的一行文本反复切割成多段，每段尽量落在
+    [min_len, max_len] 字符区间内（详见 _find_split_point）。
+
+    min_len / max_len 缺省时实时从设置文件读取（见
+    app_settings.get_tts_segment_len()），保存设置后下一次调用立即生效，
+    无需重启进程。"""
+    if min_len is None or max_len is None:
+        seg_len = app_settings.get_tts_segment_len()
+        if min_len is None:
+            min_len = seg_len["min_len"]
+        if max_len is None:
+            max_len = seg_len["max_len"]
+    result: List[str] = []
+    remaining = line
+    while len(remaining) > max_len:
+        cut = _find_split_point(remaining, min_len, max_len)
+        if cut <= 0:
+            cut = max_len
+        piece = remaining[:cut].strip()
+        if piece:
+            result.append(piece)
+        remaining = remaining[cut:]
+    remaining = remaining.strip()
+    if remaining:
+        result.append(remaining)
+    return result
+
+
 def split_sentences(text: str) -> List[str]:
-    """把整段文本按句末标点切成句子列表（标点保留在句尾），过滤空句。"""
+    """
+    把整段文本切成用于逐句合成的片段列表：
+
+      1. 优先按换行分段——每一行（去除首尾空白、跳过空行）先作为一个独立
+         片段；具体每多少个换行才切一段、要不要完全禁用这一步，见下面
+         "换行分段"小节的说明；
+      2. 若某一段长度超过分段上限（默认 500 字符，可在设置页
+         "tts_max_segment_len" 调整），再对这一段做二次切割：在
+         [下限, 上限]（默认 [250, 500]，对应设置页
+         "tts_min_segment_len" / "tts_max_segment_len"）字符区间内寻找
+         切割点，优先选区间内离上限最近的句末标点（。！？…!?.），使每段
+         尽量接近但不超过上限；若区间内没有句末标点，退化为区间内离上限
+         最近的逗号类标点（，,、；;）；一段可能需要循环切割多次，直到
+         剩余部分不超过上限为止；这一步也可以在设置页完全禁用（见下面
+         "长度二次切割"小节）；
+      3. 长度不超过上限的段保持原样不切，作为一个独立片段（哪怕它短于
+         下限——下限只是"允许切割"的下限，不是"必须凑够"的下限）。
+
+    与旧版实现的区别：旧版不管行内容多短，只要遇到句末标点（包括中文分号）
+    就切一刀，导致很多本该是同一段话的短句被拆得七零八落；新版把"分段"和
+    "断句"分开——分段只看换行，断句（在句末标点/逗号处二次切割）只在单段
+    确实过长、需要避免合成/对齐单个片段过久时才触发。
+
+    ── 换行分段（可在设置页调整）──────────────────────────────────────
+    默认每遇到 1 个换行就切一段，与改造前行为一致。设置页 "tts_newline_
+    split_every_n" 可以调整为"每 N 个换行才切一段"——未达到 N 个换行的
+    位置会被当作段内换行原样保留（用单个空格拼接，避免段内出现裸换行
+    影响后续 TTS 合成/正则处理）。设置页 "tts_disable_newline_split"
+    打开时完全跳过这一步，整段输入文本先被当作一个不区分换行的整体，
+    是否切割、在哪切割完全交给下面的长度二次切割规则决定；如果同时把
+    长度二次切割也禁用，则整段文本完全不切分，原样作为唯一一个片段
+    （空文本除外）。
+
+    ── 长度二次切割（可在设置页调整）──────────────────────────────────
+    设置页 "tts_disable_segment_len_split" 打开时完全跳过这一步：不管
+    分段多长都不会再按 [下限, 上限] 区间寻找标点切割，每个分段保持原样。
+
+    以上三项设置均实时从设置文件读取（见 app_settings.get_tts_segment_
+    len() / app_settings.get_tts_split_options()），保存设置后下一次
+    调用立即生效，无需重启任何进程。
+    """
     if not text or not text.strip():
         return []
 
-    parts = _SENTENCE_SPLIT_RE.split(text)
+    seg_len = app_settings.get_tts_segment_len()
+    min_len, max_len = seg_len["min_len"], seg_len["max_len"]
+
+    split_opts = app_settings.get_tts_split_options()
+    newline_every_n = split_opts["newline_split_every_n"]
+    disable_newline_split = split_opts["disable_newline_split"]
+    disable_segment_len_split = split_opts["disable_segment_len_split"]
+
+    # 统一换行符，避免 Windows 风格的 "\r\n" 被当成两个字符处理。
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    if disable_newline_split:
+        # 完全不按换行分段：整段文本先合并为一个"逻辑段"（内部换行替换
+        # 为空格，避免裸换行混入后续合成/二次切割逻辑），再统一交给下面
+        # 的长度判断处理。
+        merged = " ".join(
+            part.strip() for part in normalized.split("\n") if part.strip()
+        )
+        raw_segments = [merged] if merged else []
+    else:
+        # 按换行分段，每 newline_split_every_n 个换行才真正断开一次；
+        # 未达到该数量的换行位置视为"段内换行"，用空格拼接进当前段。
+        raw_segments = []
+        current_parts: List[str] = []
+        newline_count = 0
+        for line in normalized.split("\n"):
+            line = line.strip()
+            if line:
+                current_parts.append(line)
+            newline_count += 1
+            if newline_count >= newline_every_n:
+                if current_parts:
+                    raw_segments.append(" ".join(current_parts))
+                current_parts = []
+                newline_count = 0
+        if current_parts:
+            raw_segments.append(" ".join(current_parts))
+
     sentences: List[str] = []
-    buf = ""
-    for part in parts:
-        if not part:
+    for segment in raw_segments:
+        if not segment:
             continue
-        buf += part
-        if _SENTENCE_SPLIT_RE.fullmatch(part):
-            if buf.strip():
-                sentences.append(buf.strip())
-            buf = ""
-    if buf.strip():
-        sentences.append(buf.strip())
+        if disable_segment_len_split or len(segment) <= max_len:
+            sentences.append(segment)
+        else:
+            sentences.extend(_split_long_line(segment, min_len, max_len))
 
     return sentences
 
@@ -678,8 +838,9 @@ def synthesize_segments_only(
     """
     仅执行"逐句 TTS 合成"这一半流程，不做 Qwen3-FA 对齐：
 
-      1. 按句末标点把 text 切分成句子列表（sentences 非空时直接复用调用方
-         传入的句子列表，跳过内部切分）；
+      1. 把 text 切分成句子列表（分段规则见 split_sentences() 顶部说明：优先
+         按换行分段，单行过长时再按长度区间落在句号/逗号处二次切割；
+         sentences 非空时直接复用调用方传入的句子列表，跳过内部切分）；
       2. 逐句调用所选 engine 合成为独立的物理音频片段，统一转换成
          16-bit PCM WAV 后保留在 segments_dir 下（seg_0000.wav,
          seg_0001.wav, ... 与返回的 sentences 列表按下标一一对应），供
