@@ -841,14 +841,20 @@ def synthesize_segments_only(
       1. 把 text 切分成句子列表（分段规则见 split_sentences() 顶部说明：优先
          按换行分段，单行过长时再按长度区间落在句号/逗号处二次切割；
          sentences 非空时直接复用调用方传入的句子列表，跳过内部切分）；
-      2. 逐句调用所选 engine 合成为独立的物理音频片段，统一转换成
+      2. 对切分好的每一句做数字 → 读法文字转换（规则见
+         pipeline._convert_digits_to_words() 顶部说明，与 MFA / WhisperX /
+         Qwen3-ASR / Qwen3-FA / NeMo-FA 对齐后端共用同一份转换逻辑）——
+         必须在合成之前完成，否则 TTS 引擎会把阿拉伯数字按自己内置的规则
+         读出来，与 language 选择的语种读法不一致（也不受用户控制）；
+      3. 逐句调用所选 engine 合成为独立的物理音频片段，统一转换成
          16-bit PCM WAV 后保留在 segments_dir 下（seg_0000.wav,
-         seg_0001.wav, ... 与返回的 sentences 列表按下标一一对应），供
+         seg_0001.wav, ... 与返回的 sentences 列表按下标一一对应，这里的
+         sentences 已经是数字转换后的文字），供
          align_segments() 之后复用——这是"预览"和"开始处理"之间不用把
          同一段文本合成两遍的关键：预览阶段先调这个函数拿到分句音频，
          用户点"开始处理"时只需再跑 align_segments()；如果用户没有先
          手动预览，则由 synthesize_and_align() 把这两步接起来一次做完；
-      3. 把保留下来的分句音频依次拼接（句间插入 sentence_gap_sec 静音）
+      4. 把保留下来的分句音频依次拼接（句间插入 sentence_gap_sec 静音）
          成一份完整 WAV，供前端 <audio> 直接播放试听，也作为最终产物的
          音频文件（对齐阶段不会重新合成或改动这份音频）。
 
@@ -859,7 +865,8 @@ def synthesize_segments_only(
         "success": True,
         "wav_path": str,          # 拼接后的完整音频（预览播放 / 最终产物共用）
         "segments_dir": str,      # 分句音频所在目录，align_segments() 需要
-        "sentences": [str, ...],  # 实际合成成功的句子列表，与 segments_dir 一一对应
+        "sentences": [str, ...],  # 实际合成成功的句子列表（已做数字→读法文字
+                                   # 转换），与 segments_dir 一一对应
         "sentence_count": int,
         "audio_duration": int,    # 100ns 单位
         "warnings": [str, ...],   # 个别分句合成失败时的提示（已跳过，不计入 sentences）
@@ -880,6 +887,21 @@ def synthesize_segments_only(
     sentence_list = sentences if sentences is not None else split_sentences(text)
     if not sentence_list:
         return {"success": False, "error": "未能从输入文本中切分出任何句子"}
+
+    # 数字 → 读法文字转换：必须在合成之前对每一句分别转换（转换规则见
+    # pipeline._convert_digits_to_words() 顶部说明），复用与 MFA / WhisperX
+    # / Qwen3-ASR / Qwen3-FA / NeMo-FA 完全相同的一份转换逻辑（同一个函数），
+    # 不在这里重新实现一遍规则，避免两处规则后续走漏、不一致。
+    #
+    # 转换放在 split_sentences() 之后逐句进行，而不是先转换整段 text 再切
+    # 分——这样换行 / 长度二次切割的字符数计算仍然基于用户原始输入（数字
+    # 转成文字后字符数会变化，会让切分点偏离用户在原文里看到的位置）；
+    # 同时转换后送入 TTS 引擎合成的文本，与之后 align_segments() 里送入
+    # Qwen3-ForcedAligner 的参考文本（同一个 sentence_list）保持完全一致，
+    # 保证发音内容与对齐参考文本不会出现"听到的是文字，标注的是数字"这种
+    # 不一致。
+    from pipeline import _convert_digits_to_words
+    sentence_list = [_convert_digits_to_words(s, language) for s in sentence_list]
 
     rate = _normalize_percent(rate)
     volume = _normalize_percent(volume)
