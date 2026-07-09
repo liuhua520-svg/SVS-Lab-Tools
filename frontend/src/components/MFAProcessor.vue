@@ -244,10 +244,12 @@
           </template>
         </el-dialog>
 
-        <!-- "优化文本"弹窗：智能转换 / 仅转换（数字）/ 仅转换符号 / 英文加空格 /
-             去除多余符号，全部只在弹窗内的这份文本副本上生效；点击"应用"才会
-             写回打开弹窗时指定的那个文本框，不点"应用"直接关闭则不影响原文本。
-             与 pipeline.py / text_processor.py 的其它转换规则完全独立，只调用
+        <!-- "优化文本"弹窗：智能转换 / 仅转换（数字）/ 逐字转换（数字）/
+             仅转换符号 / 英文加空格 / 去除多余符号 / 按逗号插入换行 /
+             按句号插入换行 / 按每几句插入换行，全部只在弹窗内的这份文本
+             副本上生效；点击"应用"才会写回打开弹窗时指定的那个文本框，
+             不点"应用"直接关闭则不影响原文本。与 pipeline.py /
+             text_processor.py 的其它转换规则完全独立，只调用
              /api/text/optimize，不经过 MFA / TTS / 对齐等任何其它后端。 -->
         <el-dialog v-model="textOptimizer.visible" :title="t('processor.textOptimize')" width="640px">
           <el-input
@@ -263,6 +265,9 @@
             <el-button size="small" :loading="textOptimizer.loading === 'number_only'" @click="runTextOptimize('number_only')">
               🔢 {{ t('processor.textOptimizeNumberOnly') }}
             </el-button>
+            <el-button size="small" :loading="textOptimizer.loading === 'digit_to_words'" @click="runTextOptimize('digit_to_words')">
+              🔠 {{ t('processor.textOptimizeDigitToWords') }}
+            </el-button>
             <el-button size="small" :loading="textOptimizer.loading === 'symbol_only'" @click="runTextOptimize('symbol_only')">
               ➕ {{ t('processor.textOptimizeSymbolOnly') }}
             </el-button>
@@ -272,6 +277,27 @@
             <el-button size="small" :loading="textOptimizer.loading === 'strip_symbols'" @click="runTextOptimize('strip_symbols')">
               🧹 {{ t('processor.textOptimizeStripSymbols') }}
             </el-button>
+            <el-button size="small" :loading="textOptimizer.loading === 'newline_after_comma'" @click="runTextOptimize('newline_after_comma')">
+              ↩️ {{ t('processor.textOptimizeNewlineAfterComma') }}
+            </el-button>
+            <el-button size="small" :loading="textOptimizer.loading === 'newline_after_period'" @click="runTextOptimize('newline_after_period')">
+              ↩️ {{ t('processor.textOptimizeNewlineAfterPeriod') }}
+            </el-button>
+          </div>
+          <div class="text-optimize-toolbar" style="margin-top: 8px; align-items: center">
+            <el-button size="small" :loading="textOptimizer.loading === 'newline_every_n'" @click="runTextOptimize('newline_every_n')">
+              ↩️ {{ t('processor.textOptimizeNewlineEveryN') }}
+            </el-button>
+            <el-input-number
+              v-model="textOptimizer.everyN"
+              :min="1"
+              :max="99"
+              size="small"
+              style="width: 100px; margin-left: 4px"
+            />
+            <span style="margin-left: 4px; font-size: 13px; color: var(--el-text-color-secondary)">
+              {{ t('processor.textOptimizeNewlineEveryNUnit') }}
+            </span>
           </div>
           <div v-if="textOptimizer.error" style="margin-top: 8px">
             <el-text type="danger" size="small">{{ textOptimizer.error }}</el-text>
@@ -1306,11 +1332,12 @@ interface TextOptimizerState {
   error: string
   target: Record<string, any> | null   // 打开弹窗时绑定的目标对象（如 formData 或某个 box）
   field: string                         // 目标对象上要写回的字段名（如 'text'）
-  language: string                      // 智能转换/仅转换（数字）/仅转换符号 使用的语种
+  language: string                      // 智能转换/仅转换（数字）/逐字转换/仅转换符号 使用的语种
+  everyN: number                        // "按每几句插入换行"的句子数量 N，默认 2
 }
 
 const textOptimizer = ref<TextOptimizerState>({
-  visible: false, draft: '', loading: '', error: '', target: null, field: 'text', language: 'cmn',
+  visible: false, draft: '', loading: '', error: '', target: null, field: 'text', language: 'cmn', everyN: 2,
 })
 
 // language 参数可选：不传时使用打开弹窗那一刻 target 上的 language 字段
@@ -1325,6 +1352,7 @@ const openTextOptimizer = (target: Record<string, any>, field: string, language?
     target,
     field,
     language: language || target.language || 'cmn',
+    everyN: 2,
   }
 }
 
@@ -1339,6 +1367,7 @@ const runTextOptimize = async (action: string) => {
         text: textOptimizer.value.draft,
         action,
         language: textOptimizer.value.language,
+        n: textOptimizer.value.everyN,
       }),
     })
     const data = await res.json()
