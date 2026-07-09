@@ -56,7 +56,9 @@
       <!-- 主体 -->
       <el-main class="app-main">
         <router-view v-slot="{ Component }">
-          <component :is="Component" @status-changed="onSystemStatusChanged" />
+          <keep-alive>
+            <component :is="Component" @status-changed="onSystemStatusChanged" />
+          </keep-alive>
         </router-view>
       </el-main>
 
