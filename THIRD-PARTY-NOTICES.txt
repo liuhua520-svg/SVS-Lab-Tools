@@ -105,6 +105,10 @@ Based on backend/requirements.txt
   License: BSD-3-Clause
   Link: https://github.com/pytorch/pytorch
 
+  Note:
+  GPU acceleration packages provided by NVIDIA
+  are distributed under their own licenses.
+
 - torchaudio>=2.0.0
   Copyright (c) 2017-2024, Facebook Inc.
   License: BSD-2-Clause
@@ -180,6 +184,32 @@ Based on backend/requirements.txt
   Copyright (c) 2013-2024 Noam Yorav-Raphael
   License: MIT
   Link: https://github.com/tqdm/tqdm
+
+=== Qwen3-ASR / Qwen3-ForcedAligner ===
+- qwen-asr>=1.0.0
+  Copyright (c) Alibaba Qwen Team
+  License: Apache-2.0
+  Link: https://github.com/QwenLM/Qwen3-ASR
+
+  Note:
+  Qwen3-ASR and Qwen3-ForcedAligner model weights
+  are distributed under separate model license terms.
+
+- transformers>=4.40.0
+  Copyright (c) Hugging Face
+  License: Apache-2.0
+  Link: https://github.com/huggingface/transformers
+
+=== NVIDIA NeMo ===
+
+- nemo_toolkit[asr]>=2.7.0,<2.8.0
+  Copyright (c) NVIDIA Corporation
+  License: Apache-2.0
+  Link: https://github.com/NVIDIA-NeMo/Speech
+
+  Note:
+  Downloaded pretrained models and NVIDIA runtime
+  components may have separate licenses.
 
 --------------------------------------------------------------------
 
