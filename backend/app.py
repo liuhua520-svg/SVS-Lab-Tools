@@ -35,6 +35,7 @@ from alt_aligners import get_alt_aligner_status
 import dictionary_manager
 import app_settings
 import tts_processor
+import text_processor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -599,6 +600,27 @@ def dictionary_import(source):
     except Exception as e:
         logger.error(f"词典导入失败: {e}", exc_info=True)
         return jsonify({"success": False, "error": f"导入失败: {str(e)}"}), 500
+
+
+# =====================================================================
+# 文本优化弹窗（"优化文本"按钮）：纯文本转换，只影响调用方传入的这一段
+# 文本本身，不落盘、不触碰 MFA / TTS / 对齐 / 词典等任何其它后端流程。
+# =====================================================================
+
+@app.route("/api/text/optimize", methods=["POST"])
+def text_optimize():
+    """
+    文本优化弹窗统一入口。body: {"text": "...", "action": "smart" |
+    "number_only" | "symbol_only" | "add_spaces" | "strip_symbols",
+    "language": "cmn"|"yue"|"eng"|"jpn"|"kor"（仅 smart/number_only/
+    symbol_only 需要，其余两个 action 与语种无关，可不传）}
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    text = data.get("text", "")
+    action = data.get("action", "")
+    language = data.get("language", "zh")
+    result = text_processor.process_text(text, action, language)
+    return jsonify(result), (200 if result.get("success") else 400)
 
 
 # =====================================================================
