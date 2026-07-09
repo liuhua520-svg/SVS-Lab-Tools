@@ -611,15 +611,19 @@ def dictionary_import(source):
 def text_optimize():
     """
     文本优化弹窗统一入口。body: {"text": "...", "action": "smart" |
-    "number_only" | "symbol_only" | "add_spaces" | "strip_symbols",
-    "language": "cmn"|"yue"|"eng"|"jpn"|"kor"（仅 smart/number_only/
-    symbol_only 需要，其余两个 action 与语种无关，可不传）}
+    "number_only" | "digit_to_words" | "symbol_only" | "add_spaces" |
+    "strip_symbols" | "newline_after_comma" | "newline_after_period" |
+    "newline_every_n", "language": "cmn"|"yue"|"eng"|"jpn"|"kor"（仅
+    smart/number_only/digit_to_words/symbol_only 需要，其余 action 与
+    语种无关，可不传）, "n": 2（仅 newline_every_n 需要，表示"每几句插入
+    一次换行"，不传时默认 2）}
     """
     data = request.get_json(force=True, silent=True) or {}
     text = data.get("text", "")
     action = data.get("action", "")
     language = data.get("language", "zh")
-    result = text_processor.process_text(text, action, language)
+    n = data.get("n", 2)
+    result = text_processor.process_text(text, action, language, n)
     return jsonify(result), (200 if result.get("success") else 400)
 
 

@@ -17,6 +17,13 @@ MFA / TTS / 对齐 / 词典等其它任何后端模块，供 /api/text/optimize 
                                       不识别日期/年份的特殊拆分，纯粹把
                                       文本中每一段连续数字整体按数值转换），
                                       不动符号。
+  逐字转换（数字）digit_to_words_convert() —— 把数字按位逐字转换（不做
+                                      数值分组），如 1234567890 → 一二三
+                                      四五六七八九零 / one two three ...
+                                      zero，适合电话号码/编号/证件号等
+                                      场景；与 number_only_convert() 的
+                                      "完整数值读法"是两套独立规则，二选
+                                      一或先后叠加均可。
   仅转换符号 symbol_only_convert() —— 只转换 + - × ÷ = ℃ ℉ & 这组符号，
                                       不动数字。
   优化文本 - 英文加空格 add_spaces_around_english() —— 在英文单词（连续
@@ -26,6 +33,15 @@ MFA / TTS / 对齐 / 词典等其它任何后端模块，供 /api/text/optimize 
   优化文本 - 去除多余符号 strip_stray_symbols() —— 去掉 "*" 等干扰强制
                                       对齐/TTS 合成、但本身不构成任何读法
                                       的符号。
+  优化文本 - 按逗号插入换行 newline_after_comma() —— 中/英文逗号（，,）
+                                      每一个之后插入换行，逗号本身保留。
+  优化文本 - 按句号插入换行 newline_after_period() —— 中/英文句号/感叹
+                                      号/问号（。！？.!?）每一个之后插入
+                                      换行，标点本身保留。
+  优化文本 - 按每几句插入换行 newline_every_n_sentences() —— 以断句标点
+                                      （逗号，,、句号。！？.!? 均算一句）
+                                      为分句依据，每凑够 N 句换行一次，N
+                                      由前端弹窗的数字输入框传入（默认 2）。
 
 与 pipeline.py 里 _convert_digits_to_words() 的关系
 ────────────────────────────────────────────────────
@@ -311,6 +327,74 @@ _INT_TO_WORDS = {
     "ja": int_to_ja,
     "ko": int_to_ko,
 }
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 对外入口（新增）：逐字转换（数字，按位读，不做数值分组）
+#   1234567890 → 一二三四五六七八九零（中/粤，无分隔符）
+#               → one two three four five six seven eight nine zero（英）
+#               → いち に さん よん ご ろく なな はち きゅう ぜろ（日）
+#               → 일 이 삼 사 오 육 칠 팔 구 영（韩）
+#   与"仅转换（数字，完整数值读法）"number_only_convert() 是两套完全独立
+#   的规则，服务于不同场景（电话号码/编号/证件号等适合逐字读，金额/年龄/
+#   数量等适合完整数值读），互不调用、互不影响，在"优化文本"弹窗里是并列
+#   的两个按钮，可任选其一或先后叠加使用。
+# ═════════════════════════════════════════════════════════════════════════
+
+_ZH_DIGIT_WORDS = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
+_EN_DIGIT_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+_JA_DIGIT_WORDS = ["ぜろ", "いち", "に", "さん", "よん", "ご", "ろく", "なな", "はち", "きゅう"]
+_KO_DIGIT_WORDS = ["영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"]
+
+_DIGIT_WORDS_TABLE: Dict[str, List[str]] = {
+    "zh": _ZH_DIGIT_WORDS,
+    "en": _EN_DIGIT_WORDS,
+    "ja": _JA_DIGIT_WORDS,
+    "ko": _KO_DIGIT_WORDS,
+}
+
+# 中/日/韩逐字转换后紧贴书写（不加分隔符，与书面数字习惯一致，如手机号
+# 一二三四五六七八九零一一）；英语则每个词之间需要一个空格分隔，否则会
+# 变成一长串无法断词的字母（onetwothree...），这与产品需求样例
+# "one two three four five six seven eight nine zero" 完全一致。
+_DIGIT_WORDS_SEP: Dict[str, str] = {"zh": "", "en": " ", "ja": " ", "ko": " "}
+
+
+def digit_to_words_convert(text: str, language: str) -> str:
+    """把 text 里所有阿拉伯数字 0-9 按 language 对应的语种转换成读法文字。
+    转换规则（与产品需求给出的样例完全一致）：
+      中文/粤语 1234567890 → 一二三四五六七八九零（无分隔符）
+      英语      1234567890 → one two three four five six seven eight nine zero
+      日语      1234567890 → いち に さん よん ご ろく なな はち きゅう ぜろ
+      韩语      1234567890 → 일 이 삼 사 오 육 칠 팔 구 영
+    text 中非数字部分原样保留；language 经 _norm_lang() 规整后若不在
+    上表中（暂不支持该语种的数字转换），原样返回 text，不做任何改动。
+    text 中本就不含数字时直接返回原文本，不做无意义的字符串重建。
+    """
+    if not text or not any(ch.isdigit() for ch in text):
+        return text
+    lang = _norm_lang(language)
+    words = _DIGIT_WORDS_TABLE.get(lang)
+    if words is None:
+        return text
+    sep = _DIGIT_WORDS_SEP.get(lang, "")
+
+    out: List[str] = []
+    run: List[str] = []
+
+    def _flush() -> None:
+        if run:
+            out.append(sep.join(run))
+            run.clear()
+
+    for ch in text:
+        if ch.isdigit():
+            run.append(words[int(ch)])
+        else:
+            _flush()
+            out.append(ch)
+    _flush()
+    return "".join(out)
 
 
 def _number_to_words(num_str: str, lang: str) -> str:
@@ -802,38 +886,156 @@ def strip_stray_symbols(text: str) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# 对外入口（新增）：按标点插入换行
+#   三个按钮共用同一套"句末标点识别 + 保留标点本身、只在标点后插入换行"
+#   的实现，唯一的区别是识别哪一组标点、以及"每几句"的分组大小：
+#     · 按逗号插入换行：中/英文逗号（，,）每一个之后都换行
+#     · 按句号插入换行：中/英文句号、感叹号、问号（。！？.!?）每一个之后
+#       都换行（"句末"取广义——凡是能独立成句的终止标点都算）
+#     · 按每几句插入换行：以断句标点（逗号，,、句号。！？.!? 均算一句）
+#       为分句依据，每凑够 N 句换行一次，N 由前端弹窗里的数字输入框传入
+#   已存在的换行符不受影响、不会被去重或改动；文本末尾不会补多余的换行。
+# ═════════════════════════════════════════════════════════════════════════
+
+# 逗号类（句中停顿，不构成完整句子）与句号类（句末终止，构成完整句子）
+# 分开定义，"按每几句插入换行"用句号类计数，"按逗号/句号插入换行"两个
+# 按钮分别只处理各自这一组、不碰另一组的标点。
+_COMMA_PUNCT = "，,"
+_PERIOD_PUNCT = "。！？.!?"
+
+# 连续同类标点（如中文的"……"省略号场景、英文的"?!"）作为一个整体匹配，
+# 只在这一串标点结束后插入一次换行，避免逐字符匹配产生多次换行/空行。
+_COMMA_RUN_RE = re.compile(f"[{_COMMA_PUNCT}]+")
+_PERIOD_RUN_RE = re.compile(f"[{_PERIOD_PUNCT}]+")
+
+
+def _insert_newline_after(text: str, run_pattern: "re.Pattern") -> str:
+    """在 run_pattern 匹配到的每一段连续标点后插入换行，标点本身保留
+    不变。已经紧跟换行符的标点不会重复插入（避免产生空行）。"""
+    if not text:
+        return text
+
+    def _replace(m: "re.Match") -> str:
+        end = m.end()
+        if end < len(text) and text[end] == "\n":
+            return m.group(0)  # 后面本来就换行了，不重复插入
+        return m.group(0) + "\n"
+
+    return run_pattern.sub(_replace, text)
+
+
+def newline_after_comma(text: str) -> str:
+    """按逗号插入换行：中/英文逗号（，,）每一个之后换行，逗号本身保留。"""
+    return _insert_newline_after(text, _COMMA_RUN_RE)
+
+
+def newline_after_period(text: str) -> str:
+    """按句号插入换行：中/英文句号/感叹号/问号（。！？.!?）每一个之后换行，
+    标点本身保留。"""
+    return _insert_newline_after(text, _PERIOD_RUN_RE)
+
+
+# "每几句插入换行"里的"句"取广义——逗号类（句中停顿）和句号类（句末
+# 终止）只要是"到达一个断句点"就各算一句，二者合并成一套断句符号集合，
+# 与"按逗号插入换行"/"按句号插入换行"两个按钮分别只处理各自那一组
+# 标点是两回事：这两个独立按钮需要精确区分逗号/句号，但"每几句换行"
+# 只关心"多少个断句点之后该换行"，不区分断句点具体是逗号还是句号。
+_SENTENCE_BREAK_PUNCT = _COMMA_PUNCT + _PERIOD_PUNCT
+
+
+def newline_every_n_sentences(text: str, n: int = 2) -> str:
+    """按每几句插入换行：只要遇到断句标点（逗号，,、句号。！？.!? 均算
+    一句）就计数，每凑够 n 句换行一次；标点本身保留，只是在该插入的位置
+    补插换行。n 非正数时按 2 处理（与前端弹窗默认值一致，避免传参异常时
+    直接报错或死循环）。
+
+    已存在的换行符视为天然的分段边界，会被保留在原位——本函数只在"该
+    换行但原文还没换行"的位置补插换行，不会删除原文里任何已有的换行。
+    """
+    if not text:
+        return text
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        n = 2
+    if n <= 0:
+        n = 2
+
+    out: List[str] = []
+    count = 0
+    i = 0
+    length = len(text)
+    while i < length:
+        ch = text[i]
+        out.append(ch)
+        if ch == "\n":
+            count = 0  # 原文已有换行，重新从下一句开始计数
+            i += 1
+            continue
+        if ch in _SENTENCE_BREAK_PUNCT:
+            # 合并连续断句标点（如 "……"、"?!"、"，。"）为一句，避免
+            # 重复计数（例如句号紧跟右引号+换行场景不会被拆成两句）。
+            j = i + 1
+            while j < length and text[j] in _SENTENCE_BREAK_PUNCT:
+                out.append(text[j])
+                j += 1
+            count += 1
+            i = j
+            already_newline = i < length and text[i] == "\n"
+            if count >= n and not already_newline:
+                out.append("\n")
+                count = 0
+            continue
+        i += 1
+    return "".join(out)
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # 统一调度入口：/api/text/optimize 直接调用这一个函数即可，按 action 分发
-# 到上面四个转换函数之一。action 未知或为空时原样返回文本，不做任何改动
+# 到上面各个转换函数之一。action 未知或为空时原样返回文本，不做任何改动
 # （避免前端传参出错时静默产生意料之外的转换结果）。
 # ═════════════════════════════════════════════════════════════════════════
 
 _ACTIONS = {
-    "smart": smart_convert,             # 智能转换（需要 language）
-    "number_only": number_only_convert, # 仅转换（数字，需要 language）
-    "symbol_only": symbol_only_convert, # 仅转换符号（需要 language）
+    "smart": smart_convert,                 # 智能转换（需要 language）
+    "number_only": number_only_convert,     # 仅转换（数字，完整数值读法，需要 language）
+    "digit_to_words": digit_to_words_convert,  # 逐字转换（数字，按位读，需要 language）
+    "symbol_only": symbol_only_convert,     # 仅转换符号（需要 language）
 }
 
 _ACTIONS_NO_LANG = {
-    "add_spaces": add_spaces_around_english,  # 优化文本：英文首尾加空格（与语种无关）
-    "strip_symbols": strip_stray_symbols,     # 优化文本：去除多余符号（与语种无关）
+    "add_spaces": add_spaces_around_english,      # 优化文本：英文首尾加空格（与语种无关）
+    "strip_symbols": strip_stray_symbols,         # 优化文本：去除多余符号（与语种无关）
+    "newline_after_comma": newline_after_comma,   # 优化文本：按逗号插入换行（与语种无关）
+    "newline_after_period": newline_after_period, # 优化文本：按句号插入换行（与语种无关）
 }
 
 
-def process_text(text: str, action: str, language: str = "zh") -> Dict[str, object]:
+def process_text(text: str, action: str, language: str = "zh", n: int = 2) -> Dict[str, object]:
     """统一入口。
 
     Parameters
     ----------
     text: 待处理文本（仅处理这一段文本本身，不涉及任何文件/其它后端）。
-    action: "smart" | "number_only" | "symbol_only" | "add_spaces" | "strip_symbols"
+    action: "smart" | "number_only" | "digit_to_words" | "symbol_only" |
+      "add_spaces" | "strip_symbols" | "newline_after_comma" |
+      "newline_after_period" | "newline_every_n"
     language: 语言代码（cmn/yue/eng/jpn/kor 或 zh/en/ja/ko），仅 smart /
-      number_only / symbol_only 需要，add_spaces / strip_symbols 与语种无关。
+      number_only / digit_to_words / symbol_only 需要，其余 action 与语种
+      无关。
+    n: 仅 "newline_every_n" 需要，表示"每几句插入一次换行"，默认 2。
 
     Returns
     -------
     Dict: {"success": True, "text": str} 或 {"success": False, "error": str}
     """
     text = text or ""
+    if action == "newline_every_n":
+        try:
+            result = newline_every_n_sentences(text, n)
+        except Exception as e:
+            return {"success": False, "error": f"转换失败: {e}"}
+        return {"success": True, "text": result}
     if action in _ACTIONS:
         try:
             result = _ACTIONS[action](text, language)
