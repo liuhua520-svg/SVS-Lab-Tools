@@ -244,6 +244,44 @@
           </template>
         </el-dialog>
 
+        <!-- "优化文本"弹窗：智能转换 / 仅转换（数字）/ 仅转换符号 / 英文加空格 /
+             去除多余符号，全部只在弹窗内的这份文本副本上生效；点击"应用"才会
+             写回打开弹窗时指定的那个文本框，不点"应用"直接关闭则不影响原文本。
+             与 pipeline.py / text_processor.py 的其它转换规则完全独立，只调用
+             /api/text/optimize，不经过 MFA / TTS / 对齐等任何其它后端。 -->
+        <el-dialog v-model="textOptimizer.visible" :title="t('processor.textOptimize')" width="640px">
+          <el-input
+            v-model="textOptimizer.draft"
+            type="textarea"
+            :rows="10"
+            :placeholder="t('processor.textOptimizePlaceholder')"
+          />
+          <div class="text-optimize-toolbar">
+            <el-button size="small" :loading="textOptimizer.loading === 'smart'" @click="runTextOptimize('smart')">
+              ✨ {{ t('processor.textOptimizeSmart') }}
+            </el-button>
+            <el-button size="small" :loading="textOptimizer.loading === 'number_only'" @click="runTextOptimize('number_only')">
+              🔢 {{ t('processor.textOptimizeNumberOnly') }}
+            </el-button>
+            <el-button size="small" :loading="textOptimizer.loading === 'symbol_only'" @click="runTextOptimize('symbol_only')">
+              ➕ {{ t('processor.textOptimizeSymbolOnly') }}
+            </el-button>
+            <el-button size="small" :loading="textOptimizer.loading === 'add_spaces'" @click="runTextOptimize('add_spaces')">
+              🔤 {{ t('processor.textOptimizeAddSpaces') }}
+            </el-button>
+            <el-button size="small" :loading="textOptimizer.loading === 'strip_symbols'" @click="runTextOptimize('strip_symbols')">
+              🧹 {{ t('processor.textOptimizeStripSymbols') }}
+            </el-button>
+          </div>
+          <div v-if="textOptimizer.error" style="margin-top: 8px">
+            <el-text type="danger" size="small">{{ textOptimizer.error }}</el-text>
+          </div>
+          <template #footer>
+            <el-button @click="textOptimizer.visible = false">{{ t('processor.textOptimizeCancel') }}</el-button>
+            <el-button type="primary" @click="applyTextOptimize">{{ t('processor.textOptimizeApply') }}</el-button>
+          </template>
+        </el-dialog>
+
         <!-- 对齐后端选择器（TTS跟读固定使用 Qwen3-FA，不显示；project-only 模式不需要对齐） -->
         <el-form-item v-if="inputMode === 'audio' && processingMode !== 'project-only'" :label="t('processor.backendLabel')">
           <el-radio-group v-model="alignerBackend">
@@ -473,7 +511,13 @@
 				: t('processor.textPlaceholderRequired')
 			"
 		  />
-		  
+
+		  <div style="margin-top: 6px">
+			<el-button size="small" @click="openTextOptimizer(formData, 'text')">
+			  🛠️ {{ t('processor.textOptimize') }}
+			</el-button>
+		  </div>
+
 		  <div class="help-text" style="margin-top: 6px; font-size: 12px; color: #909399; line-height: 1.4; width: 100%;">
 			<span v-if="isTextOptional" style="color: #67c23a; font-weight: 500;">
 			  ✓ {{ t('processor.textOptionalHint') }} | {{ t('processor.currentChars') }}{{ formData.text.length }}
@@ -1249,6 +1293,73 @@ const engineLabel = (id?: string): string => {
 // 引擎创建/编辑预设（例如主面板选的是 EdgeTTS，但想顺手建一个讲述人预设）。
 const narratorFormVoices = ref<TtsVoice[]>([])
 const narratorFormVoicesLoading = ref(false)
+
+// ── "优化文本"弹窗 ───────────────────────────────────────────────────
+// 弹窗内编辑的是 draft（原文本框内容的一份副本），点击工具栏按钮调用
+// /api/text/optimize 在 draft 上原地转换、可连续多次点击叠加效果（例如
+// 先"智能转换"再"去除多余符号"）；只有点击"应用"才会把 draft 写回打开
+// 弹窗时传入的目标文本框，取消/关闭弹窗不会影响原文本框。
+interface TextOptimizerState {
+  visible: boolean
+  draft: string
+  loading: string   // 当前正在请求的 action id，空字符串表示未在请求中
+  error: string
+  target: Record<string, any> | null   // 打开弹窗时绑定的目标对象（如 formData 或某个 box）
+  field: string                         // 目标对象上要写回的字段名（如 'text'）
+  language: string                      // 智能转换/仅转换（数字）/仅转换符号 使用的语种
+}
+
+const textOptimizer = ref<TextOptimizerState>({
+  visible: false, draft: '', loading: '', error: '', target: null, field: 'text', language: 'cmn',
+})
+
+// language 参数可选：不传时使用打开弹窗那一刻 target 上的 language 字段
+// （如 formData.language）；对话框批量处理页面每个对话框没有独立语种，
+// 使用的是页面共享的 sharedLanguage，由调用方显式传入。
+const openTextOptimizer = (target: Record<string, any>, field: string, language?: string) => {
+  textOptimizer.value = {
+    visible: true,
+    draft: target[field] || '',
+    loading: '',
+    error: '',
+    target,
+    field,
+    language: language || target.language || 'cmn',
+  }
+}
+
+const runTextOptimize = async (action: string) => {
+  textOptimizer.value.loading = action
+  textOptimizer.value.error = ''
+  try {
+    const res = await fetch('/api/text/optimize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: textOptimizer.value.draft,
+        action,
+        language: textOptimizer.value.language,
+      }),
+    })
+    const data = await res.json()
+    if (!data.success) {
+      textOptimizer.value.error = data.error || t('processor.textOptimizeFailed')
+      return
+    }
+    textOptimizer.value.draft = data.text
+  } catch (e: any) {
+    textOptimizer.value.error = e?.message || String(e)
+  } finally {
+    textOptimizer.value.loading = ''
+  }
+}
+
+const applyTextOptimize = () => {
+  if (textOptimizer.value.target) {
+    textOptimizer.value.target[textOptimizer.value.field] = textOptimizer.value.draft
+  }
+  textOptimizer.value.visible = false
+}
 
 // ── 手动分段预览：由"生成预览"按钮触发，按新分段规则（优先按换行分段，
 // 单行过长再按句号/逗号二次切割）逐句合成生成预览音频（不做 Qwen3-FA
@@ -2673,6 +2784,13 @@ const newProcess = () => {
   padding: 0 3px;
   font-family: monospace;
   color: #476582;
+}
+
+.text-optimize-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .pitch-input-group {

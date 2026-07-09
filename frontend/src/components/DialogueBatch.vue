@@ -459,6 +459,11 @@
                   :placeholder="t('dialogue.textPlaceholder')"
                   :disabled="processing"
                 />
+                <div v-if="!box.labFile && !box.midiFile" style="margin-top: 6px">
+                  <el-button size="small" :disabled="processing" @click="openTextOptimizer(box, 'text', sharedLanguage)">
+                    🛠️ {{ t('processor.textOptimize') }}
+                  </el-button>
+                </div>
                 <div v-if="box.labFile" class="file-info">
                   📄 {{ box.labFile.name }}
                   <el-button link type="danger" size="small" :disabled="processing" @click="clearNotation(box)">✖</el-button>
@@ -770,6 +775,44 @@
           <el-button type="primary" :loading="narratorSaving" @click="saveNarrator">{{ t('processor.save') }}</el-button>
         </template>
       </el-dialog>
+
+      <!-- "优化文本"弹窗：智能转换 / 仅转换（数字）/ 仅转换符号 / 英文加空格 /
+           去除多余符号，全部只在弹窗内的这份文本副本上生效；点击"应用"才会
+           写回打开弹窗时指定的那个对话框文本框，不点"应用"直接关闭则不影响
+           原文本。与 pipeline.py / text_processor.py 的其它转换规则完全独立，
+           只调用 /api/text/optimize，不经过 MFA / TTS / 对齐等任何其它后端。 -->
+      <el-dialog v-model="textOptimizer.visible" :title="t('processor.textOptimize')" width="640px">
+        <el-input
+          v-model="textOptimizer.draft"
+          type="textarea"
+          :rows="10"
+          :placeholder="t('processor.textOptimizePlaceholder')"
+        />
+        <div class="text-optimize-toolbar">
+          <el-button size="small" :loading="textOptimizer.loading === 'smart'" @click="runTextOptimize('smart')">
+            ✨ {{ t('processor.textOptimizeSmart') }}
+          </el-button>
+          <el-button size="small" :loading="textOptimizer.loading === 'number_only'" @click="runTextOptimize('number_only')">
+            🔢 {{ t('processor.textOptimizeNumberOnly') }}
+          </el-button>
+          <el-button size="small" :loading="textOptimizer.loading === 'symbol_only'" @click="runTextOptimize('symbol_only')">
+            ➕ {{ t('processor.textOptimizeSymbolOnly') }}
+          </el-button>
+          <el-button size="small" :loading="textOptimizer.loading === 'add_spaces'" @click="runTextOptimize('add_spaces')">
+            🔤 {{ t('processor.textOptimizeAddSpaces') }}
+          </el-button>
+          <el-button size="small" :loading="textOptimizer.loading === 'strip_symbols'" @click="runTextOptimize('strip_symbols')">
+            🧹 {{ t('processor.textOptimizeStripSymbols') }}
+          </el-button>
+        </div>
+        <div v-if="textOptimizer.error" style="margin-top: 8px">
+          <el-text type="danger" size="small">{{ textOptimizer.error }}</el-text>
+        </div>
+        <template #footer>
+          <el-button @click="textOptimizer.visible = false">{{ t('processor.textOptimizeCancel') }}</el-button>
+          <el-button type="primary" @click="applyTextOptimize">{{ t('processor.textOptimizeApply') }}</el-button>
+        </template>
+      </el-dialog>
     </el-card>
   </div>
 </template>
@@ -861,6 +904,69 @@ const ttsEnginesLoading = ref(false)
 const narratorManagerVisible = ref(false)
 const narratorForm = ref<TtsNarrator>({ id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%' })
 const narratorSaving = ref(false)
+
+// ── "优化文本"弹窗（与 MFAProcessor.vue 的实现逻辑一致：弹窗内编辑的是
+// draft 副本，点击"应用"才写回打开弹窗时绑定的目标对话框 box.text，取消/
+// 关闭弹窗不影响原文本）。对话框批量处理页面没有每框独立的语种选择，
+// 统一使用页面共享的 sharedLanguage，由调用方在打开弹窗时显式传入。 ──
+interface TextOptimizerState {
+  visible: boolean
+  draft: string
+  loading: string
+  error: string
+  target: Record<string, any> | null
+  field: string
+  language: string
+}
+
+const textOptimizer = ref<TextOptimizerState>({
+  visible: false, draft: '', loading: '', error: '', target: null, field: 'text', language: 'cmn',
+})
+
+const openTextOptimizer = (target: Record<string, any>, field: string, language?: string) => {
+  textOptimizer.value = {
+    visible: true,
+    draft: target[field] || '',
+    loading: '',
+    error: '',
+    target,
+    field,
+    language: language || 'cmn',
+  }
+}
+
+const runTextOptimize = async (action: string) => {
+  textOptimizer.value.loading = action
+  textOptimizer.value.error = ''
+  try {
+    const res = await fetch('/api/text/optimize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: textOptimizer.value.draft,
+        action,
+        language: textOptimizer.value.language,
+      }),
+    })
+    const data = await res.json()
+    if (!data.success) {
+      textOptimizer.value.error = data.error || t('processor.textOptimizeFailed')
+      return
+    }
+    textOptimizer.value.draft = data.text
+  } catch (e: any) {
+    textOptimizer.value.error = e?.message || String(e)
+  } finally {
+    textOptimizer.value.loading = ''
+  }
+}
+
+const applyTextOptimize = () => {
+  if (textOptimizer.value.target) {
+    textOptimizer.value.target[textOptimizer.value.field] = textOptimizer.value.draft
+  }
+  textOptimizer.value.visible = false
+}
 
 // 语音预设对话框里的语速/音调/音量：narratorForm 里存的是 EdgeTTS 风格的
 // 字符串（"+10%" / "-5Hz"），但 el-slider 需要绑定数字，这里用 computed
@@ -1932,6 +2038,13 @@ onMounted(() => {
   margin-left: 10px;
   color: #909399;
   font-size: 12px;
+}
+
+.text-optimize-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .pitch-input-group {
