@@ -410,6 +410,12 @@
           <div class="box-header">
             <span class="box-index">{{ t('dialogue.boxIndex', { index: i + 1 }) }}</span>
             <el-tag :type="statusTagType(box.status)" size="small">{{ statusLabel(box) }}</el-tag>
+            <el-tag v-if="box.override.enabled" type="warning" size="small" effect="plain">
+              ⚙ {{ t('dialogue.boxSettingsCustomTag') }}
+            </el-tag>
+            <el-button link class="box-settings-btn" :disabled="processing" @click="openBoxSettings(box)">
+              ⚙ {{ t('dialogue.boxSettings') }}
+            </el-button>
             <el-button link type="danger" class="box-remove" :disabled="processing" @click="removeBox(i)">
               ✖ {{ t('dialogue.removeBox') }}
             </el-button>
@@ -839,6 +845,262 @@
           <el-button type="primary" @click="applyTextOptimize">{{ t('processor.textOptimizeApply') }}</el-button>
         </template>
       </el-dialog>
+
+      <el-dialog
+        v-model="boxSettings.visible"
+        :title="t('dialogue.boxSettingsTitle')"
+        width="640px"
+        class="box-settings-dialog"
+      >
+        <el-form label-position="top">
+          <el-form-item>
+            <el-switch v-model="boxSettings.draft.enabled" :active-text="t('dialogue.boxSettingsEnable')" />
+            <div class="dict-source-hint">{{ t('dialogue.boxSettingsEnableHint') }}</div>
+          </el-form-item>
+
+          <template v-if="boxSettings.draft.enabled">
+            <el-divider />
+
+            <!-- ============== 完整处理模式专属 ============== -->
+            <template v-if="processingMode === 'full'">
+              <el-form-item :label="t('processor.backendLabel')">
+                <el-radio-group v-model="boxSettings.draft.alignerBackend">
+                  <el-radio value="mfa">
+                    <span>{{ t('processor.backendMfa') }}</span>
+                    <el-tag :type="alignerStatus.mfa?.available ? 'success' : 'danger'" size="small" style="margin-left:4px">
+                      {{ alignerStatus.mfa?.available ? '✓' : '✗' }}
+                    </el-tag>
+                  </el-radio>
+                  <el-radio value="whisperx">
+                    <span>{{ t('processor.backendWhisperx') }}</span>
+                    <el-tag :type="alignerStatus.whisperx?.available ? 'success' : 'info'" size="small" style="margin-left:4px">
+                      {{ alignerStatus.whisperx?.available ? '✓' : t('processor.backendStatusNeedInstall') }}
+                    </el-tag>
+                  </el-radio>
+                  <el-radio value="qwen3_asr">
+                    <span>{{ t('processor.backendQwen3Asr') }}</span>
+                    <el-tag :type="alignerStatus.qwen3_asr?.available ? 'success' : 'info'" size="small" style="margin-left:4px">
+                      {{ alignerStatus.qwen3_asr?.available ? '✓' : t('processor.backendStatusNeedInstall') }}
+                    </el-tag>
+                  </el-radio>
+                  <el-radio value="qwen3_aligner">
+                    <span>{{ t('processor.backendQwen3Aligner') }}</span>
+                    <el-tag :type="alignerStatus.qwen3_aligner?.available ? 'success' : 'info'" size="small" style="margin-left:4px">
+                      {{ alignerStatus.qwen3_aligner?.available ? '✓' : t('processor.backendStatusNeedInstall') }}
+                    </el-tag>
+                  </el-radio>
+                  <el-radio value="nemo_aligner">
+                    <span>{{ t('processor.backendNemoAligner') }}</span>
+                    <el-tag :type="alignerStatus.nemo_aligner?.available ? 'success' : 'info'" size="small" style="margin-left:4px">
+                      {{ alignerStatus.nemo_aligner?.available ? '✓' : t('processor.backendStatusNeedInstall') }}
+                    </el-tag>
+                  </el-radio>
+                </el-radio-group>
+                <div class="dict-source-hint">{{ t('dialogue.boxSettingsFieldFallbackHint') }}</div>
+              </el-form-item>
+
+              <el-form-item :label="t('processor.language')">
+                <el-select v-model="boxSettings.draft.language">
+                  <el-option :label="t('processor.languageCmn')" value="cmn" />
+                  <el-option :label="t('processor.languageEng')" value="eng" />
+                  <el-option :label="t('processor.languageJpn')" value="jpn" />
+                  <el-option :label="t('processor.languageKor')" value="kor" />
+                  <el-option :label="t('processor.languageYue')" value="yue" />
+                </el-select>
+              </el-form-item>
+
+              <el-form-item v-if="boxSettings.draft.language !== 'jpn'" :label="t('processor.englishWordAlign')">
+                <el-switch v-model="boxSettings.draft.englishWordAlign" />
+                <span class="option-hint">{{ t('processor.englishWordAlignHint') }}</span>
+              </el-form-item>
+            </template>
+
+            <!-- ============== 仅生成工程模式专属 ============== -->
+            <template v-else>
+              <el-form-item :label="t('dialogue.phonemeMode')">
+                <el-radio-group v-model="boxSettings.draft.phonemeMode">
+                  <el-radio value="none">{{ t('dialogue.phonemeNone') }}</el-radio>
+                  <el-radio value="merge">{{ t('dialogue.phonemeMerge') }}</el-radio>
+                  <el-radio value="hiragana">{{ t('dialogue.phonemeHiragana') }}</el-radio>
+                  <el-radio value="katakana">{{ t('dialogue.phonemeKatakana') }}</el-radio>
+                </el-radio-group>
+                <div class="help-text">
+                  <small v-if="boxSettings.draft.phonemeMode === 'none'">{{ t('dialogue.phonemeNoneHint') }}</small>
+                  <small v-else-if="boxSettings.draft.phonemeMode === 'merge'">{{ t('dialogue.phonemeMergeHint') }}</small>
+                  <small v-else-if="boxSettings.draft.phonemeMode === 'hiragana'">{{ t('dialogue.phonemeHiraganaHint') }}</small>
+                  <small v-else>{{ t('dialogue.phonemeKatakanaHint') }}</small>
+                </div>
+              </el-form-item>
+            </template>
+
+            <!-- ============== 高级设置（两种模式共用，不含 BPM） ============== -->
+            <el-collapse accordion>
+              <el-collapse-item :title="`⚙️ ${t('processor.advancedSettingsTitle')}`" name="advanced">
+                <div class="dict-source-hint" style="margin-bottom: 8px">{{ t('dialogue.boxSettingsNoBpmHint') }}</div>
+                <el-row :gutter="20">
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item :label="t('processor.basePitch')">
+                      <div class="pitch-input-group">
+                        <el-input-number v-model="boxSettings.draft.advanced.base_pitch" :min="12" :max="108" :step="1" controls-position="right" />
+                        <span class="pitch-name">{{ midiNoteToName(boxSettings.draft.advanced.base_pitch) }}</span>
+                      </div>
+                    </el-form-item>
+                  </el-col>
+
+                  <el-col :xs="24">
+                    <el-divider>📈 {{ t('processor.pitchControl') }}</el-divider>
+                  </el-col>
+
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item :label="t('processor.autoNotePitch')">
+                      <el-switch
+                        v-model="boxSettings.draft.advanced.auto_note_pitch"
+                        :active-text="t('processor.autoNotePitchActive')"
+                        :inactive-text="t('processor.autoNotePitchInactive')"
+                      />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item :label="t('processor.exportPitchLine')">
+                      <el-switch
+                        v-model="boxSettings.draft.advanced.export_pitch_line"
+                        :active-text="t('processor.exportPitchLineActive')"
+                        :inactive-text="t('processor.exportPitchLineInactive')"
+                      />
+                    </el-form-item>
+                  </el-col>
+
+                  <el-col :xs="24">
+                    <el-divider>{{ t('processor.f0RangeDivider') }}</el-divider>
+                  </el-col>
+
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item :label="t('processor.f0Method')">
+                      <el-radio-group
+                        v-model="boxSettings.draft.advanced.f0_method"
+                        :disabled="!boxSettings.draft.advanced.export_pitch_line && !boxSettings.draft.advanced.auto_note_pitch"
+                      >
+                        <el-radio value="dio">{{ t('processor.f0Dio') }}</el-radio>
+                        <el-radio value="harvest">{{ t('processor.f0Harvest') }}</el-radio>
+                        <el-radio value="crepe">{{ t('processor.f0Crepe') }}</el-radio>
+                        <el-radio value="rmvpe">{{ t('processor.f0Rmvpe') }}</el-radio>
+                      </el-radio-group>
+                    </el-form-item>
+                  </el-col>
+
+                  <el-col v-if="boxSettings.draft.advanced.f0_method === 'crepe'" :xs="24" :sm="12">
+                    <el-form-item :label="t('processor.crepeModelSpec')">
+                      <el-radio-group v-model="boxSettings.draft.advanced.crepe_model">
+                        <el-radio value="full">{{ t('processor.crepeFull') }}</el-radio>
+                        <el-radio value="tiny">{{ t('processor.crepeTiny') }}</el-radio>
+                      </el-radio-group>
+                    </el-form-item>
+                  </el-col>
+                  <el-col v-if="boxSettings.draft.advanced.f0_method === 'crepe' || boxSettings.draft.advanced.f0_method === 'rmvpe'" :xs="24" :sm="12">
+                    <el-form-item :label="t('processor.f0Device')">
+                      <el-radio-group v-model="boxSettings.draft.advanced.f0_device">
+                        <el-radio value="auto">{{ t('processor.deviceAuto') }}</el-radio>
+                        <el-radio value="cpu">{{ t('processor.deviceCpu') }}</el-radio>
+                        <el-radio value="cuda">{{ t('processor.deviceCuda') }}</el-radio>
+                      </el-radio-group>
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+
+                <el-row :gutter="20">
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item :label="t('processor.precision')">
+                      <el-radio-group v-model="boxSettings.draft.advanced.precision">
+                        <el-radio value="single">{{ t('processor.precisionSingle') }}</el-radio>
+                        <el-radio value="double">{{ t('processor.precisionDouble') }}</el-radio>
+                      </el-radio-group>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item :label="t('processor.f0Smooth')">
+                      <el-switch
+                        v-model="boxSettings.draft.advanced.f0_smooth"
+                        :active-text="t('processor.enabled')"
+                        :inactive-text="t('processor.disabled')"
+                        :disabled="!boxSettings.draft.advanced.export_pitch_line"
+                      />
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+
+                <el-row v-if="boxSettings.draft.advanced.f0_smooth" :gutter="20">
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item :label="t('processor.smoothWindow')">
+                      <el-input-number
+                        v-model="boxSettings.draft.advanced.f0_smooth_window"
+                        :min="1" :max="29" :step="2" controls-position="right"
+                        :disabled="!boxSettings.draft.advanced.export_pitch_line"
+                      />
+                      <span class="help-text">{{ t('processor.smoothWindowTip') }}</span>
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+
+                <el-row v-if="outputFormat === 'vsqx' && boxSettings.draft.advanced.f0_smooth" :gutter="20">
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item :label="t('processor.vsqxPitchSmoothWindow')">
+                      <el-input-number
+                        v-model="boxSettings.draft.advanced.vsqx_pitch_smooth_window"
+                        :min="1" :max="29" :step="2" controls-position="right"
+                        :disabled="!boxSettings.draft.advanced.export_pitch_line"
+                      />
+                      <span class="help-text">{{ t('processor.vsqxPitchSmoothWindowTip') }}</span>
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+
+                <el-row :gutter="20">
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item :label="t('processor.f0Floor')">
+                      <el-input-number v-model="boxSettings.draft.advanced.f0_floor" :min="40" :max="200" :step="5" controls-position="right" />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :xs="24" :sm="12">
+                    <el-form-item :label="t('processor.f0Ceil')">
+                      <el-input-number v-model="boxSettings.draft.advanced.f0_ceil" :min="300" :max="1000" :step="50" controls-position="right" />
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+              </el-collapse-item>
+            </el-collapse>
+
+            <!-- 英语单词→音素映射：仅完整处理模式 + 已开启英语单词级对齐时显示 -->
+            <el-form-item v-if="processingMode === 'full' && showBoxWordPhonemeMap" :label="t('processor.wordPhonemeMap')">
+              <el-switch v-model="boxSettings.draft.wordPhonemeMap" />
+              <div class="dict-source-hint">{{ t('processor.wordPhonemeMapSwitchHint') }}</div>
+            </el-form-item>
+
+            <!-- 选择词典：两种模式都显示 -->
+            <el-form-item :label="t('processor.selectDictionary')">
+              <el-select
+                v-model="boxSettings.draft.dictSource"
+                style="width: 260px"
+                :placeholder="t('processor.dictSourceDefault')"
+                @visible-change="(open: boolean) => open && fetchDictionaries()"
+              >
+                <el-option value="default" :label="t('processor.dictSourceDefault')" />
+                <el-option
+                  v-for="d in filteredDictionaries"
+                  :key="d.name"
+                  :value="d.name"
+                  :label="`${d.name} (${d.notation === 'vocaloid' ? t('dictionary.notationVocaloid') : t('dictionary.notationSynthesizerV')}, ${d.count})`"
+                />
+              </el-select>
+              <div class="dict-source-hint">{{ t('processor.selectDictionaryHint') }}</div>
+            </el-form-item>
+          </template>
+        </el-form>
+        <template #footer>
+          <el-button @click="resetBoxSettings">{{ t('dialogue.boxSettingsReset') }}</el-button>
+          <el-button @click="boxSettings.visible = false">{{ t('processor.textOptimizeCancel') }}</el-button>
+          <el-button type="primary" @click="applyBoxSettings">{{ t('processor.textOptimizeApply') }}</el-button>
+        </template>
+      </el-dialog>
     </el-card>
   </div>
 </template>
@@ -890,6 +1152,9 @@ interface DialogueBox {
   ttsSegmentPreviewSentenceCount: number
   ttsSegmentPreviewWarnings: string[]
   ttsSegmentPreviewError: string
+  // 该对话框的"单独设置"（对齐后端 / 语言 / 英语单词级对齐 / 词典 /
+  // 音素转换 / 高级设置），默认不开启，跟随页面顶部全局设置提交。
+  override: BoxOverride
 }
 
 interface AdvancedConfig {
@@ -910,6 +1175,40 @@ interface AdvancedConfig {
   vsqx_pitch_smooth_window: number
   f0_floor: number
   f0_ceil: number
+}
+
+// ── 每个对话框的"单独设置"：不包含 BPM（BPM 决定整批对话框合并后的
+// 时间轴换算，必须全局统一，单独覆盖会破坏时间轴对齐，见设置弹窗与
+// buildFormData 附近的说明）。未开启 enabled 时，该框完全跟随页面顶部
+// 的全局设置提交；开启后，下面各字段的值会覆盖对应的全局设置，仅对该
+// 对话框自己生效。 ──
+interface BoxAdvancedOverride {
+  base_pitch: number
+  auto_note_pitch: boolean
+  export_pitch_line: boolean
+  f0_method: 'dio' | 'harvest' | 'crepe' | 'rmvpe'
+  f0_device: 'auto' | 'cpu' | 'cuda'
+  crepe_model: 'full' | 'tiny'
+  precision: 'single' | 'double'
+  f0_smooth: boolean
+  f0_smooth_window: number
+  vsqx_pitch_smooth_window: number
+  f0_floor: number
+  f0_ceil: number
+}
+
+interface BoxOverride {
+  enabled: boolean              // 该框是否开启"单独设置"（总开关）
+  // ── 完整处理模式专属 ──
+  alignerBackend: string
+  language: string
+  englishWordAlign: boolean
+  wordPhonemeMap: boolean
+  // ── 仅生成工程模式专属 ──
+  phonemeMode: 'none' | 'merge' | 'hiragana' | 'katakana'
+  // ── 两种模式共用 ──
+  dictSource: string
+  advanced: BoxAdvancedOverride
 }
 
 // ============== 共用设置状态 ==============
@@ -1197,11 +1496,21 @@ const fetchTtsEngines = async () => {
 // 每个对话框的音色列表独立获取、独立存放（box.ttsVoices），跟随该框自己的
 // ttsEngine，不与其它框或语音预设管理对话框共用列表——避免"切换框A的引擎
 // 后，框B的音色下拉也被联动清空/替换"这类串扰。
+// 语言同理：优先使用该框"单独设置"里的 language（override.enabled 时），
+// 未开启单独设置则回退到页面顶部的 sharedLanguage——与 buildFormData /
+// 后端 process_dialogue_batch 里"box_override.get('language', language)"
+// 的回退规则保持一致，否则单独设置了语言的框会拉到错误语种的音色列表
+// （例如单独设成英语，音色下拉却仍是普通话音色）。
+const boxEffectiveLanguage = (box: DialogueBox): string => {
+  return box.override.enabled ? box.override.language : sharedLanguage.value
+}
+
 const fetchBoxTtsVoices = async (box: DialogueBox, engine?: string) => {
   const eng = engine || box.ttsEngine || 'edge_tts'
   box.ttsVoicesLoading = true
   try {
-    const res = await fetch(`/api/tts/voices?engine=${encodeURIComponent(eng)}&language=${encodeURIComponent(sharedLanguage.value)}`)
+    const lang = boxEffectiveLanguage(box)
+    const res = await fetch(`/api/tts/voices?engine=${encodeURIComponent(eng)}&language=${encodeURIComponent(lang)}`)
     const data = await res.json()
     if (data.success) {
       box.ttsVoices = data.voices || []
@@ -1219,6 +1528,9 @@ const fetchBoxTtsVoices = async (box: DialogueBox, engine?: string) => {
   }
 }
 
+// 批量刷新全部对话框的音色列表：每个框内部仍按 boxEffectiveLanguage(box)
+// 取自己的有效语言（单独设置了语言的框用自己的，其余框用 sharedLanguage），
+// 所以这里即使在"全局语言变化"时触发，也不会覆盖已单独设置了语言的框。
 const fetchAllBoxTtsVoices = () => {
   boxes.value.forEach(box => fetchBoxTtsVoices(box, box.ttsEngine))
 }
@@ -1344,7 +1656,11 @@ const runBoxSegmentPreview = async (box: DialogueBox) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text,
-        language: sharedLanguage.value,
+        // 使用该框自己的有效语言（单独设置了语言时用 override.language，
+        // 否则回退到 sharedLanguage）——分句规则按语言区分（如中文用
+        // "。"分句，英文用 "."），用错语言会导致预览分句/停顿与实际
+        // 提交处理时不一致。
+        language: boxEffectiveLanguage(box),
         engine: box.ttsEngine,
         voice: box.ttsVoice,
         rate: `${box.ttsRate >= 0 ? '+' : ''}${box.ttsRate}%`,
@@ -1448,6 +1764,36 @@ const deleteNarratorItem = async (narratorId: string) => {
 }
 
 // ============== 对话框列表 ==============
+
+// 单个对话框"单独设置"的默认值：advanced 部分与页面顶部 advanced 的默认值
+// 保持一致（仅去掉 bpm），其余开关默认关闭/回退到"使用软件默认值"，
+// 与全局设置的默认值语义对齐，避免用户打开弹窗时看到不一致的初始状态。
+const createBoxAdvancedOverride = (): BoxAdvancedOverride => ({
+  base_pitch: 60,
+  auto_note_pitch: true,
+  export_pitch_line: true,
+  f0_method: 'dio',
+  f0_device: 'auto',
+  crepe_model: 'full',
+  precision: 'double',
+  f0_smooth: true,
+  f0_smooth_window: 5,
+  vsqx_pitch_smooth_window: 5,
+  f0_floor: 71,
+  f0_ceil: 800,
+})
+
+const createBoxOverride = (): BoxOverride => ({
+  enabled: false,
+  alignerBackend: 'mfa',
+  language: 'cmn',
+  englishWordAlign: false,
+  wordPhonemeMap: false,
+  phonemeMode: 'none',
+  dictSource: 'default',
+  advanced: createBoxAdvancedOverride(),
+})
+
 let boxIdCounter = 0
 const createBox = (): DialogueBox => ({
   id: ++boxIdCounter,
@@ -1476,9 +1822,83 @@ const createBox = (): DialogueBox => ({
   ttsSegmentPreviewSentenceCount: 0,
   ttsSegmentPreviewWarnings: [],
   ttsSegmentPreviewError: '',
+  override: createBoxOverride(),
 })
 
 const boxes = ref<DialogueBox[]>([createBox()])
+
+// ============== 单个对话框"单独设置"弹窗 ==============
+// 弹窗内编辑的是打开时绑定的目标对话框 box.override 的一份深拷贝副本
+// （boxSettings.draft），点击"应用"才写回原对话框；取消/关闭弹窗不影响
+// 原有设置——与"优化文本"弹窗（textOptimizer）的编辑/应用模式保持一致。
+// 必须放在 createBox / createBoxOverride 声明之后，否则 boxSettings 的
+// 初始值 draft: createBoxOverride() 会在函数尚未定义时执行，导致
+// "used before its declaration" 的运行时错误。
+interface BoxSettingsState {
+  visible: boolean
+  targetBox: DialogueBox | null
+  draft: BoxOverride
+}
+
+const boxSettings = ref<BoxSettingsState>({
+  visible: false,
+  targetBox: null,
+  draft: createBoxOverride(),
+})
+
+const openBoxSettings = (box: DialogueBox) => {
+  boxSettings.value = {
+    visible: true,
+    targetBox: box,
+    // 深拷贝，避免弹窗内的调整在点击"应用"前就影响到原对话框
+    // （尤其 advanced 是嵌套对象，浅拷贝会共享引用）。
+    draft: JSON.parse(JSON.stringify(box.override)) as BoxOverride,
+  }
+}
+
+const applyBoxSettings = () => {
+  const box = boxSettings.value.targetBox
+  if (!box) return
+  // 应用前先记下旧的"有效语言"，用于判断是否需要重新拉取该框的 TTS
+  // 音色列表（见下方说明）；必须在覆盖 box.override 之前读取。
+  const prevEffectiveLanguage = boxEffectiveLanguage(box)
+  box.override = JSON.parse(JSON.stringify(boxSettings.value.draft)) as BoxOverride
+  boxSettings.value.visible = false
+  ElMessage.success(t('dialogue.boxSettingsApplied'))
+
+  // TTS跟读模式下，音色列表按语言过滤（同一 TTS 引擎，不同语言可用音色
+  // 不同）；这里"单独设置"改的是该框自己的有效语言，如果确实变了，需要
+  // 立即用新语言重新拉取这一个框的音色列表，否则下拉框会继续显示上一个
+  // 语言下的音色（即便实际提交时后端已经在用新语言，界面上容易造成误选）。
+  if (inputMode.value === 'tts') {
+    const nextEffectiveLanguage = boxEffectiveLanguage(box)
+    if (nextEffectiveLanguage !== prevEffectiveLanguage) {
+      fetchBoxTtsVoices(box, box.ttsEngine)
+    }
+  }
+}
+
+const resetBoxSettings = () => {
+  boxSettings.value.draft = createBoxOverride()
+}
+
+// 弹窗内"英语单词→音素映射"开关的可见性：与页面顶部 showWordPhonemeMap
+// 同样的判定条件，但基于弹窗草稿里的语言/英语单词级对齐状态，而不是
+// 全局的 sharedLanguage / englishWordAlign（该框可能覆盖了不同的语言）。
+const showBoxWordPhonemeMap = computed(() => {
+  const isSupportedFormat = outputFormat.value === 'sv' || outputFormat.value === 'vsqx'
+  return boxSettings.value.draft.englishWordAlign && isSupportedFormat
+})
+
+// 语言切到日语时，弹窗草稿里的"英语单词级对齐"/"英语单词→音素映射"同样
+// 没有意义，随之重置，与页面顶部 watch(sharedLanguage) 逻辑一致。
+watch(() => boxSettings.value.draft.language, (lang) => {
+  if (lang === 'jpn') {
+    boxSettings.value.draft.englishWordAlign = false
+    boxSettings.value.draft.wordPhonemeMap = false
+  }
+})
+
 
 // 分段预览失效判定 watch（定义见上方 _boxSegmentPreviewSignature 注释）：
 // 必须放在 boxes 声明之后，否则会在 <script setup> 顶层执行阶段抛出
@@ -1781,6 +2201,41 @@ const buildFormData = (): FormData => {
     if (box.text.trim()) fd.append(`text_${i}`, box.text)
     // 对齐辅助移调：每个对话框独立提交，只在该框自身的对齐阶段生效。
     fd.append(`align_pitch_shift_${i}`, String(box.align_pitch_shift_semitones))
+
+    // ── 该对话框的"单独设置"：仅在开启了总开关（override.enabled）时才
+    // 提交 override_enabled_{i}=true 及具体字段；后端未收到该字段或其为
+    // false 时，该框完全沿用页面顶部的全局设置，不做任何改动（向后兼容：
+    // 旧前端/未升级请求不受影响）。字段集合与"单独设置"弹窗一致，但不
+    // 包含 BPM（BPM 恒定全局生效，见弹窗内说明）。──────────────────────
+    const ov = box.override
+    fd.append(`override_enabled_${i}`, String(ov.enabled))
+    if (ov.enabled) {
+      fd.append(`override_aligner_backend_${i}`, ov.alignerBackend)
+      fd.append(`override_language_${i}`, ov.language)
+      fd.append(
+        `override_english_word_align_${i}`,
+        String(processingMode.value === 'full' && ov.englishWordAlign && ov.language !== 'jpn')
+      )
+      const boxShowWordPhonemeMap =
+        processingMode.value === 'full' &&
+        ov.englishWordAlign &&
+        (outputFormat.value === 'sv' || outputFormat.value === 'vsqx')
+      fd.append(`override_word_phoneme_map_${i}`, String(boxShowWordPhonemeMap && ov.wordPhonemeMap))
+      fd.append(`override_phoneme_mode_${i}`, processingMode.value === 'project-only' ? ov.phonemeMode : 'none')
+      fd.append(`override_dict_source_${i}`, ov.dictSource)
+      fd.append(`override_base_pitch_${i}`, String(ov.advanced.base_pitch))
+      fd.append(`override_auto_note_pitch_${i}`, String(ov.advanced.auto_note_pitch))
+      fd.append(`override_export_pitch_line_${i}`, String(ov.advanced.export_pitch_line))
+      fd.append(`override_f0_method_${i}`, ov.advanced.f0_method)
+      fd.append(`override_f0_device_${i}`, ov.advanced.f0_device)
+      fd.append(`override_crepe_model_${i}`, ov.advanced.crepe_model)
+      fd.append(`override_precision_${i}`, ov.advanced.precision)
+      fd.append(`override_f0_smooth_${i}`, String(ov.advanced.f0_smooth))
+      fd.append(`override_f0_smooth_window_${i}`, String(ov.advanced.f0_smooth_window))
+      fd.append(`override_vsqx_pitch_smooth_window_${i}`, String(ov.advanced.vsqx_pitch_smooth_window))
+      fd.append(`override_f0_floor_${i}`, String(ov.advanced.f0_floor))
+      fd.append(`override_f0_ceil_${i}`, String(ov.advanced.f0_ceil))
+    }
 
     if (inputMode.value === 'tts') {
       if (box.text.trim() && box.ttsVoice) {
@@ -2129,8 +2584,12 @@ onMounted(() => {
   font-size: 13px;
 }
 
-.box-remove {
+.box-settings-btn {
   margin-left: auto;
+}
+
+.box-remove {
+  margin-left: 4px;
 }
 
 .panel-label {
