@@ -63,6 +63,9 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 | qwen-asr         | >=1.0.0      | [GitHub](https://github.com/QwenLM/Qwen3-ASR) |
 | nltk         | >=1.0.0      | [GitHub](https://github.com/nltk/nltk) |
 | requests     | -             | [GitHub](https://github.com/psf/requests) |
+| qwen-asr>　　 | =1.0.0  　　　 | [GitHub](https://github.com/QwenLM/Qwen3-ASR) |
+| transformers | >=4.40.0　　　 | [GitHub](https://github.com/huggingface/transformers) |
+| nemo_toolkit[asr] | >=2.7.0,<2.8.0　　　 | [GitHub](https://github.com/NVIDIA-NeMo/Speech) |
 
 #### LGPL 2.1 License
 | 包名     | 版本       | 链接 |
