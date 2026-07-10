@@ -1354,6 +1354,7 @@ class TsubakiProcessor:
               tracks 长度固定为 1（单音轨、多序列）。
         """
         import uuid
+        from dataclasses import replace as _dc_replace
 
         offset_ratio = config.bpm * 705600000 / 60   # blicks/秒，与 _build_svp_track_payload 换算公式一致
 
@@ -1363,16 +1364,32 @@ class TsubakiProcessor:
         for tr in resolved_tracks:
             tr_title = tr.get("title") or ""
 
+            # ── 该音轨自己的有效设置：build_multitrack_project 已经把
+            # "单独设置"覆盖值（或回退后的全局值）放进了 tr 里的
+            # base_pitch/refine_pitch/word_phoneme_map/language/dict_source
+            # 字段；未覆盖时这些值与外层的 config/word_phoneme_map/language/
+            # dict_source 完全一致。bpm 恒定使用全局 config.bpm（决定整批
+            # 对话框合并后的时间轴换算，不接受按音轨覆盖），因此这里只替换
+            # base_pitch / refine_pitch，不改 bpm。──────────────────────
+            tr_config = _dc_replace(
+                config,
+                base_pitch=tr.get("base_pitch", config.base_pitch),
+                refine_pitch=tr.get("refine_pitch", config.refine_pitch),
+            )
+            tr_word_phoneme_map = tr.get("word_phoneme_map", word_phoneme_map)
+            tr_language = tr.get("language", language)
+            tr_dict_source = tr.get("dict_source", dict_source)
+
             all_notes, pitch_data = self._build_svp_track_payload(
                 segments=tr.get("segments") or [],
                 f0=tr.get("f0"),
                 t=tr.get("t"),
-                config=config,
+                config=tr_config,
                 midi_notes=tr.get("midi_notes"),
-                word_phoneme_map=word_phoneme_map,
-                language=language,
+                word_phoneme_map=tr_word_phoneme_map,
+                language=tr_language,
                 native_english_words=tr.get("native_english_words"),
-                dict_source=dict_source,
+                dict_source=tr_dict_source,
             )
 
             group_uuid = str(uuid.uuid4()).lower()
@@ -2165,21 +2182,34 @@ class TsubakiProcessor:
                 "lab_path": str,          # 该对话框的 LAB 标注文件路径（可选，与 midi_path 二选一/优先）
                 "midi_path": str,         # 该对话框的 MIDI 文件路径（可选；无 lab_path 时用于生成段落+音高）
                 "original_text": str,     # 原始歌词/台词文本，用于 word_phoneme_map 防误判（可选）
+                "config": AudioProcessingConfig,  # 可选：该对话框自己的有效 F0/音高配置
+                                           # （"单独设置"覆盖值，或未覆盖时与下方全局 config 相同；
+                                           # 仅使用其中的 base_pitch / refine_pitch，bpm 恒定使用
+                                           # 全局 config.bpm，不接受按对话框覆盖）
+                "language": str,          # 可选：该对话框自己的有效语言（未提供时回退到下方全局 language）
+                "word_phoneme_map": bool, # 可选：该对话框自己的有效单词映射开关（回退到全局 word_phoneme_map）
+                "dict_source": str,       # 可选：该对话框自己的有效词典来源（回退到全局 dict_source）
+                "phoneme_mode": str,      # 可选：该对话框自己的有效音素转换模式（回退到全局 phoneme_mode）
             }
             调用方负责保证列表顺序即为对话框顺序（决定合并后时间轴上的先后位置）。
         output_format : 支持 "sv"（Synthesizer V .svp）/ "vsqx"（VOCALOID4 .vsqx）/
             "ustx"（OpenUtau .ustx）。不支持 "midi"（调用方应改用单文件流程逐个导出）。
-        config : 全局共享的音频处理配置（对话文本框页面顶部"高级设置"统一生效，
-            全部对话框共用同一个 bpm / F0 提取参数）
-        word_phoneme_map / language / dict_source : 全局共享的单词→音素映射设置
-            （仅 sv / vsqx 使用；USTX 没有 phonemes 字段，调用方应确保输出为
-             ustx 时前端已隐藏这两个控件，这里也不会对 ustx 生效）
+        config : 整批对话框的默认音频处理配置（对话文本框页面顶部"高级设置"，
+            未开启"单独设置"的对话框直接使用这份配置；bpm 无论是否开启"单独
+            设置"都始终使用这里的全局值，决定全部对话框合并后共享的时间轴换算）
+        word_phoneme_map / language / dict_source : 整批对话框的默认单词→音素
+            映射设置（仅 sv / vsqx 使用；USTX 没有 phonemes 字段，调用方应确保
+            输出为 ustx 时前端已隐藏这两个控件，这里也不会对 ustx 生效）。
+            某个对话框在 track_inputs 里提供了同名字段时，仅该对话框使用
+            覆盖值，其余对话框仍使用这里的默认值。
         vsqx_singer / vsqx_singer_id / vsqx_singer_bs : 合并后单音轨共用的 VSQX 声库
-        phoneme_mode : "none" / "merge" / "hiragana" / "katakana"，应用于每个对话框的
-            LAB 段落（与单文件"仅生成工程"模式语义一致）。仅在段落来自 LAB 且
-            输出格式为 sv / vsqx 时生效；USTX 始终使用原始音素/文字，不应用转换
-            （与用户预期一致：USTX 侧重歌词音节而非音素级精修）；来自 MIDI 的
-            段落（歌词文本）同样不应用音素转换。
+        phoneme_mode : 整批对话框默认的音素转换模式（"none" / "merge" / "hiragana" /
+            "katakana"），应用于每个对话框的 LAB 段落（与单文件"仅生成工程"模式
+            语义一致）。仅在段落来自 LAB 且输出格式为 sv / vsqx 时生效；USTX 始终
+            使用原始音素/文字，不应用转换（与用户预期一致：USTX 侧重歌词音节而非
+            音素级精修）；来自 MIDI 的段落（歌词文本）同样不应用音素转换。某个
+            对话框在 track_inputs 里提供了 "phoneme_mode" 字段时，仅该对话框使用
+            覆盖值。
         音高解析说明（混合 MIDI / 非 MIDI 对话框场景）：
             部分对话框提供 MIDI、部分没有时，没有 MIDI 的对话框段落仍然按
             该对话框自身的 refine_pitch / base_pitch 规则解析音高，不会被
@@ -2213,6 +2243,21 @@ class TsubakiProcessor:
                 tr_title = tr.get("title") or Path(str(wav_path)).stem
                 original_text = tr.get("original_text", "") or ""
 
+                # ── 该对话框自己的有效设置：process_dialogue_batch 已经把
+                # "单独设置"覆盖值（或回退后的全局值）放进了 track_inputs
+                # 里的 config/language/word_phoneme_map/dict_source/
+                # phoneme_mode 字段；这里若某个字段缺失（例如调用方是尚未
+                # 升级的旧代码，直接传了不含这些 key 的 track_inputs），
+                # 则回退到 build_multitrack_project 自己的同名参数，与该
+                # 功能上线前的行为完全一致。────────────────────────────
+                tr_config = tr.get("config") or config
+                tr_language = tr.get("language", language)
+                tr_word_phoneme_map = tr.get("word_phoneme_map", word_phoneme_map)
+                tr_dict_source = tr.get("dict_source", dict_source)
+                tr_phoneme_mode = tr.get("phoneme_mode", phoneme_mode)
+                if tr_phoneme_mode not in ("none", "merge", "hiragana", "katakana"):
+                    tr_phoneme_mode = "none"
+
                 if not wav_path or not Path(str(wav_path)).exists():
                     logger.warning("[多音轨] 跳过音轨 %r：WAV 文件不存在 (%s)", tr_title, wav_path)
                     continue
@@ -2235,7 +2280,11 @@ class TsubakiProcessor:
 
                         midi_bpm, midi_notes, midi_lyrics = parse_midi_notes_with_lyrics(str(midi_path))
                         if midi_bpm and midi_bpm > 0:
-                            config = _dc_replace(config, bpm=float(midi_bpm))
+                            # 注意：这里只替换该音轨自己的 tr_config，不再覆盖
+                            # 外层共享的 config 变量——bpm 决定整批对话框合并
+                            # 后的时间轴换算，必须全局统一，不应被某一个提供
+                            # 了 MIDI 的对话框悄悄改写，影响到它后面的音轨。
+                            tr_config = _dc_replace(tr_config, bpm=float(midi_bpm))
                     except Exception as _midi_err:
                         logger.warning("[多音轨] 音轨 %r MIDI 解析失败: %s", tr_title, _midi_err)
                         midi_notes = None
@@ -2250,11 +2299,13 @@ class TsubakiProcessor:
 
                     # 音素转换：仅对来自 LAB 的段落、且目标格式非 USTX 时生效
                     # （USTX 始终使用原始音素/文字，不应用转换——见函数 docstring）。
-                    if phoneme_mode != "none" and fmt != "ustx":
+                    # 使用该音轨自己的 tr_phoneme_mode（"仅生成工程"模式下可
+                    # 按对话框单独覆盖，未覆盖时即为整批统一的 phoneme_mode）。
+                    if tr_phoneme_mode != "none" and fmt != "ustx":
                         try:
                             from phoneme_converter import apply_phoneme_mode
                             seg_tuples = [(s.start_time, s.end_time, s.label) for s in segments]
-                            converted = apply_phoneme_mode(seg_tuples, phoneme_mode)
+                            converted = apply_phoneme_mode(seg_tuples, tr_phoneme_mode)
                             segments = [
                                 LabelSegment(start_time=t0, end_time=t1, label=lbl)
                                 for (t0, t1, lbl) in converted
@@ -2262,7 +2313,7 @@ class TsubakiProcessor:
                         except Exception as _pm_err:
                             logger.warning(
                                 "[多音轨] 音轨 %r 音素转换失败 (mode=%s): %s，回退到原始音素",
-                                tr_title, phoneme_mode, _pm_err,
+                                tr_title, tr_phoneme_mode, _pm_err,
                             )
                     # 若段落来自 LAB，midi_notes 仍可用于按 MIDI 原始音高设置 tone/音符
                     # （与单文件模式一致：LAB 提供段落，MIDI 提供音高）。
@@ -2273,10 +2324,11 @@ class TsubakiProcessor:
                     lyric_words = self._midi_lyrics_to_words(midi_lyrics)
                     segments = self._segments_from_midi_notes(midi_notes, lyric_words=lyric_words)
 
-                # F0 提取（每条音轨独立提取，使用共享的 config 参数）
+                # F0 提取（每条音轨独立提取，使用该音轨自己的有效配置
+                # tr_config：未开启"单独设置"时与全局 config 完全一致）。
                 f0_arr, t_arr = None, None
                 try:
-                    audio_data = self.process_audio_f0(str(wav_path), config)
+                    audio_data = self.process_audio_f0(str(wav_path), tr_config)
                     if audio_data and audio_data.get("success"):
                         f0_arr = audio_data.get("f0")
                         t_arr  = audio_data.get("t")
@@ -2289,9 +2341,10 @@ class TsubakiProcessor:
                     logger.warning("[多音轨] 音轨 %r F0 提取异常: %s，该音轨将不含音高曲线", tr_title, _f0_err)
 
                 # word_phoneme_map 的原始文本预提取英语单词集合（防拼音误判）
+                # ——使用该音轨自己的 tr_language / tr_word_phoneme_map。
                 native_english_words: Optional[set] = None
-                _lang_norm = (language or "").lower().strip().rstrip("-")
-                if word_phoneme_map and _lang_norm not in ("en", "eng", "english") and original_text:
+                _lang_norm = (tr_language or "").lower().strip().rstrip("-")
+                if tr_word_phoneme_map and _lang_norm not in ("en", "eng", "english") and original_text:
                     try:
                         from phoneme_converter import extract_native_english_words
                         native_english_words = extract_native_english_words(original_text)
@@ -2321,6 +2374,15 @@ class TsubakiProcessor:
                     "native_english_words": native_english_words,
                     "midi_notes": midi_notes,
                     "duration_sec": duration_sec,
+                    # ── 该音轨自己的有效设置，供下面的 _sequenced builder
+                    # 按每个音轨独立应用词典 / 单词映射 / 语言，而不是整批
+                    # 统一一份（bpm 除外，仍使用外层共享 config 的 bpm，
+                    # 由 builder 统一负责该字段的时间轴换算）。────────────
+                    "word_phoneme_map": tr_word_phoneme_map,
+                    "language": tr_language,
+                    "dict_source": tr_dict_source,
+                    "base_pitch": tr_config.base_pitch,
+                    "refine_pitch": tr_config.refine_pitch,
                 })
 
             if not resolved_tracks:
@@ -3001,20 +3063,36 @@ class TsubakiProcessor:
         tempo_v = int(round(bpm * 100))
         ticks_per_sec = (bpm / 60.0) * 480.0
 
+        from dataclasses import replace as _dc_replace
+
         part_blocks = ""
         for tr in resolved_tracks:
             t_start = self._VSQX_PART_OFFSET + int(round(float(tr.get("offset_sec") or 0.0) * ticks_per_sec))
+
+            # ── 该音轨自己的有效设置：与 _build_svp_project_text_sequenced
+            # 同样的覆盖规则——bpm 恒定使用全局 config.bpm（不接受按音轨
+            # 覆盖，见该函数上方 docstring），只替换 base_pitch / refine_pitch，
+            # word_phoneme_map / language / dict_source 按音轨独立生效。──
+            tr_config = _dc_replace(
+                config,
+                base_pitch=tr.get("base_pitch", config.base_pitch),
+                refine_pitch=tr.get("refine_pitch", config.refine_pitch),
+            )
+            tr_word_phoneme_map = tr.get("word_phoneme_map", word_phoneme_map)
+            tr_language = tr.get("language", language)
+            tr_dict_source = tr.get("dict_source", dict_source)
+
             part_blocks += self._build_vsqx_part_xml(
                 segments=tr.get("segments") or [],
                 f0=tr.get("f0"),
                 t=tr.get("t"),
-                config=config,
+                config=tr_config,
                 midi_notes=tr.get("midi_notes"),
                 vsqx_singer_bs=vsqx_singer_bs,
-                word_phoneme_map=word_phoneme_map,
-                language=language,
+                word_phoneme_map=tr_word_phoneme_map,
+                language=tr_language,
                 native_english_words=tr.get("native_english_words"),
-                dict_source=dict_source,
+                dict_source=tr_dict_source,
                 t_start=t_start,
                 part_name=(tr.get("title") or "NewPart"),
             )

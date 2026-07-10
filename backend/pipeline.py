@@ -716,6 +716,7 @@ class AudioProcessingPipeline:
         }
         """
         import time
+        from dataclasses import replace as _dc_replace
         start_time = time.time()
 
         if processing_mode not in ("full", "project-only"):
@@ -760,6 +761,42 @@ class AudioProcessingPipeline:
             box_align_pitch_shift_semitones = box.get(
                 "align_pitch_shift_semitones", align_pitch_shift_semitones
             )
+
+            # ── 该对话框的"单独设置"覆盖值（对齐后端/语言/英语单词级对齐/
+            # 词典/音素转换/F0 高级设置，不含 BPM）：未开启覆盖（override
+            # 为 None/空）时，下面每个字段都直接回退到整批统一的全局参数，
+            # 与该功能上线前的行为完全一致；开启时，只有这一个对话框使用
+            # 覆盖值，不影响其它对话框。────────────────────────────────────
+            box_override = box.get("override") or {}
+            box_aligner_backend      = box_override.get("aligner_backend", aligner_backend)
+            box_language             = box_override.get("language", language)
+            box_english_word_align   = box_override.get("english_word_align", english_word_align)
+            box_word_phoneme_map     = box_override.get("word_phoneme_map", word_phoneme_map)
+            box_phoneme_mode         = box_override.get("phoneme_mode", phoneme_mode)
+            box_dict_source          = box_override.get("dict_source", dict_source)
+
+            # 该对话框自己的 F0/音高相关配置：只替换 override 里显式提供的
+            # 字段，bpm 恒定沿用全局 config（见函数 docstring 里 BPM 的说明），
+            # 未开启覆盖时 box_config 与全局 config 完全一致（等价于不做
+            # dataclasses.replace）。
+            if box_override:
+                box_config = _dc_replace(
+                    config,
+                    base_pitch=box_override.get("base_pitch", config.base_pitch),
+                    refine_pitch=box_override.get("auto_note_pitch", config.refine_pitch),
+                    export_pitch_line=box_override.get("export_pitch_line", config.export_pitch_line),
+                    f0_method=box_override.get("f0_method", config.f0_method),
+                    f0_device=box_override.get("f0_device", config.f0_device),
+                    crepe_model=box_override.get("crepe_model", config.crepe_model),
+                    use_double_precision=box_override.get("use_double_precision", config.use_double_precision),
+                    f0_smooth=box_override.get("f0_smooth", config.f0_smooth),
+                    f0_smooth_window=box_override.get("f0_smooth_window", config.f0_smooth_window),
+                    vsqx_pitch_smooth_window=box_override.get("vsqx_pitch_smooth_window", config.vsqx_pitch_smooth_window),
+                    f0_floor=box_override.get("f0_floor", config.f0_floor),
+                    f0_ceil=box_override.get("f0_ceil", config.f0_ceil),
+                )
+            else:
+                box_config = config
 
             box_result: Dict = {"index": idx}
 
@@ -810,7 +847,7 @@ class AudioProcessingPipeline:
                 else:
                     # ── 无 LAB/MIDI：走对齐后端（仅 "full" 模式会走到这里，
                     #    "project-only" 模式已在前面被跳过）──────────────────
-                    text_optional = aligner_backend in ("whisperx", "qwen3_asr")
+                    text_optional = box_aligner_backend in ("whisperx", "qwen3_asr")
                     if not text and not text_optional:
                         box_result.update(
                             status="failed",
@@ -823,10 +860,10 @@ class AudioProcessingPipeline:
 
                     audio_adapter = _LocalFileAdapter(wav_path_final)
                     align_result = _run_alignment(
-                        audio_adapter, text, language, aligner_backend,
+                        audio_adapter, text, box_language, box_aligner_backend,
                         f0_device, whisperx_model,
                         whisperx_batch_size=whisperx_batch_size,
-                        english_word_align=english_word_align,
+                        english_word_align=box_english_word_align,
                         nemo_model=nemo_model,
                         aligner_device=aligner_device,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
@@ -854,6 +891,14 @@ class AudioProcessingPipeline:
                     "lab_path": lab_path_final,
                     "midi_path": midi_path_final,
                     "original_text": text,
+                    # ── 该对话框自己的有效设置（覆盖值或回退后的全局值），
+                    # 供 build_multitrack_project 按每个音轨独立应用词典/
+                    # 单词映射/音素转换/F0 配置，而不是整批统一一份。────
+                    "config": box_config,
+                    "language": box_language,
+                    "word_phoneme_map": box_word_phoneme_map,
+                    "dict_source": box_dict_source,
+                    "phoneme_mode": box_phoneme_mode,
                 })
 
                 box_result.update(

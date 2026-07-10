@@ -82,6 +82,116 @@ def _normalize_dict_source(raw: str) -> str:
         pass
     return "default"
 
+
+def _parse_box_override(form, index: int) -> Optional[Dict]:
+    """
+    解析对话文本框批量处理里第 index 个对话框的"单独设置"覆盖值。
+
+    前端（DialogueBatch.vue 的"单独设置"弹窗）仅在该框开启了总开关
+    （override_enabled_{i} == "true"）时才提交具体字段；未开启或字段
+    完全缺失（如旧版前端）时返回 None，调用方应据此完全回退到整批
+    统一的全局设置，与该功能上线前的行为保持一致。
+
+    注意：不包含 bpm——BPM 决定整批对话框合并后的时间轴换算（每段的
+    起始位置 = 前面所有对话框真实音频时长之和，换算成 blick/tick 时
+    使用同一个 bpm），单独覆盖会破坏时间轴对齐，因此 BPM 恒定使用
+    全局设置，不接受每框覆盖（前端弹窗里也没有提供该字段）。
+
+    Returns
+    -------
+    Optional[Dict]：未开启覆盖时为 None；开启时返回校验/规范化后的字典，
+        字段命名与 process_dialogue_batch 里单个 box 需要的覆盖键一致，
+        便于调用方直接 dict.update / get 使用。
+    """
+    enabled = form.get(f"override_enabled_{index}", "false").lower() == "true"
+    if not enabled:
+        return None
+
+    aligner_backend = form.get(f"override_aligner_backend_{index}", "mfa")
+    if aligner_backend not in ("mfa", "whisperx", "qwen3_asr", "qwen3_aligner", "nemo_aligner"):
+        aligner_backend = "mfa"
+
+    language = form.get(f"override_language_{index}", "cmn")
+
+    english_word_align = form.get(f"override_english_word_align_{index}", "false").lower() == "true"
+    word_phoneme_map = form.get(f"override_word_phoneme_map_{index}", "false").lower() == "true"
+    if word_phoneme_map and language != "jpn":
+        # 与整批全局提交逻辑一致：开启单词映射音素时自动补上英语单词级
+        # 对齐，确保对齐阶段产出整词级 LAB，词典查词才有意义。
+        english_word_align = True
+
+    phoneme_mode = form.get(f"override_phoneme_mode_{index}", "none")
+    if phoneme_mode not in ("none", "merge", "hiragana", "katakana"):
+        phoneme_mode = "none"
+
+    dict_source = _normalize_dict_source(form.get(f"override_dict_source_{index}", "default"))
+
+    try:
+        base_pitch = int(form.get(f"override_base_pitch_{index}", 60))
+    except (TypeError, ValueError):
+        base_pitch = 60
+
+    auto_note_pitch = form.get(f"override_auto_note_pitch_{index}", "true").lower() == "true"
+    export_pitch_line = form.get(f"override_export_pitch_line_{index}", "true").lower() == "true"
+
+    f0_method = form.get(f"override_f0_method_{index}", "dio")
+    if f0_method not in ("dio", "harvest", "crepe", "rmvpe"):
+        f0_method = "dio"
+
+    f0_device = form.get(f"override_f0_device_{index}", "auto")
+    if f0_device not in ("auto", "cpu", "cuda"):
+        f0_device = "auto"
+
+    crepe_model = form.get(f"override_crepe_model_{index}", "full")
+    if crepe_model not in ("full", "tiny"):
+        crepe_model = "full"
+
+    precision = form.get(f"override_precision_{index}", "double")
+    use_double_precision = precision.lower() == "double"
+
+    f0_smooth = form.get(f"override_f0_smooth_{index}", "true").lower() == "true"
+
+    try:
+        f0_smooth_window = int(form.get(f"override_f0_smooth_window_{index}", 5))
+    except (TypeError, ValueError):
+        f0_smooth_window = 5
+
+    try:
+        vsqx_pitch_smooth_window = int(form.get(f"override_vsqx_pitch_smooth_window_{index}", 5))
+    except (TypeError, ValueError):
+        vsqx_pitch_smooth_window = 5
+
+    try:
+        f0_floor = float(form.get(f"override_f0_floor_{index}", 71.0))
+    except (TypeError, ValueError):
+        f0_floor = 71.0
+
+    try:
+        f0_ceil = float(form.get(f"override_f0_ceil_{index}", 800.0))
+    except (TypeError, ValueError):
+        f0_ceil = 800.0
+
+    return {
+        "aligner_backend": aligner_backend,
+        "language": language,
+        "english_word_align": english_word_align,
+        "word_phoneme_map": word_phoneme_map,
+        "phoneme_mode": phoneme_mode,
+        "dict_source": dict_source,
+        "base_pitch": base_pitch,
+        "auto_note_pitch": auto_note_pitch,
+        "export_pitch_line": export_pitch_line,
+        "f0_method": f0_method,
+        "f0_device": f0_device,
+        "crepe_model": crepe_model,
+        "use_double_precision": use_double_precision,
+        "f0_smooth": f0_smooth,
+        "f0_smooth_window": f0_smooth_window,
+        "vsqx_pitch_smooth_window": vsqx_pitch_smooth_window,
+        "f0_floor": f0_floor,
+        "f0_ceil": f0_ceil,
+    }
+
 mfa_is_running = False
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1582,6 +1692,12 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                 tts_info = box["tts"]
                 # 对齐辅助移调（半音）：每个对话框独立生效，未提交时默认 0。
                 box_align_pitch_shift_semitones = box.get("align_pitch_shift_semitones", 0.0)
+                # 该对话框的"单独设置"：TTS跟读固定使用 Qwen3-ForcedAligner
+                # （不支持覆盖 aligner_backend），但语言 / 英语单词级对齐仍
+                # 可按框覆盖，与"音频跟读"模式语义一致。
+                box_override = box.get("override") or {}
+                box_language = box_override.get("language", language)
+                box_english_word_align = box_override.get("english_word_align", english_word_align)
                 set_job(
                     job_id, status="running",
                     progress={"done": 0, "total": len(boxes)},
@@ -1596,9 +1712,9 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                     align_result = tts_processor.align_segments(
                         segments_dir=preview_segments_dir,
                         sentences=tts_info["preview_sentences"],
-                        language=language,
+                        language=box_language,
                         aligner_device=aligner_device,
-                        english_word_align=english_word_align,
+                        english_word_align=box_english_word_align,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                     )
                     shutil.rmtree(preview_segments_dir, ignore_errors=True)
@@ -1624,7 +1740,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                     # 没有先手动预览（或预览已过期）：先合成分句音频，再
                     # 整体交给 Qwen3-FA 对齐，一次做完。
                     tts_result = tts_processor.synthesize_and_align(
-                        text=tts_info.get("text", ""), language=language,
+                        text=tts_info.get("text", ""), language=box_language,
                         voice=tts_info.get("voice", ""),
                         engine=tts_info.get("engine", "") or tts_processor.DEFAULT_ENGINE,
                         work_dir=str(WORK_DIR), stem=stem,
@@ -1632,7 +1748,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         volume=tts_info.get("volume", "+0%"),
                         pitch=tts_info.get("pitch", "+0Hz"),
                         aligner_device=aligner_device,
-                        english_word_align=english_word_align,
+                        english_word_align=box_english_word_align,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                     )
 
@@ -1747,6 +1863,21 @@ def dialogue_process():
         aligner_backend / word_phoneme_map / dict_source 等），对全部对话框统一生效。
         input_mode="tts" 时对齐固定使用 Qwen3-ForcedAligner，aligner_backend
         字段会被忽略。
+      - override_enabled_{i}  : 第 i 个对话框是否开启"单独设置"（"true"/"false"，
+                          默认 "false"）。开启时，下列 override_* 字段会覆盖该框
+                          自己的对齐后端/语言/词典/音素转换/F0 等设置，其余对话框
+                          不受影响，仍使用上面整批统一的全局参数。不支持覆盖 bpm
+                          （BPM 决定整批对话框合并后的时间轴换算，必须全局统一）。
+      - override_aligner_backend_{i} / override_language_{i} /
+        override_english_word_align_{i} / override_word_phoneme_map_{i} /
+        override_phoneme_mode_{i} / override_dict_source_{i} /
+        override_base_pitch_{i} / override_auto_note_pitch_{i} /
+        override_export_pitch_line_{i} / override_f0_method_{i} /
+        override_f0_device_{i} / override_crepe_model_{i} / override_precision_{i} /
+        override_f0_smooth_{i} / override_f0_smooth_window_{i} /
+        override_vsqx_pitch_smooth_window_{i} / override_f0_floor_{i} /
+        override_f0_ceil_{i} : 仅在 override_enabled_{i}="true" 时读取，字段语义
+                          与同名的整批全局参数一致。
     """
     try:
         box_count = int(request.form.get("box_count", 0))
@@ -1869,6 +2000,14 @@ def dialogue_process():
                 request.form.get(f"align_pitch_shift_{i}", 0)
             )
 
+            # 该对话框的"单独设置"覆盖值（对齐后端/语言/英语单词级对齐/
+            # 词典/音素转换/高级设置，不含 BPM）；未开启时为 None。提前到
+            # 这里解析（而不是等到循环末尾）是因为下面 TTS 预览复用校验
+            # 需要该框的有效语言（box_override 里的 language，未开启覆盖
+            # 时才回退到整批统一的 language）来判断能否复用已生成的预览。
+            box_override = _parse_box_override(request.form, i)
+            box_effective_language = (box_override or {}).get("language", language)
+
             audio_path = None
             lab_path = None
             midi_path = None
@@ -1898,11 +2037,15 @@ def dialogue_process():
                     # 任务对这一框只需要做对齐；否则（没点过预览 / 点完
                     # 预览后又改了文本或参数）退回"先合成再对齐"的完整
                     # 流程——与 /api/tts/process 的单文件复用逻辑一致。
+                    # 注意：这里用 box_effective_language（该框自己的有效
+                    # 语言）而不是整批统一的 language 做匹配——若该框单独
+                    # 设置了不同的语言，用全局 language 比对会永远不匹配，
+                    # 导致预览被误判为"参数已变化"而白白重新合成一遍。
                     box_preview_id = request.form.get(f"tts_preview_id_{i}", "").strip()
                     box_preview_entry = _tts_preview_take(box_preview_id, {
                         "text": tts_text, "engine": tts_engine_i, "voice": tts_voice,
                         "rate": tts_rate_i, "volume": tts_volume_i, "pitch": tts_pitch_i,
-                        "language": language,
+                        "language": box_effective_language,
                     }) if box_preview_id else None
                     if box_preview_entry:
                         tts_info["preview_segments_dir"] = box_preview_entry["segments_dir"]
@@ -1949,6 +2092,9 @@ def dialogue_process():
             if mid_file is not None and mid_file.filename:
                 _save_midi(mid_file)
 
+            # 该对话框的"单独设置"覆盖值已在本次循环开头解析好（box_override /
+            # box_effective_language），此处直接复用，避免重复解析同一批表单字段。
+
             boxes.append({
                 "index": i,
                 "text": text,
@@ -1957,6 +2103,7 @@ def dialogue_process():
                 "midi_path": midi_path,
                 "tts": tts_info,
                 "align_pitch_shift_semitones": box_align_pitch_shift_semitones,
+                "override": box_override,
             })
 
         if input_mode == "tts":
