@@ -886,6 +886,27 @@ def strip_stray_symbols(text: str) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# 对外入口（新增）：连字符转空格
+#   常见于英文歌词/TTS 逐字对齐场景里用 "-" 连接音节或单词（如
+#   "gon-na"、"good-bye"），朗读/合成时希望当作空格断开而不是保留连字符。
+#   半角 "-" 与全角 "－" 都视为连字符，统一替换为一个空格；替换后同一行
+#   内可能出现的多余空格按其它优化按钮的惯例一并清理。
+# ═════════════════════════════════════════════════════════════════════════
+
+_HYPHEN_RE = re.compile(r"[-－]")
+
+
+def hyphen_to_space(text: str) -> str:
+    """把文本中的连字符（半角 "-" / 全角 "－"）替换为空格。"""
+    if not text:
+        return text
+    spaced = _HYPHEN_RE.sub(" ", text)
+    lines = spaced.split("\n")
+    cleaned_lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in lines]
+    return "\n".join(cleaned_lines)
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # 对外入口（新增）：按标点插入换行
 #   三个按钮共用同一套"句末标点识别 + 保留标点本身、只在标点后插入换行"
 #   的实现，唯一的区别是识别哪一组标点、以及"每几句"的分组大小：
@@ -1008,6 +1029,7 @@ _ACTIONS_NO_LANG = {
     "strip_symbols": strip_stray_symbols,         # 优化文本：去除多余符号（与语种无关）
     "newline_after_comma": newline_after_comma,   # 优化文本：按逗号插入换行（与语种无关）
     "newline_after_period": newline_after_period, # 优化文本：按句号插入换行（与语种无关）
+    "hyphen_to_space": hyphen_to_space,           # 优化文本：连字符转空格（与语种无关）
 }
 
 
@@ -1019,7 +1041,7 @@ def process_text(text: str, action: str, language: str = "zh", n: int = 2) -> Di
     text: 待处理文本（仅处理这一段文本本身，不涉及任何文件/其它后端）。
     action: "smart" | "number_only" | "digit_to_words" | "symbol_only" |
       "add_spaces" | "strip_symbols" | "newline_after_comma" |
-      "newline_after_period" | "newline_every_n"
+      "newline_after_period" | "newline_every_n" | "hyphen_to_space"
     language: 语言代码（cmn/yue/eng/jpn/kor 或 zh/en/ja/ko），仅 smart /
       number_only / digit_to_words / symbol_only 需要，其余 action 与语种
       无关。
