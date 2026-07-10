@@ -28,6 +28,14 @@
                     <el-icon><Setting /></el-icon>
                     <span>{{ t('menu.settings') }}</span>
                   </el-dropdown-item>
+                  <el-dropdown-item command="help" divided :class="{ 'is-active-route': currentRouteName === 'help' }">
+                    <el-icon><QuestionFilled /></el-icon>
+                    <span>{{ t('menu.help') }}</span>
+                  </el-dropdown-item>
+                  <el-dropdown-item command="about" :class="{ 'is-active-route': currentRouteName === 'about' }">
+                    <el-icon><InfoFilled /></el-icon>
+                    <span>{{ t('menu.about') }}</span>
+                  </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -84,7 +92,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Menu, House, Notebook, Setting, ChatDotRound } from '@element-plus/icons-vue'
+import { Menu, House, Notebook, Setting, ChatDotRound, QuestionFilled, InfoFilled } from '@element-plus/icons-vue'
 import { getElementPlusLocale, useAppLocale } from './i18n'
 import { useI18n } from 'vue-i18n'
 

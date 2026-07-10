@@ -23,6 +23,16 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../components/DialogueBatch.vue'),
   },
   {
+    path: '/about',
+    name: 'about',
+    component: () => import('../components/AboutPage.vue'),
+  },
+  {
+    path: '/help',
+    name: 'help',
+    component: () => import('../components/HelpPage.vue'),
+  },
+  {
     // 未知路径统一回退到主页（对齐处理页）
     path: '/:pathMatch(.*)*',
     redirect: '/',

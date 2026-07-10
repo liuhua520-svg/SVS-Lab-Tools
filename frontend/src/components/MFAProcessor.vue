@@ -245,8 +245,8 @@
         </el-dialog>
 
         <!-- "优化文本"弹窗：智能转换 / 仅转换（数字）/ 逐字转换（数字）/
-             仅转换符号 / 英文加空格 / 去除多余符号 / 按逗号插入换行 /
-             按句号插入换行 / 按每几句插入换行，全部只在弹窗内的这份文本
+             仅转换符号 / 英文加空格 / 去除多余符号 / 连字符转空格 /
+             按逗号插入换行 / 按句号插入换行 / 按每几句插入换行，全部只在弹窗内的这份文本
              副本上生效；点击"应用"才会写回打开弹窗时指定的那个文本框，
              不点"应用"直接关闭则不影响原文本。与 pipeline.py /
              text_processor.py 的其它转换规则完全独立，只调用
@@ -277,6 +277,9 @@
             <el-button size="small" :loading="textOptimizer.loading === 'strip_symbols'" @click="runTextOptimize('strip_symbols')">
               🧹 {{ t('processor.textOptimizeStripSymbols') }}
             </el-button>
+            <el-button size="small" :loading="textOptimizer.loading === 'hyphen_to_space'" @click="runTextOptimize('hyphen_to_space')">
+              ➖ {{ t('processor.textOptimizeHyphenToSpace') }}
+            </el-button>
             <el-button size="small" :loading="textOptimizer.loading === 'newline_after_comma'" @click="runTextOptimize('newline_after_comma')">
               ↩️ {{ t('processor.textOptimizeNewlineAfterComma') }}
             </el-button>
@@ -305,6 +308,60 @@
           <template #footer>
             <el-button @click="textOptimizer.visible = false">{{ t('processor.textOptimizeCancel') }}</el-button>
             <el-button type="primary" @click="applyTextOptimize">{{ t('processor.textOptimizeApply') }}</el-button>
+          </template>
+        </el-dialog>
+
+        <!-- "查找替换"弹窗：与"优化文本"弹窗完全同构——弹窗内编辑的是 draft
+             副本，点击"应用"才写回打开弹窗时指定的那个文本框，不点"应用"
+             直接关闭则不影响原文本。纯前端字符串/正则替换，不调用任何
+             后端接口。支持"区分大小写""正则表达式"两个开关，以及"查找
+             下一个""替换""全部替换"三个操作，与 Ctrl+H 的行为对齐。 -->
+        <el-dialog v-model="findReplace.visible" :title="t('processor.findReplace')" width="640px">
+          <el-input
+            ref="findReplaceTextareaRef"
+            v-model="findReplace.draft"
+            type="textarea"
+            :rows="10"
+            :placeholder="t('processor.textOptimizePlaceholder')"
+          />
+          <div class="text-optimize-toolbar" style="margin-top: 12px">
+            <el-input
+              v-model="findReplace.find"
+              :placeholder="t('processor.findReplaceFindPlaceholder')"
+              style="flex: 1; min-width: 200px"
+              size="small"
+            />
+            <el-input
+              v-model="findReplace.replace"
+              :placeholder="t('processor.findReplaceReplacePlaceholder')"
+              style="flex: 1; min-width: 200px"
+              size="small"
+            />
+          </div>
+          <div class="text-optimize-toolbar" style="margin-top: 8px; align-items: center">
+            <el-checkbox v-model="findReplace.caseSensitive">{{ t('processor.findReplaceCaseSensitive') }}</el-checkbox>
+            <el-checkbox v-model="findReplace.useRegex">{{ t('processor.findReplaceUseRegex') }}</el-checkbox>
+            <span style="margin-left: auto; font-size: 13px; color: var(--el-text-color-secondary)">
+              {{ t('processor.findReplaceMatchCount', { count: findReplaceMatchCount }) }}
+            </span>
+          </div>
+          <div class="text-optimize-toolbar" style="margin-top: 8px">
+            <el-button size="small" :disabled="!findReplace.find" @click="findReplaceNext">
+              ⏭️ {{ t('processor.findReplaceFindNext') }}
+            </el-button>
+            <el-button size="small" :disabled="!findReplace.find" @click="runFindReplaceOne">
+              🔁 {{ t('processor.findReplaceOne') }}
+            </el-button>
+            <el-button size="small" :disabled="!findReplace.find" @click="runFindReplaceAll">
+              🔁 {{ t('processor.findReplaceAll') }}
+            </el-button>
+          </div>
+          <div v-if="findReplace.error" style="margin-top: 8px">
+            <el-text type="danger" size="small">{{ findReplace.error }}</el-text>
+          </div>
+          <template #footer>
+            <el-button @click="findReplace.visible = false">{{ t('processor.textOptimizeCancel') }}</el-button>
+            <el-button type="primary" @click="applyFindReplace">{{ t('processor.textOptimizeApply') }}</el-button>
           </template>
         </el-dialog>
 
@@ -541,6 +598,9 @@
 		  <div style="margin-top: 6px">
 			<el-button size="small" @click="openTextOptimizer(formData, 'text')">
 			  🛠️ {{ t('processor.textOptimize') }}
+			</el-button>
+			<el-button size="small" @click="openFindReplace(formData, 'text')">
+			  🔍 {{ t('processor.findReplace') }}
 			</el-button>
 		  </div>
 
@@ -1180,7 +1240,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, InfoFilled } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
@@ -1388,6 +1448,148 @@ const applyTextOptimize = () => {
     textOptimizer.value.target[textOptimizer.value.field] = textOptimizer.value.draft
   }
   textOptimizer.value.visible = false
+}
+
+// ── "查找替换"弹窗（类似 Ctrl+H）：与"优化文本"弹窗共用同一套"draft 副本 +
+// 应用才写回"的模式，但纯前端字符串/正则替换，不经过任何后端接口。
+// caseSensitive 控制是否区分大小写，useRegex 控制"查找"内容是否作为正则
+// 表达式解析（此时"替换为"支持 $1 $2 等捕获组引用）。cursor 记录"查找
+// 下一个"/"替换"时上一次匹配结束的位置，用于循环定位与逐个替换。 ──
+interface FindReplaceState {
+  visible: boolean
+  draft: string
+  find: string
+  replace: string
+  caseSensitive: boolean
+  useRegex: boolean
+  target: Record<string, any> | null
+  field: string
+  error: string
+  cursor: number
+}
+
+const findReplace = ref<FindReplaceState>({
+  visible: false, draft: '', find: '', replace: '', caseSensitive: false, useRegex: false,
+  target: null, field: 'text', error: '', cursor: 0,
+})
+// el-input 组件实例的模板引用，用于"查找下一个"时定位并选中 textarea
+// 内的匹配文本；el-input 把内部原生 <textarea> 暴露在 .textarea 属性上
+// （视 Element Plus 版本而定，这里做兼容性兜底）。
+const findReplaceTextareaRef = ref<any>(null)
+
+const openFindReplace = (target: Record<string, any>, field: string) => {
+  findReplace.value = {
+    visible: true,
+    draft: target[field] || '',
+    find: '',
+    replace: '',
+    caseSensitive: false,
+    useRegex: false,
+    target,
+    field,
+    error: '',
+    cursor: 0,
+  }
+}
+
+// 根据当前"正则表达式"/"区分大小写"开关构造一个全局匹配用的 RegExp；
+// 非正则模式下先对查找字符串做转义，避免用户输入的 . * ( 等符号被
+// 误当作正则特殊字符。构造失败（比如用户输入了不合法的正则）时返回
+// null 并把错误信息写入 findReplace.error。
+const buildFindRegex = (): RegExp | null => {
+  findReplace.value.error = ''
+  const raw = findReplace.value.find
+  if (!raw) return null
+  try {
+    const flags = findReplace.value.caseSensitive ? 'g' : 'gi'
+    const pattern = findReplace.value.useRegex ? raw : raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return new RegExp(pattern, flags)
+  } catch (e: any) {
+    findReplace.value.error = t('processor.findReplaceInvalidRegex', { msg: e?.message || String(e) })
+    return null
+  }
+}
+
+// 弹窗内实时显示的匹配数量，随 draft / find / caseSensitive / useRegex
+// 任一变化自动重新计算。
+const findReplaceMatchCount = computed<number>(() => {
+  const re = buildFindRegex()
+  if (!re) return 0
+  const matches = findReplace.value.draft.match(re)
+  return matches ? matches.length : 0
+})
+
+// "查找下一个"：不修改文本，只是把光标移动到 textarea 内下一处匹配并
+// 选中，方便用户在替换前先确认位置；到达末尾后回到开头循环查找。
+const findReplaceNext = () => {
+  const re = buildFindRegex()
+  if (!re) return
+  const text = findReplace.value.draft
+  re.lastIndex = findReplace.value.cursor
+  let m = re.exec(text)
+  if (!m) {
+    re.lastIndex = 0
+    m = re.exec(text)
+  }
+  if (!m) {
+    findReplace.value.error = t('processor.findReplaceNotFound')
+    return
+  }
+  findReplace.value.cursor = m.index + m[0].length
+  const matchStart = m.index
+  const matchEnd = m.index + m[0].length
+  nextTick(() => {
+    const inst = findReplaceTextareaRef.value
+    const el: HTMLTextAreaElement | null = inst?.textarea || inst?.$el?.querySelector?.('textarea') || null
+    if (el) {
+      el.focus()
+      el.setSelectionRange(matchStart, matchEnd)
+    }
+  })
+}
+
+// 只替换当前光标所在的下一处匹配（相当于 Ctrl+H 里的"替换"单次按钮），
+// 替换后 cursor 停在替换结果之后，方便连续点击逐个替换。
+const runFindReplaceOne = () => {
+  const re = buildFindRegex()
+  if (!re) return
+  const text = findReplace.value.draft
+  re.lastIndex = findReplace.value.cursor
+  let m = re.exec(text)
+  if (!m) {
+    re.lastIndex = 0
+    m = re.exec(text)
+  }
+  if (!m) {
+    findReplace.value.error = t('processor.findReplaceNotFound')
+    return
+  }
+  const replacement = findReplace.value.useRegex
+    ? m[0].replace(new RegExp(re.source, re.flags.replace('g', '')), findReplace.value.replace)
+    : findReplace.value.replace
+  findReplace.value.draft = text.slice(0, m.index) + replacement + text.slice(m.index + m[0].length)
+  findReplace.value.cursor = m.index + replacement.length
+}
+
+// 全部替换（Ctrl+H 里的"全部替换"）：一次性替换 draft 内所有匹配项。
+const runFindReplaceAll = () => {
+  const re = buildFindRegex()
+  if (!re) return
+  const before = findReplace.value.draft
+  const after = before.replace(re, findReplace.value.replace)
+  if (before === after) {
+    findReplace.value.error = t('processor.findReplaceNotFound')
+    return
+  }
+  findReplace.value.draft = after
+  findReplace.value.cursor = 0
+}
+
+const applyFindReplace = () => {
+  if (findReplace.value.target) {
+    findReplace.value.target[findReplace.value.field] = findReplace.value.draft
+  }
+  findReplace.value.visible = false
 }
 
 // ── 手动分段预览：由"生成预览"按钮触发，按新分段规则（优先按换行分段，
