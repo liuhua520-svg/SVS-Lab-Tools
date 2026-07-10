@@ -1444,13 +1444,82 @@ const findReplaceNext = () => {
   findReplace.value.cursor = m.index + m[0].length
   const matchStart = m.index
   const matchEnd = m.index + m[0].length
-  nextTick(() => {
+  focusAndSelectInFindReplaceTextarea(matchStart, matchEnd)
+}
+
+// 统一的"聚焦并选中 textarea 内一段文本"逻辑，供"查找下一个""替换"
+// "全部替换"共用。之所以单独抽出来，是因为 el-dialog 自带 focus-trap：
+// 弹窗打开时会持续管理焦点，如果只用一次 nextTick() 就调用
+// el.focus() + setSelectionRange()，焦点很可能在紧接着的下一帧被
+// dialog 的 focus-trap 抢回去（表现为选区仍然存在，但因为 textarea
+// 已经 blur，浏览器不会渲染蓝色高亮，看起来像"完全没定位到"）。
+// 这里用 requestAnimationFrame 再等一帧、并在下一次事件循环里二次
+// 补上 focus + setSelectionRange，覆盖 dialog 抢焦点的情况。
+//
+// setSelectionRange 本身只设置选区，不会滚动 textarea 让选区可见——
+// 如果匹配文本不在当前可视区域内（文本较长、匹配在后面几屏），选区
+// 虽然生效但用户完全看不到、也不会自动滚过去。原生 textarea 没有
+// "滚动到某字符位置"的 API，这里用一个隐藏的镜像 div 复刻 textarea
+// 的字体/换行/内边距，把镜像 div 里对应位置的 offsetTop 当作滚动目标，
+// 尽量把匹配行滚动到可视区域中间。
+const scrollTextareaToSelection = (el: HTMLTextAreaElement, start: number) => {
+  const mirror = document.createElement('div')
+  const style = window.getComputedStyle(el)
+  const propsToCopy = [
+    'boxSizing', 'width', 'fontFamily', 'fontSize', 'fontWeight', 'fontStyle',
+    'letterSpacing', 'lineHeight', 'paddingTop', 'paddingRight', 'paddingBottom',
+    'paddingLeft', 'borderTopWidth', 'borderRightWidth', 'borderBottomWidth',
+    'borderLeftWidth', 'whiteSpace', 'wordWrap', 'wordBreak', 'tabSize',
+  ] as const
+  propsToCopy.forEach((prop) => {
+    ;(mirror.style as any)[prop] = style[prop as any]
+  })
+  mirror.style.position = 'absolute'
+  mirror.style.visibility = 'hidden'
+  mirror.style.whiteSpace = 'pre-wrap'
+  mirror.style.wordWrap = 'break-word'
+  mirror.style.height = 'auto'
+  mirror.style.overflow = 'hidden'
+  mirror.style.top = '0'
+  mirror.style.left = '-9999px'
+
+  const text = el.value
+  const before = text.slice(0, start)
+  const marker = document.createElement('span')
+  marker.textContent = '\u200b' // 零宽字符占位，避免影响换行计算
+  mirror.appendChild(document.createTextNode(before))
+  mirror.appendChild(marker)
+  mirror.appendChild(document.createTextNode(text.slice(start) || '\u200b'))
+
+  document.body.appendChild(mirror)
+  const markerTop = marker.offsetTop
+  const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2 || 20
+  document.body.removeChild(mirror)
+
+  // 把匹配所在行滚动到 textarea 可视区域的中间，而不是贴边，避免匹配
+  // 行刚好卡在边缘不易察觉。
+  const targetScrollTop = markerTop - el.clientHeight / 2 + lineHeight / 2
+  el.scrollTop = Math.max(0, targetScrollTop)
+}
+
+const focusAndSelectInFindReplaceTextarea = (start: number, end: number) => {
+  const doFocusSelect = () => {
     const inst = findReplaceTextareaRef.value
-    const el: HTMLTextAreaElement | null = inst?.textarea || inst?.$el?.querySelector?.('textarea') || null
+    const el: HTMLTextAreaElement | null =
+      inst?.textarea || inst?.input || inst?.$el?.querySelector?.('textarea') || inst?.$el?.querySelector?.('input') || null
     if (el) {
       el.focus()
-      el.setSelectionRange(matchStart, matchEnd)
+      el.setSelectionRange(start, end)
+      scrollTextareaToSelection(el, start)
     }
+    return el
+  }
+  nextTick(() => {
+    doFocusSelect()
+    // 再等一帧，覆盖 el-dialog focus-trap 抢焦点导致选区不可见的情况
+    requestAnimationFrame(() => {
+      doFocusSelect()
+    })
   })
 }
 
@@ -1475,6 +1544,8 @@ const runFindReplaceOne = () => {
     : findReplace.value.replace
   findReplace.value.draft = text.slice(0, m.index) + replacement + text.slice(m.index + m[0].length)
   findReplace.value.cursor = m.index + replacement.length
+  // 替换后选中刚刚替换出来的新文本，让用户能直接看到这次替换发生在哪
+  focusAndSelectInFindReplaceTextarea(m.index, m.index + replacement.length)
 }
 
 // 全部替换（Ctrl+H 里的"全部替换"）：一次性替换 draft 内所有匹配项。
@@ -1489,6 +1560,9 @@ const runFindReplaceAll = () => {
   }
   findReplace.value.draft = after
   findReplace.value.cursor = 0
+  // 全部替换后没有单一"匹配位置"可选中，这里只是把焦点还给 textarea，
+  // 光标放在开头，方便用户继续编辑或核对结果。
+  focusAndSelectInFindReplaceTextarea(0, 0)
 }
 
 const applyFindReplace = () => {
