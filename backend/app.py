@@ -36,6 +36,8 @@ import dictionary_manager
 import app_settings
 import tts_processor
 import text_processor
+import subtitle_processor
+import subtitle_import
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,6 +60,22 @@ def _parse_align_pitch_shift(raw) -> float:
     if v != v:  # NaN
         return 0.0
     return max(-24.0, min(24.0, v))
+
+
+def _decode_subtitle_text(raw: bytes) -> str:
+    """
+    解码上传的 SRT/LRC 字幕文件字节流。多数字幕文件是 UTF-8（含/不含
+    BOM），但仍有相当一部分老字幕（尤其国内翻译组产出的 SRT）是 GBK/GB18030
+    编码，直接按 UTF-8 解码会抛异常或产出乱码——依次尝试 utf-8-sig →
+    utf-8 → gb18030，都失败则用 utf-8 + errors="replace" 兜底，保证至少
+    不会 500，只是极端情况下个别字符显示为替换符。
+    """
+    for enc in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 def _normalize_dict_source(raw: str) -> str:
@@ -212,6 +230,11 @@ from datetime import datetime
 
 JOB_LOCK = Lock()
 JOBS = {}
+
+# 「导入字幕」批量拆分会话：session_id -> {"dir": str, "slices": [wav_path, ...]}
+# 生命周期很短（用户拆分后立刻在前端下载各切片、随后调用 /cleanup 删除），
+# 不需要像 JOBS 那样做状态轮询，纯粹是切片路径的登记表。
+SUBTITLE_IMPORT_SESSIONS: Dict[str, Dict] = {}
 
 def set_job(job_id: str, **kwargs):
     with JOB_LOCK:
@@ -2824,6 +2847,703 @@ def clear_work_dir():
         
     except Exception as e:
         logger.error("清空工作目录失败: %s", e, exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# =====================================================================
+# 字幕识别（视频/音频 → 逐句字幕，独立于 MFA 对齐管线）
+# =====================================================================
+
+SUBTITLE_DIR = (WORK_DIR / "subtitles").resolve()
+SUBTITLE_DIR.mkdir(parents=True, exist_ok=True)
+
+# 字幕任务不复用 JOBS（避免与对齐任务的 job_id 空间混在一起、互相误清理），
+# 单独一份内存字典，生命周期与主进程一致，足够覆盖"上传→识别→下载"这类
+# 短会话场景。
+_SUBTITLE_JOBS: Dict[str, dict] = {}
+_SUBTITLE_JOBS_LOCK = Lock()
+
+
+def _set_subtitle_job(job_id: str, **kwargs):
+    with _SUBTITLE_JOBS_LOCK:
+        _SUBTITLE_JOBS[job_id] = {**_SUBTITLE_JOBS.get(job_id, {}), **kwargs}
+
+
+def _get_subtitle_job(job_id: str):
+    with _SUBTITLE_JOBS_LOCK:
+        return _SUBTITLE_JOBS.get(job_id)
+
+
+@app.route("/api/subtitle/status", methods=["GET"])
+def subtitle_status():
+    """
+    字幕功能依赖检查：ffmpeg 是否可用 + Qwen3-ASR 独立服务是否在线。
+    前端进入字幕页面时先调用一次，据此展示"未就绪"提示，避免用户上传
+    大文件后才发现依赖缺失。
+    """
+    ffmpeg_ok, ffmpeg_msg = subtitle_processor.check_ffmpeg_available()
+    from alt_aligners import Qwen3ASRAligner
+    qwen_ok, qwen_msg = Qwen3ASRAligner.check_available()
+    return jsonify({
+        "success": True,
+        "ffmpeg": {"available": ffmpeg_ok, "message": ffmpeg_msg},
+        "qwen3_asr": {"available": qwen_ok, "message": qwen_msg},
+        "ready": ffmpeg_ok and qwen_ok,
+    }), 200
+
+
+@app.route("/api/subtitle/upload", methods=["POST"])
+def subtitle_upload():
+    """
+    上传视频/音频文件，仅保存到字幕专用工作目录，不在这里做任何识别。
+    返回的 media_id 供后续 /api/subtitle/recognize 引用；同时返回一个
+    可直接用于 <video>/<audio> 标签播放的相对 URL。
+    """
+    try:
+        f = request.files.get("file")
+        if not f or not f.filename:
+            return jsonify({"success": False, "error": "未提供文件"}), 400
+
+        ext = Path(f.filename).suffix.lower()
+        if ext not in (subtitle_processor.VIDEO_EXTS | subtitle_processor.AUDIO_EXTS):
+            return jsonify({
+                "success": False,
+                "error": f"不支持的文件类型: {ext or '（无扩展名）'}",
+            }), 400
+
+        media_id = uuid.uuid4().hex
+        media_dir = SUBTITLE_DIR / media_id
+        media_dir.mkdir(parents=True, exist_ok=True)
+
+        stem = sanitize_stem(f.filename)
+        saved_name = f"{stem}{ext}"
+        saved_path = media_dir / saved_name
+        f.save(str(saved_path))
+
+        is_video = subtitle_processor.is_video_file(str(saved_path))
+
+        try:
+            duration = subtitle_processor.probe_duration_sec(str(saved_path))
+        except Exception as e:
+            logger.warning(f"读取媒体时长失败（不影响后续识别）: {e}")
+            duration = None
+
+        return jsonify({
+            "success": True,
+            "media_id": media_id,
+            "filename": f.filename,
+            "is_video": is_video,
+            "duration": duration,
+            "play_url": f"/api/subtitle/media/{media_id}/{quote(saved_name)}",
+        }), 200
+
+    except Exception as e:
+        logger.error(f"字幕媒体上传失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/subtitle/media/<media_id>/<path:filename>", methods=["GET"])
+def subtitle_media_serve(media_id: str, filename: str):
+    """
+    提供已上传媒体文件的播放访问（<video>/<audio> 标签直接用这个 URL 作为
+    src）。Flask 开发服务器不支持 HTTP Range 分块，大视频快进体验一般，
+    但满足"上传后本地预览校对字幕"这个用途已经足够。
+    """
+    try:
+        media_dir = (SUBTITLE_DIR / media_id).resolve()
+        if not str(media_dir).startswith(str(SUBTITLE_DIR)):
+            return jsonify({"error": "无权访问"}), 403
+        file_path = (media_dir / filename).resolve()
+        if not str(file_path).startswith(str(media_dir)) or not file_path.is_file():
+            return jsonify({"error": "文件不存在"}), 404
+        return send_from_directory(str(file_path.parent), file_path.name)
+    except Exception as e:
+        logger.error(f"字幕媒体访问失败: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/subtitle/recognize", methods=["POST"])
+def subtitle_recognize():
+    """
+    异步启动字幕识别任务。body（JSON）：
+      - media_id           : /api/subtitle/upload 返回的媒体 ID（必填）
+      - language           : 语言代码，"auto" 或 zh/en/ja/... 等（默认 "auto"，
+                              对应 Qwen3-ASR 自动语言检测）
+      - device             : "auto"|"cpu"|"cuda"，转发给 qwen3_server.py（默认 "auto"）
+      - max_chars          : 单条字幕最大字符数，超过则按标点二次拆分（默认 34）
+      - allow_comma_split  : 是否把逗号/顿号也当作切分点（默认 False，
+                              只在句末标点处切）。开启后遇到逗号就切成
+                              下一条字幕，与长度无关
+      - remove_punctuation : 是否在识别结果中移除标点符号（默认 False）
+      - close_vad_gaps     : 是否开启"VAD 合并间隔"（默认 False）。开启后
+                              相邻两条字幕间只要静音间隙大于
+                              vad_gap_threshold_sec，就把这段间隙对半分
+                              配到中点（不论间隙多长，都是均分而非收紧
+                              到贴合），让两条字幕挨得更近，但不合并
+                              文本、不减少条目数
+      - vad_gap_threshold_sec : 触发这一处理的间隔下限（秒，默认 0.6）；
+                              间隔小于等于该值时保持原样不动
+
+    与 /api/pipeline/job/<job_id> 使用同一套"轮询进度"前端交互模式，但
+    走独立的 job 存储（/api/subtitle/job/<job_id>），避免和对齐任务混在
+    一起。
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        media_id = (data.get("media_id") or "").strip()
+        if not media_id:
+            return jsonify({"success": False, "error": "缺少 media_id"}), 400
+
+        media_dir = (SUBTITLE_DIR / media_id).resolve()
+        if not str(media_dir).startswith(str(SUBTITLE_DIR)) or not media_dir.is_dir():
+            return jsonify({"success": False, "error": "媒体不存在或已过期，请重新上传"}), 404
+
+        media_files = [p for p in media_dir.iterdir() if p.is_file()]
+        if not media_files:
+            return jsonify({"success": False, "error": "媒体目录为空，请重新上传"}), 404
+        src_path = media_files[0]
+
+        language = data.get("language", "auto")
+        device = data.get("device", "auto")
+        try:
+            max_chars = int(data.get("max_chars", subtitle_processor.MAX_SUBTITLE_CHARS))
+        except (TypeError, ValueError):
+            max_chars = subtitle_processor.MAX_SUBTITLE_CHARS
+        max_chars = max(8, min(max_chars, 120))
+        allow_comma_split = bool(data.get("allow_comma_split", False))
+        remove_punctuation = bool(data.get("remove_punctuation", False))
+        close_vad_gaps = bool(data.get("close_vad_gaps", False))
+        try:
+            vad_gap_threshold_sec = float(data.get("vad_gap_threshold_sec", 0.6))
+        except (TypeError, ValueError):
+            vad_gap_threshold_sec = 0.6
+        vad_gap_threshold_sec = max(0.05, min(vad_gap_threshold_sec, 5.0))
+
+        ffmpeg_ok, ffmpeg_msg = subtitle_processor.check_ffmpeg_available()
+        if not ffmpeg_ok:
+            return jsonify({"success": False, "error": ffmpeg_msg}), 400
+
+        job_id = uuid.uuid4().hex
+        _set_subtitle_job(
+            job_id,
+            status="running",
+            media_id=media_id,
+            progress={"done": 0, "total": 0, "stage": "extract"},
+        )
+
+        def _run():
+            try:
+                work_wav = media_dir / "_extracted_16k.wav"
+                if subtitle_processor.is_video_file(str(src_path)) or src_path.suffix.lower() != ".wav":
+                    subtitle_processor.extract_audio(str(src_path), str(work_wav))
+                else:
+                    work_wav = src_path
+
+                def _progress(done, total):
+                    _set_subtitle_job(
+                        job_id,
+                        status="running",
+                        progress={"done": done, "total": total, "stage": "recognize"},
+                    )
+
+                entries = subtitle_processor.transcribe_to_subtitles(
+                    str(work_wav),
+                    language=language,
+                    device=device,
+                    max_chars=max_chars,
+                    progress_cb=_progress,
+                    allow_comma_split=allow_comma_split,
+                    remove_punctuation=remove_punctuation,
+                    close_vad_gaps=close_vad_gaps,
+                    vad_gap_threshold_sec=vad_gap_threshold_sec,
+                )
+
+                _set_subtitle_job(
+                    job_id,
+                    status="done",
+                    result={
+                        "success": True,
+                        "entries": [e.to_dict() for e in entries],
+                        "count": len(entries),
+                    },
+                )
+            except Exception as e:
+                logger.error(f"字幕识别任务失败: {e}", exc_info=True)
+                _set_subtitle_job(job_id, status="failed", error=str(e))
+
+        Thread(target=_run, daemon=True).start()
+
+        return jsonify({"success": True, "job_id": job_id}), 200
+
+    except Exception as e:
+        logger.error(f"字幕识别启动失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/subtitle/job/<job_id>", methods=["GET"])
+def subtitle_job_status(job_id: str):
+    job = _get_subtitle_job(job_id)
+    if job is None:
+        return jsonify({"success": False, "error": "任务不存在或已过期"}), 404
+    return jsonify({"success": True, "job": job}), 200
+
+
+@app.route("/api/subtitle/export", methods=["POST"])
+def subtitle_export():
+    """
+    将前端当前编辑好的字幕条目导出为 SRT/LRC/TXT 文本，直接在响应体里
+    返回文本内容（字幕数据本就在前端内存中，不需要读写工作目录，前端
+    收到文本后用 Blob 方式触发浏览器下载即可）。
+
+    body（JSON）：
+      - entries : [{"start": 1.2, "end": 3.4, "text": "..."}, ...]
+      - format  : "srt" | "lrc" | "txt"
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        entries = data.get("entries") or []
+        fmt = (data.get("format") or "srt").lower()
+        if fmt not in subtitle_processor.EXPORTERS:
+            return jsonify({"success": False, "error": f"不支持的导出格式: {fmt}"}), 400
+        if not isinstance(entries, list) or not entries:
+            return jsonify({"success": False, "error": "没有可导出的字幕内容"}), 400
+
+        content = subtitle_processor.export_subtitles(entries, fmt)
+        return jsonify({"success": True, "format": fmt, "content": content}), 200
+
+    except Exception as e:
+        logger.error(f"字幕导出失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/subtitle/split_entry", methods=["POST"])
+def subtitle_split_entry():
+    """
+    把编辑区里的一条字幕手动拆成两条（"✂️ 拆分"按钮）。这条字幕此时可能
+    已经被用户编辑、合并过，早就没有识别阶段的逐字时间戳了，所以是无状态
+    的纯计算接口：前端把当前这一行的 start/end/text 传进来，后端按文本
+    标点/长度比例算出一个拆分点，返回两条新的 {start, end, text}，不涉及
+    磁盘或 job 状态（同 /api/subtitle/export 的"前端持有数据"模式）。
+
+    body（JSON）：
+      - start : 该条字幕当前开始时间（秒，必填）
+      - end   : 该条字幕当前结束时间（秒，必填，需大于 start）
+      - text  : 该条字幕当前文本（必填，允许为空字符串）
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        text = data.get("text", "")
+        try:
+            start = float(data.get("start"))
+            end = float(data.get("end"))
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "start/end 必须是数字"}), 400
+
+        if end <= start:
+            return jsonify({"success": False, "error": "end 必须大于 start"}), 400
+        if not isinstance(text, str):
+            return jsonify({"success": False, "error": "text 必须是字符串"}), 400
+
+        left, right = subtitle_processor.split_entry_manually(text, start, end)
+        return jsonify({"success": True, "left": left, "right": right}), 200
+
+    except Exception as e:
+        logger.error(f"字幕手动拆分失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/subtitle/cleanup", methods=["POST"])
+def subtitle_cleanup():
+    """
+    删除某个 media_id 对应的已上传媒体文件与中间产物，供前端在用户离开
+    字幕页面 / 主动清除时调用，避免上传的大体积视频长期占用磁盘。
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        media_id = (data.get("media_id") or "").strip()
+        if not media_id:
+            return jsonify({"success": False, "error": "缺少 media_id"}), 400
+        media_dir = (SUBTITLE_DIR / media_id).resolve()
+        if not str(media_dir).startswith(str(SUBTITLE_DIR)):
+            return jsonify({"success": False, "error": "无权访问"}), 403
+        if media_dir.is_dir():
+            shutil.rmtree(media_dir, ignore_errors=True)
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        logger.error(f"字幕媒体清理失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# =====================================================================
+# 字幕导入（SRT/LRC → 按时间轴切分音频 → 固定用 Qwen3-FA 逐句强制对齐）
+#   与 /api/subtitle/* （音频→字幕，ASR 方向）互为反向操作，独立成
+#   subtitle_import.py 模块，不复用/不影响 subtitle_processor.py 的
+#   识别流程。
+# =====================================================================
+
+@app.route("/api/subtitle-import/split", methods=["POST"])
+def subtitle_import_split():
+    """
+    「对话文本框批量处理」的"导入字幕"入口：上传一份完整音频 + 一份
+    SRT/LRC 字幕文件，后端按字幕时间轴把音频切成若干独立小 WAV（每条
+    字幕一个），返回可供前端逐个下载拼装成 DialogueBox 的清单——前端
+    随后把每个切片当作用户手动上传的 audio_{i}，文本作为 text_{i}，
+    像"文件夹导入"一样批量追加为多个对话框，仍然走现有
+    /api/dialogue/process（对齐后端固定选 Qwen3-ForcedAligner）。
+
+    请求为 multipart/form-data：
+      - audio_file    : 完整音频文件（必填）
+      - subtitle_file : .srt 或 .lrc 字幕文件（必填；.txt 按内容自动
+                        判断格式）
+
+    响应：
+      {
+        "success": true,
+        "session_id": str,        # 供 /api/subtitle-import/slice/<id>/<n> 下载切片
+        "cues": [{"index": int, "text": str, "start": float, "end": float}, ...],
+        "gap_count": int,         # 被跳过的静音间隙数量（不生成对话框）
+        "gap_total_sec": float,
+      }
+    """
+    try:
+        audio_file = request.files.get("audio_file")
+        subtitle_file = request.files.get("subtitle_file")
+        if not audio_file or not audio_file.filename:
+            return jsonify({"success": False, "error": "请上传完整音频文件"}), 400
+        if not subtitle_file or not subtitle_file.filename:
+            return jsonify({"success": False, "error": "请上传 SRT / LRC 字幕文件"}), 400
+
+        ok, msg = subtitle_processor.check_ffmpeg_available()
+        if not ok:
+            return jsonify({"success": False, "error": msg}), 400
+
+        session_id = uuid.uuid4().hex
+        session_dir = WORK_DIR / f"_subtitle_import_{session_id}"
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        audio_path = session_dir / sanitize_stem(audio_file.filename or "audio")
+        audio_path = audio_path.with_suffix(Path(audio_file.filename).suffix or ".wav")
+        audio_file.save(str(audio_path))
+
+        # 非 WAV 输入统一先转成 16k 单声道 WAV，切片 / 时长探测都基于这份
+        # 转换后的 WAV，避免原始容器格式（mp3/m4a 等）在 ffmpeg -ss 精确
+        # 切片时出现的时间戳误差。
+        if audio_path.suffix.lower() != ".wav":
+            wav_path = session_dir / "source.wav"
+            subtitle_processor.extract_audio(str(audio_path), str(wav_path))
+        else:
+            wav_path = audio_path
+
+        subtitle_bytes = subtitle_file.read()
+        subtitle_text = _decode_subtitle_text(subtitle_bytes)
+        audio_duration = subtitle_processor.probe_duration_sec(str(wav_path))
+
+        fmt, cues = subtitle_import.parse_subtitle_file(
+            subtitle_file.filename, subtitle_text, audio_duration_sec=audio_duration
+        )
+        if not cues:
+            shutil.rmtree(str(session_dir), ignore_errors=True)
+            return jsonify({"success": False, "error": f"未能从字幕文件（识别为 {fmt.upper()}）中解析出任何有效条目"}), 400
+
+        split_result = subtitle_import.build_dialogue_boxes(
+            str(wav_path), cues, work_dir=str(session_dir), stem_prefix="cue",
+            audio_duration_sec=audio_duration,
+        )
+        if not split_result.get("success"):
+            shutil.rmtree(str(session_dir), ignore_errors=True)
+            return jsonify({"success": False, "error": split_result.get("error", "字幕切分失败")}), 400
+
+        boxes = split_result["boxes"]
+        gap_segments = split_result["gap_segments"]
+
+        # 把切片路径登记到 job 存储里，供下载路由按 session_id + index 校验、
+        # 定位到磁盘文件；不复用 JOBS（那是异步任务状态，这里是纯同步的
+        # 一次性会话数据）。
+        SUBTITLE_IMPORT_SESSIONS[session_id] = {
+            "dir": str(session_dir),
+            "slices": [b["wav_path"] for b in boxes],
+        }
+
+        cues_payload = [
+            {"index": i, "text": b["text"], "start": b["start"], "end": b["end"]}
+            for i, b in enumerate(boxes)
+        ]
+        gap_total = sum(g["end"] - g["start"] for g in gap_segments)
+
+        return jsonify({
+            "success": True,
+            "session_id": session_id,
+            "format": fmt,
+            "cues": cues_payload,
+            "gap_count": len(gap_segments),
+            "gap_total_sec": gap_total,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"字幕导入切分失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/subtitle-import/slice/<session_id>/<int:index>", methods=["GET"])
+def subtitle_import_slice(session_id: str, index: int):
+    """下载 /api/subtitle-import/split 切出的第 index 个音频片段（WAV）。"""
+    session = SUBTITLE_IMPORT_SESSIONS.get(session_id)
+    if not session or index < 0 or index >= len(session["slices"]):
+        abort(404)
+    slice_path = Path(session["slices"][index])
+    if not slice_path.exists():
+        abort(404)
+    directory = str(slice_path.parent)
+    return send_from_directory(directory, slice_path.name, mimetype="audio/wav")
+
+
+@app.route("/api/subtitle-import/cleanup", methods=["POST"])
+def subtitle_import_cleanup():
+    """前端完成对话框填充后调用，清理该会话的临时切片目录。"""
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        session_id = (data.get("session_id") or "").strip()
+        session = SUBTITLE_IMPORT_SESSIONS.pop(session_id, None) if session_id else None
+        if session:
+            shutil.rmtree(session["dir"], ignore_errors=True)
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        logger.error(f"字幕导入会话清理失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
+                            aligner_device, english_word_align: bool,
+                            align_pitch_shift_semitones: float, audio_duration_sec: float,
+                            processing_mode: str, original_text: str = "", **project_kwargs):
+    """
+    单文件"字幕跟读"后台任务：整段音频按字幕时间轴逐句 Qwen3-FA 对齐，
+    产出完整 LAB；"完整处理"模式下继续复用 process_project_only 做
+    F0 提取 + 工程文件生成（与其它单文件对齐流程一致，不再另写一套）。
+    """
+    try:
+        set_job(job_id, status="running", started_at=datetime.now().isoformat(),
+                progress={"done": 0, "total": len(cues)})
+
+        def _progress_cb(done, total):
+            set_job(job_id, status="running", progress={"done": done, "total": total})
+
+        align_result = subtitle_import.align_subtitle_audio(
+            wav_path, cues, language,
+            aligner_device=aligner_device,
+            english_word_align=english_word_align,
+            align_pitch_shift_semitones=align_pitch_shift_semitones,
+            audio_duration_sec=audio_duration_sec,
+            progress_cb=_progress_cb,
+        )
+
+        if not align_result.get("success"):
+            set_job(job_id, status="failed", finished_at=datetime.now().isoformat(),
+                    error=align_result.get("error", "字幕跟读对齐失败"))
+            return
+
+        lab_content = align_result["lab_content"]
+
+        if processing_mode != "full":
+            # mfa-only 等价模式：只需要 LAB，不生成工程文件
+            lab_path = str(Path(wav_path).with_suffix(".lab"))
+            Path(lab_path).write_text(lab_content, encoding="utf-8")
+            set_job(
+                job_id, status="done", finished_at=datetime.now().isoformat(),
+                result={
+                    "success": True,
+                    "lab_content": lab_content,
+                    "lab_path": lab_path,
+                    "audio_duration": align_result.get("audio_duration"),
+                    "warnings": align_result.get("warnings", []),
+                },
+            )
+            return
+
+        lab_path = str(Path(wav_path).with_suffix(".lab"))
+        Path(lab_path).write_text(lab_content, encoding="utf-8")
+
+        # language 已经是本函数的顶层形参（对齐阶段就在用），不再从
+        # project_kwargs 里取——project_kwargs 若同时携带同名 language，
+        # 会在 Thread(kwargs=dict(language=..., **project_kwargs)) 处
+        # 冲突（TypeError: dict() got multiple values for keyword
+        # argument 'language'），这里统一只用外层这一份，显式转发。
+        project_result = pipeline.process_project_only(
+            wav_path=wav_path, lab_path=lab_path, midi_path=None,
+            language=language, original_text=original_text,
+            **project_kwargs,
+        )
+
+        # 【重要】process_project_only 的返回值本身不带 lab_content
+        # （它是"生成工程文件"，LAB 只是内部中间产物）——其它输入模式
+        # （音频跟读/TTS跟读）的"完整处理"结果因此也没有 LAB 标注内容
+        # 可看，这是既有的统一行为，不在这里改动。但字幕跟读是一个全新
+        # 功能，用户切分/对齐是否准确通常需要直接核对 LAB 才能确认，
+        # 所以这里把已经生成好的 lab_content 一并塞进结果，让"完整处理"
+        # 模式下前端也能展示"LAB 标注内容"标签页与下载/复制按钮
+        # （见 result.labContent 相关的 v-if），不影响其它模式的行为。
+        if project_result.get("success"):
+            project_result.setdefault("lab_content", lab_content)
+            project_result["warnings"] = align_result.get("warnings", [])
+            set_job(job_id, status="done", finished_at=datetime.now().isoformat(), result=project_result)
+        else:
+            set_job(job_id, status="failed", finished_at=datetime.now().isoformat(),
+                    error=project_result.get("error", "工程文件生成失败"), result=project_result)
+
+    except Exception as e:
+        logger.exception("字幕跟读后台任务异常")
+        set_job(job_id, status="failed", finished_at=datetime.now().isoformat(), error=str(e))
+
+
+@app.route("/api/subtitle-import/align", methods=["POST"])
+def subtitle_import_align():
+    """
+    「单文件处理」的"字幕跟读"入口：上传一份完整音频 + 一份 SRT/LRC
+    字幕文件，后端按字幕时间轴逐句固定用 Qwen3-ForcedAligner 强制对齐，
+    产出覆盖整段音频的 LAB（异步任务，走与其它单文件流程一致的
+    /api/pipeline/job/<job_id> 轮询）。
+
+    请求为 multipart/form-data：
+      - audio_file       : 完整音频文件（必填）
+      - subtitle_file    : .srt 或 .lrc 字幕文件（必填）
+      - language          : 语种代码（cmn/eng/jpn/kor/yue 等，默认 cmn）
+      - aligner_device     : Qwen3-FA 运行设备（可选，默认 auto）
+      - align_pitch_shift_semitones : 对齐辅助移调（半音，可选，默认 0）
+      - english_word_align : 英语单词级对齐开关（可选，默认 false）
+      - processing_mode    : "full"（默认，继续生成工程文件）或
+                              "mfa-only"（仅产出 LAB，不生成工程文件）
+      - 其余参数（title/format/bpm/f0_*/word_phoneme_map/dict_source/
+        vsqx_singer 等）与 /api/pipeline/project-only 一致，仅在
+        processing_mode="full" 时使用。
+    """
+    try:
+        audio_file = request.files.get("audio_file")
+        subtitle_file = request.files.get("subtitle_file")
+        if not audio_file or not audio_file.filename:
+            return jsonify({"error": "请上传完整音频文件"}), 400
+        if not subtitle_file or not subtitle_file.filename:
+            return jsonify({"error": "请上传 SRT / LRC 字幕文件"}), 400
+
+        ok, msg = subtitle_processor.check_ffmpeg_available()
+        if not ok:
+            return jsonify({"error": msg}), 400
+
+        language = request.form.get("language", "cmn")
+        aligner_device = request.form.get("aligner_device", "").strip() or None
+        english_word_align = request.form.get("english_word_align", "false").lower() == "true"
+        # word_phoneme_map（"英语单词→音素映射"，把混在文本中的英语单词
+        # 写入 SVP/VSQX 的 phonemes 字段）依赖对齐阶段已经把这些英语单词
+        # 作为独立单元切分对齐好——这一步正是 english_word_align 在做的事
+        # （关闭时，混合文本里的英语单词会被 Qwen3-FA 当成普通文字/拼音
+        # 处理，产出类似 "vocaloty"/"tts" 这种把整个英语单词错误吞成一个
+        # "音节" 的 LAB，再被当作拼音音素写进工程文件，导致发音错乱）。
+        # 因此这里必须和其它路由（TTS跟读 /api/tts/process、音频跟读
+        # /api/pipeline/full、/mfa-only、对话批量 /api/dialogue/process）
+        # 保持完全一致的联动：只要用户打开了 word_phoneme_map 且语言不是
+        # 日语，就自动一并打开 english_word_align，不要求用户重复勾选两个
+        # 开关。此前字幕跟读遗漏了这一步，是本次要修复的问题。
+        word_phoneme_map_probe = request.form.get("word_phoneme_map", "false").lower() == "true"
+        if word_phoneme_map_probe and language != "jpn":
+            english_word_align = True
+        align_pitch_shift_semitones = _parse_align_pitch_shift(
+            request.form.get("align_pitch_shift_semitones", 0)
+        )
+        processing_mode = request.form.get("processing_mode", "full")
+        if processing_mode not in ("full", "mfa-only"):
+            processing_mode = "full"
+
+        # 【重要】build_job_paths 返回的 wav_path 固定以 .wav 结尾（用于最终
+        # 产物命名），但这里的原始上传可能是 mp3/m4a 等——不能直接把非 WAV
+        # 字节流存进一个 .wav 后缀的文件（后续 ffmpeg -ss 精确切片 / 后端其它
+        # 环节都会按 WAV 容器解析，容器与内容不符会解析失败或产出静音）。
+        # 因此原始文件按自身真实扩展名单独落盘，非 WAV 一律先用 ffmpeg 转成
+        # 16k 单声道 WAV（转换后的路径才是后续切片/时长探测使用的 wav_path），
+        # 与 subtitle_processor.py 里"先统一转码"的约定一致。
+        stem, wav_path_obj, _ = build_job_paths(audio_file.filename or "subtitle_audio.wav")
+        original_ext = Path(audio_file.filename or "").suffix or ".wav"
+        original_path = WORK_DIR / f"{stem}_orig{original_ext}"
+        audio_file.save(str(original_path))
+
+        if original_ext.lower() == ".wav":
+            wav_path = str(wav_path_obj)
+            shutil.copy(str(original_path), wav_path)
+        else:
+            wav_path = str(wav_path_obj)
+            subtitle_processor.extract_audio(str(original_path), wav_path)
+
+        subtitle_bytes = subtitle_file.read()
+        subtitle_text = _decode_subtitle_text(subtitle_bytes)
+        audio_duration = subtitle_processor.probe_duration_sec(wav_path)
+
+        fmt, cues = subtitle_import.parse_subtitle_file(
+            subtitle_file.filename, subtitle_text, audio_duration_sec=audio_duration
+        )
+        if not cues:
+            return jsonify({"error": f"未能从字幕文件（识别为 {fmt.upper()}）中解析出任何有效条目"}), 400
+
+        project_kwargs = {}
+        if processing_mode == "full":
+            output_format = request.form.get("format", "sv")
+            project_kwargs = dict(
+                project_title=request.form.get("title", "Subtitle Project"),
+                output_format=output_format,
+                bpm=float(request.form.get("bpm", 120)),
+                base_pitch=int(request.form.get("base_pitch", 60)),
+                f0_method=request.form.get("f0_method", "dio"),
+                f0_device=request.form.get("f0_device", "auto"),
+                crepe_model=request.form.get("crepe_model", "full"),
+                f0_smooth=request.form.get("f0_smooth", "true").lower() == "true",
+                f0_smooth_window=int(request.form.get("f0_smooth_window", 5)),
+                use_double_precision=request.form.get("precision", "single").lower() == "double",
+                f0_floor=float(request.form.get("f0_floor", 71.0)),
+                f0_ceil=float(request.form.get("f0_ceil", 800.0)),
+                refine_pitch=request.form.get("auto_note_pitch", "false").lower() == "true",
+                export_pitch_line=request.form.get("export_pitch_line", "true").lower() == "true",
+                vsqx_pitch_smooth_window=int(request.form.get("vsqx_pitch_smooth_window", 5)),
+                word_phoneme_map=request.form.get("word_phoneme_map", "false").lower() == "true",
+                dict_source=_normalize_dict_source(request.form.get("dict_source", "default")),
+            )
+            if output_format == "vsqx":
+                vsqx_singer, vsqx_singer_id, vsqx_singer_bs = _select_vsqx_singer(language, "full")
+                project_kwargs["vsqx_singer"] = request.form.get("vsqx_singer", vsqx_singer)
+                project_kwargs["vsqx_singer_id"] = request.form.get("vsqx_singer_id", vsqx_singer_id)
+                project_kwargs["vsqx_singer_bs"] = int(request.form.get("vsqx_singer_bs", vsqx_singer_bs))
+
+        job_id = uuid.uuid4().hex
+        set_job(job_id, status="queued", created_at=datetime.now().isoformat())
+
+        logger.info(
+            f"字幕跟读启动 (format={fmt}, cues={len(cues)}, mode={processing_mode})，"
+            f"投递后台任务: {job_id}"
+        )
+
+        # 【重要】拼接全部字幕原文（按时间顺序），供 process_project_only 内部
+        # 预提取 native_english_words 使用——与"音频跟读"（process_full 把用户
+        # 输入的整段 text 转发为 original_text）、"TTS跟读"（同样传 text）保持
+        # 一致的判定依据。若不传，_label_is_english_word 会在非英语语言下回退
+        # 到词典查询（is_in_english_dict），一旦某条字幕里的英语单词不在词典中，
+        # 就会被当成普通拼音/文字处理，被 Qwen3-FA 整体吞成一个"音节"写进 LAB
+        # （如 "vocaloty"/"tts"），而不是先按英语单词切分再做 G2P/音素映射——
+        # 这正是此前字幕跟读遗漏的一步。
+        subtitle_original_text = "\n".join(cue.text for cue in cues if cue.text)
+
+        Thread(
+            target=run_subtitle_align_job,
+            daemon=True,
+            kwargs=dict(
+                job_id=job_id, wav_path=wav_path, cues=cues, language=language,
+                aligner_device=aligner_device, english_word_align=english_word_align,
+                align_pitch_shift_semitones=align_pitch_shift_semitones,
+                audio_duration_sec=audio_duration, processing_mode=processing_mode,
+                original_text=subtitle_original_text,
+                **project_kwargs,
+            ),
+        ).start()
+
+        return jsonify({"success": True, "job_id": job_id, "status": "queued", "cue_count": len(cues)}), 202
+
+    except Exception as e:
+        logger.error(f"字幕跟读启动失败: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
