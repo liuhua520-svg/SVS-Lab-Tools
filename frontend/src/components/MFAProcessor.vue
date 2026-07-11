@@ -1450,7 +1450,7 @@ interface TextOptimizerState {
 }
 
 const textOptimizer = ref<TextOptimizerState>({
-  visible: false, draft: '', loading: '', error: '', target: null, field: 'text', language: 'cmn', everyN: 2,
+  visible: false, draft: '', loading: '', error: '', target: null, field: 'text', language: 'cmn', everyN: 4,
 })
 
 // language 参数可选：不传时使用打开弹窗那一刻 target 上的 language 字段
@@ -1465,7 +1465,7 @@ const openTextOptimizer = (target: Record<string, any>, field: string, language?
     target,
     field,
     language: language || target.language || 'cmn',
-    everyN: 2,
+    everyN: 4,
   }
 }
 

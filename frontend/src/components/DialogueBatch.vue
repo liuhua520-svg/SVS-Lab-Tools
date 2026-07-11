@@ -1354,11 +1354,11 @@ interface TextOptimizerState {
   target: Record<string, any> | null
   field: string
   language: string
-  everyN: number   // "按每几句插入换行"的句子数量 N，默认 2
+  everyN: number   // "按每几句插入换行"的句子数量 N，默认 4
 }
 
 const textOptimizer = ref<TextOptimizerState>({
-  visible: false, draft: '', loading: '', error: '', target: null, field: 'text', language: 'cmn', everyN: 2,
+  visible: false, draft: '', loading: '', error: '', target: null, field: 'text', language: 'cmn', everyN: 4,
 })
 
 const openTextOptimizer = (target: Record<string, any>, field: string, language?: string) => {
@@ -1370,7 +1370,7 @@ const openTextOptimizer = (target: Record<string, any>, field: string, language?
     target,
     field,
     language: language || 'cmn',
-    everyN: 2,
+    everyN: 4,
   }
 }
 

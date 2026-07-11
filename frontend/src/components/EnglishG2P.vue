@@ -193,10 +193,13 @@
       <!-- 分页 -->
       <el-pagination
         v-model:current-page="currentPage"
-        :page-size="pageSize"
+        v-model:page-size="pageSize"
+        :page-sizes="[10, 20, 50, 100]"
         :total="results.length"
         layout="total, sizes, prev, pager, next, jumper"
         class="pagination"
+        @size-change="handlePageSizeChange"
+        @current-change="handlePageChange"
       />
     </div>
 
@@ -457,6 +460,18 @@ const clearCustomDict = (which: 'arpa' | 'vocaloid') => {
 
 /** 将一个 ARPABET 音素字符串（空格分隔）转换为 VOCALOID 音素字符串。
  *  优先查用户导入的自定义映射表，未覆盖的音素回退到内置默认表。 */
+/** 将后端返回的 ARPABET 音素（大写 + 重音数字，如 "OW1 K AH0"）
+ *  规整为小写且去除重音标记的形式（如 "ow k ah"），仅影响展示/导出，
+ *  不影响 arpaToVocaloid 的映射逻辑（该函数内部本就会自行归一化）。 */
+const formatArpaDisplay = (arpa: string): string => {
+  if (!arpa) return ''
+  return arpa
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((ph) => ph.toLowerCase().replace(/\d+$/, ''))
+    .join(' ')
+}
+
 const arpaToVocaloid = (arpa: string): string => {
   if (!arpa) return ''
   return arpa
@@ -505,10 +520,26 @@ const options = ref({
 // ═══════════════════════════════════════════════════════════
 
 const paginatedResults = computed(() => {
+  const totalPages = Math.max(1, Math.ceil(results.value.length / pageSize.value))
+  if (currentPage.value > totalPages) {
+    currentPage.value = totalPages
+  }
   const start = (currentPage.value - 1) * pageSize.value
   const end = start + pageSize.value
   return results.value.slice(start, end)
 })
+
+/** 每页条数变化时：跳回第一页，避免出现"当前页超出总页数"导致列表空白的问题 */
+const handlePageSizeChange = (size: number) => {
+  pageSize.value = size
+  currentPage.value = 1
+}
+
+/** 页码变化 —— el-pagination 的 v-model:current-page 已同步 currentPage，
+ *  这里仅保留 hook 以便未来扩展（例如滚动回表格顶部）。 */
+const handlePageChange = (page: number) => {
+  currentPage.value = page
+}
 
 const repeatedWordsCount = computed(() => {
   return results.value.filter((r) => r.count > 1).length
@@ -600,7 +631,7 @@ const extractAndConvert = async () => {
       const customArpa =
         customArpaMap.value &&
         (customArpaMap.value[r.word] ?? customArpaMap.value[(r.word || '').toLowerCase()])
-      const rawArpa = r.arpa || ''
+      const rawArpa = formatArpaDisplay(r.arpa || '')
       const arpa = customArpa || rawArpa
       return {
         index: idx + 1,
