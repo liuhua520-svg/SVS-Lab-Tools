@@ -292,6 +292,32 @@
           </el-button>
         </el-form-item>
 
+        <el-divider />
+
+        <div class="section-heading">
+          <span>🎙️ {{ t('settings.subtitleImportSectionTitle') }}</span>
+        </div>
+        <p class="page-subtitle">{{ t('settings.subtitleImportSectionSubtitle') }}</p>
+
+        <el-alert type="success" :closable="false" show-icon class="no-restart-hint">
+          <template #title>{{ t('settings.tuningNoRestartHint') }}</template>
+        </el-alert>
+
+        <el-form-item :label="t('settings.subtitleImportSkipSplitEveryN')">
+          <el-input-number
+            v-model="form.subtitle_import_skip_split_every_n"
+            :min="1" :max="50" :step="1" :precision="0"
+            controls-position="right" style="width: 100%; max-width: 240px"
+          />
+          <p class="help-text">{{ t('settings.subtitleImportSkipSplitEveryNHint') }}</p>
+        </el-form-item>
+
+        <el-form-item>
+          <el-button size="small" @click="resetSubtitleImportSplitToDefaults">
+            ↺ {{ t('settings.tuningResetButton') }}
+          </el-button>
+        </el-form-item>
+
         <el-alert
           v-for="item in restartSummary"
           :key="item.service"
@@ -369,6 +395,11 @@ interface AppSettings {
   // 完全禁用"单段过长再二次切割"这一步；打开后每个分段保持原样，不再
   // 按 tts_min_segment_len / tts_max_segment_len 区间寻找标点切割。
   tts_disable_segment_len_split: boolean
+  // ── subtitle_import.py 字幕跟读：跳过分割音频（默认 1，与改造前行为
+  // 一致）。仅影响"字幕跟读"这一个功能：连续且中间没有静音间隙的相邻
+  // 字幕，每凑够 N 条才合并成一段音频一起送 Qwen3-FA 对齐一次，减少
+  // 切分/对齐调用次数。静音间隙始终会打断合并，不受此设置影响。
+  subtitle_import_skip_split_every_n: number
 }
 
 type RestartStatus = 'restarted' | 'not_running' | 'failed'
@@ -413,6 +444,11 @@ const TTS_SPLIT_OPTION_DEFAULTS = {
   tts_disable_segment_len_split: false,
 } as const
 
+// 字幕跟读"跳过分割音频"默认值：与 app_settings.py 的 DEFAULT_SETTINGS 保持一致。
+const SUBTITLE_IMPORT_SPLIT_DEFAULTS = {
+  subtitle_import_skip_split_every_n: 1,
+} as const
+
 // 与 alt_aligners.py 里 WhisperXAligner.SUPPORTED_MODELS 保持一致，
 // 复用 processor.whisperModelXxx 系列翻译（单文件处理页已有同一份模型列表）。
 const WHISPERX_MODEL_OPTIONS = [
@@ -443,6 +479,7 @@ const form = ref<AppSettings>({
   ...WHISPERX_DEFAULTS,
   ...TTS_SEGMENT_LEN_DEFAULTS,
   ...TTS_SPLIT_OPTION_DEFAULTS,
+  ...SUBTITLE_IMPORT_SPLIT_DEFAULTS,
 })
 
 const resetTuningToDefaults = () => {
@@ -452,6 +489,11 @@ const resetTuningToDefaults = () => {
 
 const resetTtsSegmentLenToDefaults = () => {
   Object.assign(form.value, TTS_SEGMENT_LEN_DEFAULTS, TTS_SPLIT_OPTION_DEFAULTS)
+  ElMessage.info(t('settings.tuningResetHint'))
+}
+
+const resetSubtitleImportSplitToDefaults = () => {
+  Object.assign(form.value, SUBTITLE_IMPORT_SPLIT_DEFAULTS)
   ElMessage.info(t('settings.tuningResetHint'))
 }
 
@@ -507,6 +549,12 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
   const newlineEveryN = Number.isFinite(rawNewlineEveryN)
     ? Math.min(Math.max(Math.round(rawNewlineEveryN), 1), 100)
     : TTS_SPLIT_OPTION_DEFAULTS.tts_newline_split_every_n
+  // subtitle_import_skip_split_every_n：整数校验 + 钳制到 [1, 50]，与后端
+  // save_settings() 的钳制范围一致。
+  const rawSkipSplitN = Number(settings?.subtitle_import_skip_split_every_n)
+  const skipSplitN = Number.isFinite(rawSkipSplitN)
+    ? Math.min(Math.max(Math.round(rawSkipSplitN), 1), 50)
+    : SUBTITLE_IMPORT_SPLIT_DEFAULTS.subtitle_import_skip_split_every_n
   form.value = {
     auto_update_models: !!settings?.auto_update_models,
     use_mirror: !!settings?.use_mirror,
@@ -537,6 +585,7 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     tts_newline_split_every_n: newlineEveryN,
     tts_disable_newline_split: !!settings?.tts_disable_newline_split,
     tts_disable_segment_len_split: !!settings?.tts_disable_segment_len_split,
+    subtitle_import_skip_split_every_n: skipSplitN,
   }
 }
 

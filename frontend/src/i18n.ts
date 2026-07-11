@@ -560,6 +560,10 @@ const messages = {
       ttsNewlineSplitEveryNHint: '每达到设定数量的换行才切一段；未达到该数量的换行会被当作段内换行，与相邻内容合并为同一段。默认 1，即每遇到一个换行就切一段（与原有行为一致）。仅在"禁用换行切分文本"关闭时生效。',
       ttsDisableSegmentLenSplit: '禁用 TTS 跟读逐句合成分段长度',
       ttsDisableSegmentLenSplitHint: '打开后，不管分段多长都不会再按下面的分段长度区间寻找标点二次切割，每个分段保持原样合成。默认关闭（保持二次切割）。',
+      subtitleImportSectionTitle: '字幕跟读跳过分割音频',
+      subtitleImportSectionSubtitle: '仅影响"字幕跟读"功能（上传整段音频 + SRT/LRC 字幕，按时间轴固定用 Qwen3-ForcedAligner 对齐）：控制连续相邻的字幕要不要合并成一段音频一起对齐，而不是每条都单独切分。',
+      subtitleImportSkipSplitEveryN: '每多少个时间轴跳过分割音频',
+      subtitleImportSkipSplitEveryNHint: '默认 1，即每条字幕时间轴单独切一段音频、单独对齐一次（与原有行为一致）。设置为 4 时，会跳过第 1~4 条字幕之间的分割，把这 4 条合并成一段连续音频一起送 Qwen3-FA 对齐一次，直到第 5 条字幕开头才重新切一刀。字幕之间原本存在的静音停顿不受影响，会被单独保留、不参与合并；只有背靠背挨在一起、中间没有停顿的连续字幕才会被合并对齐。',
     },
     dialogue: {
       pageTitle: '对话文本框批量处理',
@@ -1323,6 +1327,10 @@ const messages = {
       ttsNewlineSplitEveryNHint: '每達到設定數量的換行才切一段；未達到該數量的換行會被當作段內換行，與相鄰內容合併為同一段。預設 1，即每遇到一個換行就切一段（與原有行為一致）。僅在「停用換行切分文本」關閉時生效。',
       ttsDisableSegmentLenSplit: '停用 TTS 跟讀逐句合成分段長度',
       ttsDisableSegmentLenSplitHint: '開啟後，不管分段多長都不會再按下面的分段長度區間尋找標點二次切割，每個分段保持原樣合成。預設關閉（保持二次切割）。',
+      subtitleImportSectionTitle: '字幕跟讀跳過分割音訊',
+      subtitleImportSectionSubtitle: '僅影響「字幕跟讀」功能（上傳整段音訊 + SRT/LRC 字幕，按時間軸固定用 Qwen3-ForcedAligner 對齊）：控制連續相鄰的字幕要不要合併成一段音訊一起對齊，而不是每條都單獨切分。',
+      subtitleImportSkipSplitEveryN: '每多少個時間軸跳過分割音訊',
+      subtitleImportSkipSplitEveryNHint: '預設 1，即每條字幕時間軸單獨切一段音訊、單獨對齊一次（與原有行為一致）。設定為 4 時，會跳過第 1~4 條字幕之間的分割，把這 4 條合併成一段連續音訊一起送 Qwen3-FA 對齊一次，直到第 5 條字幕開頭才重新切一刀。字幕之間原本存在的靜音停頓不受影響，會被單獨保留、不參與合併；只有背靠背挨在一起、中間沒有停頓的連續字幕才會被合併對齊。',
     },
     dialogue: {
       pageTitle: '對話文字框批次處理',
@@ -2088,6 +2096,10 @@ const messages = {
 	    ttsNewlineSplitEveryNHint: 'A new segment is only started once this many newlines have been reached; newlines short of that count are treated as line breaks within the same segment and merged with the surrounding text. Default 1, i.e. a new segment on every newline (matches the original behavior). Only takes effect when "Disable Newline-Based Text Splitting" is off.',
 	    ttsDisableSegmentLenSplit: 'Disable TTS Follow-Along Sentence Segment Length',
 	    ttsDisableSegmentLenSplitHint: 'When enabled, segments are never split further by the segment-length range below no matter how long they are — each segment is synthesized as-is. Off by default (length-based splitting stays on).',
+	    subtitleImportSectionTitle: 'Subtitle Follow-Along: Skip Splitting Audio',
+	    subtitleImportSectionSubtitle: 'Only affects the "Subtitle Follow-Along" feature (upload a full audio track plus an SRT/LRC file, aligned to Qwen3-ForcedAligner along each cue\'s timeline): controls whether consecutive adjacent subtitle lines get merged into one audio chunk for a single alignment call instead of being split and aligned one at a time.',
+	    subtitleImportSkipSplitEveryN: 'Skip splitting audio every N cues',
+	    subtitleImportSkipSplitEveryNHint: 'Default 1 — each subtitle cue is sliced into its own audio clip and aligned separately (matches the original behavior). Set to 4, for example, and the split between cues 1 through 4 is skipped: those 4 cues are merged into one continuous audio chunk and sent to Qwen3-FA for a single alignment pass, with the next cut only happening at the start of cue 5. Genuine silent pauses between cues are unaffected and stay isolated rather than being merged — only cues that sit back-to-back with no gap between them get combined into one alignment call.',
 	  },
 	  dialogue: {
 		pageTitle: 'Dialogue Batch Processing',
@@ -2852,7 +2864,11 @@ const messages = {
 	  ttsNewlineSplitEveryN: '何個の改行ごとにテキストを分割するか',
 	  ttsNewlineSplitEveryNHint: '設定した数だけ改行が現れて初めて新しい断片に分割されます。その数に満たない改行は段落内の改行として扱われ、前後のテキストと同じ断片にまとめられます。デフォルトは 1（改行が1つ現れるごとに分割——従来の動作と同じ）。「改行によるテキスト分割を無効にする」がオフのときのみ有効です。',
 	  ttsDisableSegmentLenSplit: 'TTS読み上げ追従の文単位分割長を無効にする',
-	  ttsDisableSegmentLenSplitHint: '有効にすると、断片がどれだけ長くても下の分割長の範囲で句読点を探して再分割することはなくなり、各断片はそのままの形で合成されます。デフォルトはオフ（分割長による再分割を維持）。'
+	  ttsDisableSegmentLenSplitHint: '有効にすると、断片がどれだけ長くても下の分割長の範囲で句読点を探して再分割することはなくなり、各断片はそのままの形で合成されます。デフォルトはオフ（分割長による再分割を維持）。',
+	  subtitleImportSectionTitle: '字幕読み上げ追従：音声分割をスキップ',
+	  subtitleImportSectionSubtitle: '「字幕読み上げ追従」機能（音声全体 + SRT/LRC 字幕をアップロードし、各キューのタイムラインに沿って Qwen3-ForcedAligner で固定的に整列）にのみ影響します。連続して隣接する字幕を1つの音声チャンクにまとめて一度に整列するか、1つずつ分割して整列するかを制御します。',
+	  subtitleImportSkipSplitEveryN: '何個のタイムラインごとに音声分割をスキップするか',
+	  subtitleImportSkipSplitEveryNHint: 'デフォルトは 1 で、字幕タイムラインごとに個別に音声を切り出し、個別に整列します（従来の動作と同じ）。例えば 4 に設定すると、1〜4番目の字幕の間の分割がスキップされ、この4つが1つの連続した音声チャンクにまとめられて Qwen3-FA に一度だけ送られて整列され、5番目の字幕の先頭で初めて新たに切り分けられます。字幕間に実際に存在する無音の間は影響を受けず、単独のまま保持されます——途切れなく隣接している字幕のみがまとめて整列されます。'
 	},
     dialogue: {
       pageTitle: '対話テキストボックス一括処理',
@@ -3617,7 +3633,11 @@ const messages = {
 	  ttsNewlineSplitEveryN: '몇 개의 줄바꿈마다 텍스트를 분할할지',
 	  ttsNewlineSplitEveryNHint: '설정한 개수만큼 줄바꿈이 나타나야 새 조각으로 분할됩니다. 그 개수에 못 미치는 줄바꿈은 같은 조각 안의 줄바꿈으로 취급되어 주변 텍스트와 합쳐집니다. 기본값은 1로, 줄바꿈이 하나 나올 때마다 분할됩니다(기존 동작과 동일). "줄바꿈 기준 텍스트 분할 비활성화"가 꺼져 있을 때만 적용됩니다.',
 	  ttsDisableSegmentLenSplit: 'TTS 따라읽기 문장 분할 길이 비활성화',
-	  ttsDisableSegmentLenSplitHint: '이 옵션을 켜면 조각이 아무리 길어도 아래의 분할 길이 구간에서 구두점을 찾아 다시 분할하지 않으며, 각 조각이 그대로 합성됩니다. 기본값은 꺼짐(길이 기준 분할 유지)입니다.'
+	  ttsDisableSegmentLenSplitHint: '이 옵션을 켜면 조각이 아무리 길어도 아래의 분할 길이 구간에서 구두점을 찾아 다시 분할하지 않으며, 각 조각이 그대로 합성됩니다. 기본값은 꺼짐(길이 기준 분할 유지)입니다.',
+	  subtitleImportSectionTitle: '자막 따라읽기: 오디오 분할 건너뛰기',
+	  subtitleImportSectionSubtitle: '"자막 따라읽기" 기능(전체 오디오 + SRT/LRC 자막을 업로드하여 각 큐의 타임라인에 따라 Qwen3-ForcedAligner로 고정 정렬)에만 영향을 줍니다. 연속으로 인접한 자막을 하나의 오디오 청크로 합쳐 한 번에 정렬할지, 아니면 하나씩 분할하여 정렬할지를 제어합니다.',
+	  subtitleImportSkipSplitEveryN: '몇 개의 타임라인마다 오디오 분할을 건너뛸지',
+	  subtitleImportSkipSplitEveryNHint: '기본값은 1로, 자막 타임라인마다 개별적으로 오디오를 잘라 개별적으로 정렬합니다(기존 동작과 동일). 예를 들어 4로 설정하면 1~4번째 자막 사이의 분할이 건너뛰어지고, 이 4개가 하나의 연속된 오디오 청크로 합쳐져 Qwen3-FA에 한 번만 전송되어 정렬되며, 5번째 자막의 시작 부분에서야 새로 잘립니다. 자막 사이에 실제로 존재하는 무음 구간은 영향을 받지 않고 그대로 유지됩니다——끊김 없이 인접한 자막만 합쳐져 정렬됩니다.'
 	},
     dialogue: {
       pageTitle: '대화 텍스트 박스 일괄 처리',
