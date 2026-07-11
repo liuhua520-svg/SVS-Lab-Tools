@@ -404,6 +404,23 @@ def disable_keepalive(response):
     response.headers["Connection"] = "close"
     return response
 
+@app.errorhandler(404)
+@app.errorhandler(405)
+def api_error_as_json(e):
+    """
+    对 /api/* 路径的 404/405 错误统一返回 JSON，而不是回退到 SPA 的 index.html。
+    避免前端 fetch().json() 因为收到 HTML (<!doctype ...) 而抛出
+    'Unexpected token < is not valid JSON' 的问题。
+    """
+    if request.path.startswith("/api/"):
+        code = getattr(e, "code", 500) or 500
+        return jsonify({
+            "error": getattr(e, "name", "Error"),
+            "message": getattr(e, "description", str(e)),
+        }), code
+    raise e
+
+
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_frontend(path):
@@ -759,6 +776,70 @@ def text_optimize():
     n = data.get("n", 2)
     result = text_processor.process_text(text, action, language, n)
     return jsonify(result), (200 if result.get("success") else 400)
+
+
+# =====================================================================
+# 英文 G2P：将英文文本转换为 ARPABET 音素序列
+# =====================================================================
+
+_g2p_en_instance = None
+
+def _get_g2p_en():
+    """惰性加载 g2p_en.G2p 实例（首次调用较慢，之后复用）。"""
+    global _g2p_en_instance
+    if _g2p_en_instance is None:
+        from g2p_en import G2p
+        _g2p_en_instance = G2p()
+    return _g2p_en_instance
+
+
+@app.route("/api/english/extract-g2p", methods=["POST"])
+def english_extract_g2p():
+    """
+    英文文本 -> ARPABET 音素转换接口。
+    请求体: { text, case_sensitive, include_numbers, split_by_space }
+    返回体: { results: [ { word, arpa }, ... ] }
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        text = (data.get("text") or "").strip()
+        case_sensitive = bool(data.get("case_sensitive", False))
+        include_numbers = bool(data.get("include_numbers", True))
+        split_by_space = bool(data.get("split_by_space", True))
+
+        if not text:
+            return jsonify({"results": []})
+
+        if split_by_space:
+            words = [w for w in text.split(" ") if w]
+        else:
+            words = re.findall(r"[A-Za-z']+|\d+", text)
+
+        g2p = _get_g2p_en()
+        results = []
+        for raw_word in words:
+            lookup_word = raw_word if case_sensitive else raw_word.lower()
+
+            if raw_word.isdigit() and not include_numbers:
+                results.append({"word": raw_word, "arpa": ""})
+                continue
+
+            try:
+                phonemes = g2p(lookup_word)
+                # g2p_en 会在词间插入空格 token，以及标点原样返回，需过滤为纯音素
+                arpa_tokens = [p for p in phonemes if p != " " and re.match(r"^[A-Z]+[0-2]?$", p)]
+                arpa = " ".join(arpa_tokens)
+            except Exception as inner_e:
+                logging.warning(f"G2P conversion failed for word '{raw_word}': {inner_e}")
+                arpa = ""
+
+            results.append({"word": raw_word, "arpa": arpa})
+
+        return jsonify({"results": results})
+
+    except Exception as e:
+        logging.exception("english_extract_g2p failed")
+        return jsonify({"error": str(e)}), 500
 
 
 # =====================================================================
@@ -3315,11 +3396,13 @@ def subtitle_import_cleanup():
 def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
                             aligner_device, english_word_align: bool,
                             align_pitch_shift_semitones: float, audio_duration_sec: float,
-                            processing_mode: str, original_text: str = "", **project_kwargs):
+                            processing_mode: str, original_text: str = "",
+                            skip_split_every_n: int = 1, **project_kwargs):
     """
-    单文件"字幕跟读"后台任务：整段音频按字幕时间轴逐句 Qwen3-FA 对齐，
-    产出完整 LAB；"完整处理"模式下继续复用 process_project_only 做
-    F0 提取 + 工程文件生成（与其它单文件对齐流程一致，不再另写一套）。
+    单文件"字幕跟读"后台任务：整段音频按字幕时间轴逐句（或按
+    skip_split_every_n 合并成块）Qwen3-FA 对齐，产出完整 LAB；"完整处理"
+    模式下继续复用 process_project_only 做 F0 提取 + 工程文件生成（与
+    其它单文件对齐流程一致，不再另写一套）。
     """
     try:
         set_job(job_id, status="running", started_at=datetime.now().isoformat(),
@@ -3335,6 +3418,7 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
             align_pitch_shift_semitones=align_pitch_shift_semitones,
             audio_duration_sec=audio_duration_sec,
             progress_cb=_progress_cb,
+            skip_split_every_n=skip_split_every_n,
         )
 
         if not align_result.get("success"):
@@ -3415,6 +3499,11 @@ def subtitle_import_align():
       - 其余参数（title/format/bpm/f0_*/word_phoneme_map/dict_source/
         vsqx_singer 等）与 /api/pipeline/project-only 一致，仅在
         processing_mode="full" 时使用。
+
+    "字幕每多少个时间轴跳过分割音频"（合并相邻字幕一起送 Qwen3-FA 对齐，
+    减少切分次数）不作为本请求的表单参数，而是读取设置页面保存的全局
+    设置项 subtitle_import_skip_split_every_n（见 app_settings.py），
+    与其它 Qwen3-FA 调优参数保持一致的"设置页统一管理"方式。
     """
     try:
         audio_file = request.files.get("audio_file")
@@ -3527,6 +3616,10 @@ def subtitle_import_align():
         # 这正是此前字幕跟读遗漏的一步。
         subtitle_original_text = "\n".join(cue.text for cue in cues if cue.text)
 
+        # "字幕每多少个时间轴跳过分割音频"：全局设置项，仅影响字幕跟读
+        # 这一个功能，实时读取（保存设置后下一次任务立即生效）。
+        skip_split_every_n = app_settings.get_subtitle_import_skip_split_every_n()
+
         Thread(
             target=run_subtitle_align_job,
             daemon=True,
@@ -3536,6 +3629,7 @@ def subtitle_import_align():
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 audio_duration_sec=audio_duration, processing_mode=processing_mode,
                 original_text=subtitle_original_text,
+                skip_split_every_n=skip_split_every_n,
                 **project_kwargs,
             ),
         ).start()

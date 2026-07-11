@@ -157,6 +157,23 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     #         上面 tts_disable_newline_split 也同时打开）。
     # False → 保持二次切割（默认，行为与改造前一致）。
     "tts_disable_segment_len_split": False,
+
+    # ── subtitle_import.py 字幕跟读：跳过分割音频 ──────────────────────────
+    # 仅影响"字幕跟读"（上传整段音频 + SRT/LRC，按字幕时间轴切分音频固定
+    # 交给 Qwen3-ForcedAligner 逐段对齐）这一个功能，不影响其它任何对齐
+    # 入口（音频跟读/TTS跟读/字幕识别等）。
+    #
+    # 默认 1：每一条字幕时间轴单独切一段音频、单独送 Qwen3-FA 对齐一次，
+    # 与改造前行为完全一致。
+    #
+    # 设为 N（> 1）：连续且中间没有静音间隙的相邻字幕，每凑够 N 条才切
+    # 一次音频——例如设为 4，第 1~4 条字幕会被合并成一段连续音频一起送
+    # Qwen3-FA 对齐一次，在第 5 条字幕开头才重新切一刀开始下一组。字幕
+    # 之间原本存在的静音停顿不受影响，仍然会被单独抽出来保留为 SIL、
+    # 不参与合并也不参与对齐；只有"背靠背挨在一起、中间没有停顿"的字幕
+    # 才会被合并送同一次对齐调用。合并对齐只保证整段音频的 LAB 时间轴
+    # 准确，不再保留每条原始字幕各自的独立边界。
+    "subtitle_import_skip_split_every_n": 1,
 }
 
 # 对齐调优参数的合法取值范围（秒），用于 save_settings() 里的边界钳制。
@@ -264,6 +281,19 @@ def save_settings(new_settings: Dict[str, object]) -> Dict[str, object]:
         # 两个新增开关：与其它布尔项一样做基本校验。
         current["tts_disable_newline_split"] = bool(current.get("tts_disable_newline_split"))
         current["tts_disable_segment_len_split"] = bool(current.get("tts_disable_segment_len_split"))
+
+        # 字幕跟读"每多少个时间轴跳过分割音频"：转 int 并钳制到 [1, 50]，
+        # 非法/缺失值回退为默认值 1。上限 50 只是防呆（正常场景很少需要
+        # 一次合并几十条字幕对齐，过大反而会让单次 Qwen3-FA 调用的音频
+        # 过长，增大对齐出错概率）。
+        try:
+            skip_split_n = int(current.get(
+                "subtitle_import_skip_split_every_n",
+                DEFAULT_SETTINGS["subtitle_import_skip_split_every_n"],
+            ))
+        except (TypeError, ValueError):
+            skip_split_n = int(DEFAULT_SETTINGS["subtitle_import_skip_split_every_n"])
+        current["subtitle_import_skip_split_every_n"] = min(max(skip_split_n, 1), 50)
 
         # 对齐调优参数：转 float 并钳制到 _TUNING_RANGES 定义的合法区间，
         # 非法/缺失/无法解析的值一律回退为默认值，避免脏数据写入导致
@@ -443,6 +473,31 @@ def get_tts_segment_len() -> Dict[str, int]:
     if min_len > max_len:
         min_len, max_len = max_len, min_len
     return {"min_len": min_len, "max_len": max_len}
+
+
+def get_subtitle_import_skip_split_every_n() -> int:
+    """
+    供 app.py 的字幕跟读路由（/api/subtitle-import/align）调用：实时读取
+    "每多少个时间轴跳过分割音频"设置，转发给
+    subtitle_import.align_subtitle_audio() 的 skip_split_every_n 参数。
+
+    同样不使用 mtime 缓存（该路由调用频率远低于对齐热路径），每次直接
+    调用 load_settings()，成本可忽略；保存设置后下一次字幕跟读任务立即
+    生效，无需重启任何进程。
+
+    Returns
+    -------
+    int，>= 1（1 表示逐条独立切分对齐，与改造前行为一致）。
+    """
+    settings = load_settings()
+    try:
+        n = int(settings.get(
+            "subtitle_import_skip_split_every_n",
+            DEFAULT_SETTINGS["subtitle_import_skip_split_every_n"],
+        ))
+    except (TypeError, ValueError):
+        n = int(DEFAULT_SETTINGS["subtitle_import_skip_split_every_n"])
+    return max(n, 1)
 
 
 def get_tts_split_options() -> Dict[str, object]:

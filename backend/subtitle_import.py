@@ -278,6 +278,58 @@ def build_timeline(cues: List[SubtitleCue], audio_duration_sec: float,
 # 音频切片（复用 subtitle_processor 的 ffmpeg 路径探测与切片实现）
 # ─────────────────────────────────────────────────────────────────────────
 
+def _group_segments_for_alignment(
+    timeline: List[TimelineSegment], skip_split_every_n: int = 1
+) -> List[List[TimelineSegment]]:
+    """
+    把 build_timeline() 产出的完整时间轴（文本段 + 静音段交替）划分成若干
+    "对齐块"，每个对齐块是一组彼此背靠背相邻（中间没有被静音段打断）的
+    文本段，供 align_subtitle_audio 一次性切片、一次性送 Qwen3-FA 对齐。
+
+    skip_split_every_n（"字幕每多少个时间轴跳过分割音频"设置项）：
+      - 1（默认）：行为与改造前完全一致——每一条文本段单独成一个对齐块，
+        逐句独立对齐。
+      - N（> 1）：连续无间隙相邻的文本段，每凑够 N 条就合并成一个对齐块
+        一起送 Qwen3-FA（例如 N=4 表示第 1~4 条合并对齐，第 5 条开头
+        重新起一个新块），减少对齐调用次数、让合并块内相邻字幕的边界由
+        同一次对齐结果给出，天然更连贯。
+
+    静音段（is_gap=True）：任何时候都会打断"连续相邻"，不会被并入前后
+    的对齐块，也不参与对齐——组内如果两条文本段之间隔着一段静音，会在
+    这段静音处强制断开，各自归入不同的对齐块（哪怕凑不满 N 条）。这与
+    "静音段仍然单独抽出来作为 SIL、不打包对齐"的既定行为保持一致，
+    skip_split_every_n 只影响"没有静音分隔、真正连续"的文本段之间要不要
+    合并送同一次对齐调用，不改变静音段本身的处理方式。
+
+    末尾不足 N 条的文本段照样独立成组，直接按实际条数一起对齐（不会因为
+    "凑不满 N 条"而退化为逐条单独对齐）。
+
+    Returns
+    -------
+    每个对齐块是一个 List[TimelineSegment]（长度 >= 1，全部 is_gap=False，
+    按时间顺序相邻），列表整体按时间顺序排列。
+    """
+    n = max(1, int(skip_split_every_n))
+    groups: List[List[TimelineSegment]] = []
+    current: List[TimelineSegment] = []
+
+    for seg in timeline:
+        if seg.is_gap:
+            if current:
+                groups.append(current)
+                current = []
+            continue
+        current.append(seg)
+        if len(current) >= n:
+            groups.append(current)
+            current = []
+
+    if current:
+        groups.append(current)
+
+    return groups
+
+
 def _slice_wav(wav_path: str, start_sec: float, end_sec: float, out_path: str) -> str:
     from subtitle_processor import _slice_wav as _impl
     return _impl(wav_path, start_sec, end_sec, out_path)
@@ -384,19 +436,28 @@ def align_subtitle_audio(
     align_pitch_shift_semitones: float = 0.0,
     audio_duration_sec: Optional[float] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    skip_split_every_n: int = 1,
 ) -> Dict:
     """
-    单文件"字幕跟读"主流程：整段音频按字幕时间轴切分 → 每条字幕独立音频
-    片段固定交给 Qwen3-ForcedAligner 做逐句强制对齐 → 每句的 LAB 时间戳
-    按其在原始音频里的真实起始时间整体平移 → 与静音间隙段（原样保留为
-    SIL，不参与对齐）一起拼成覆盖整段音频的最终 LAB。
+    单文件"字幕跟读"主流程：整段音频按字幕时间轴切分 → 每个"对齐块"
+    （见 _group_segments_for_alignment）独立音频片段固定交给
+    Qwen3-ForcedAligner 做强制对齐 → 每块的 LAB 时间戳按其在原始音频里的
+    真实起始时间整体平移 → 与静音间隙段（原样保留为 SIL，不参与对齐）
+    一起拼成覆盖整段音频的最终 LAB。
 
     输出的 LAB 时间戳直接对应传入的原始 wav_path（不需要拼接新音频、
     不改变音频本身），可以和 project-only / full 流程一样直接使用。
 
-    实现风格与 tts_processor.align_segments 一致（逐句对齐 + 偏移平移 +
+    实现风格与 tts_processor.align_segments 一致（逐块对齐 + 偏移平移 +
     失败兜底），区别在于这里的"分句音频"来自对原始音频切片，而不是
     TTS 逐句合成。
+
+    skip_split_every_n："字幕每多少个时间轴跳过分割音频"设置项，默认 1
+        （与改造前行为一致，每条字幕单独切片单独对齐）。设为 N > 1 时，
+        连续无静音间隙相邻的字幕每凑够 N 条就合并成一个对齐块一起切片、
+        一起送 Qwen3-FA 对齐一次（静音间隙仍然会打断合并、仍然原样保留
+        为 SIL，不参与对齐）。合并对齐后只保证整段 LAB 时间轴准确，不
+        保留每条原始字幕各自的独立边界。
 
     Returns
     -------
@@ -426,6 +487,8 @@ def align_subtitle_audio(
     if not text_segments:
         return {"success": False, "error": "字幕时间轴与音频时长不匹配，未能切出任何有效片段"}
 
+    align_groups = _group_segments_for_alignment(timeline, skip_split_every_n)
+
     try:
         aligner = get_aligner("qwen3_aligner", device=(aligner_device or "auto"))
     except Exception as e:
@@ -437,14 +500,24 @@ def align_subtitle_audio(
 
     lab_entries: List[Tuple[int, int, str]] = []
     warnings: List[str] = []
-    total = len(text_segments)
+    total = len(align_groups)
+    cue_progress_total = len(text_segments)
+    cues_done = 0
 
     try:
-        for i, seg in enumerate(text_segments):
+        for i, group in enumerate(align_groups):
+            group_start = group[0].start
+            group_end = group[-1].end
+            # 组内多条字幕的文本按顺序拼接，中间用换行分隔，交给 Qwen3-FA
+            # 当作一整段参考文本自行在音素级别分配时间戳——与单条字幕
+            # 对齐时只有一行文本相比，这里是唯一的输入差异，切片/偏移/
+            # 兜底逻辑完全复用。
+            group_text = "\n".join(s.text for s in group if s.text)
+
             seg_wav = tmp_dir / f"seg_{i:04d}.wav"
-            _slice_wav(wav_path, seg.start, seg.end, str(seg_wav))
+            _slice_wav(wav_path, group_start, group_end, str(seg_wav))
             seg_duration_100ns = _get_wav_duration_100ns(str(seg_wav))
-            offset_100ns = int(round(seg.start * 10_000_000))
+            offset_100ns = int(round(group_start * 10_000_000))
 
             align_target = str(seg_wav)
             shifted_path: Optional[str] = None
@@ -455,10 +528,10 @@ def align_subtitle_audio(
                     )
                     align_target = shifted_path
                 except Exception as e:
-                    logger.warning(f"[字幕导入] 第 {i + 1}/{total} 句对齐辅助移调失败，回退为原始音频对齐: {e}")
+                    logger.warning(f"[字幕导入] 第 {i + 1}/{total} 块对齐辅助移调失败，回退为原始音频对齐: {e}")
 
             try:
-                align_result = aligner.align(align_target, seg.text, language,
+                align_result = aligner.align(align_target, group_text, language,
                                               english_word_align=english_word_align)
             except Exception as e:
                 align_result = {"success": False, "error": str(e)}
@@ -473,16 +546,20 @@ def align_subtitle_audio(
                 local_entries = _parse_lab_lines(align_result.get("lab_content", ""))
             else:
                 logger.warning(
-                    f"[字幕导入] 第 {i + 1}/{total} 句 Qwen3-FA 对齐失败，"
-                    f"使用均匀分配兜底：{align_result.get('error')}"
+                    f"[字幕导入] 第 {i + 1}/{total} 块（含 {len(group)} 条字幕）"
+                    f"Qwen3-FA 对齐失败，使用均匀分配兜底：{align_result.get('error')}"
                 )
-                warnings.append(f"第 {i + 1} 句对齐失败，已使用均匀时间戳兜底：{align_result.get('error')}")
-                local_entries = _uniform_fallback_entries(seg.text, seg_duration_100ns)
+                warnings.append(
+                    f"第 {i + 1} 块（含 {len(group)} 条字幕）对齐失败，"
+                    f"已使用均匀时间戳兜底：{align_result.get('error')}"
+                )
+                local_entries = _uniform_fallback_entries(group_text, seg_duration_100ns)
 
             lab_entries.extend(_shift_entries(local_entries, offset_100ns))
 
+            cues_done += len(group)
             if progress_cb:
-                progress_cb(i + 1, total)
+                progress_cb(min(cues_done, cue_progress_total), cue_progress_total)
     finally:
         shutil.rmtree(str(tmp_dir), ignore_errors=True)
 
@@ -508,7 +585,7 @@ def align_subtitle_audio(
     return {
         "success": True,
         "lab_content": final_lab_text,
-        "cue_count": total,
+        "cue_count": cue_progress_total,
         "warnings": warnings,
         "audio_duration": audio_duration_100ns,
     }

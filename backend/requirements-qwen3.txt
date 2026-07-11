@@ -20,6 +20,9 @@ qwen-asr>=1.0.0
 transformers>=4.40.0
 accelerate>=0.27.0
 
+# ====================== 基础数值库 ======================
+numpy==1.26.4
+
 # ====================== 音频处理 ======================
 soundfile==0.12.1
 
@@ -33,7 +36,7 @@ tqdm
 # torch==2.3.1+cu121
 # --index-url https://download.pytorch.org/whl/cu121
 
-# CUDA 11.8（旧版显卡保留选项，如 P106-100 等 Pascal 架构）
+# CUDA 11.8（旧版显卡保留选项，如 GTX10系显卡 等 Pascal 架构）
 # torch==2.3.1+cu118
 # --index-url https://download.pytorch.org/whl/cu118
 

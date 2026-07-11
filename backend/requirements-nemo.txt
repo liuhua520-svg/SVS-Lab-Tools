@@ -43,7 +43,7 @@ tqdm
 # torchaudio==2.6.0+cu121
 # --index-url https://download.pytorch.org/whl/cu121
 
-# 选项 B：CUDA 11.8（用于旧版显卡，如 GTX 10系 / P106 等）
+# 选项 B：CUDA 11.8（用于旧版显卡，如 GTX10系 显卡等）
 # torch==2.6.0+cu118
 # torchaudio==2.6.0+cu118
 # --index-url https://download.pytorch.org/whl/cu118
