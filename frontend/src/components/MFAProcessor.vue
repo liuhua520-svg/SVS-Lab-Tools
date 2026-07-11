@@ -29,6 +29,7 @@
           <el-radio-group v-model="inputMode" @change="handleInputModeChange">
             <el-radio value="tts">{{ t('processor.inputModeTts') }}</el-radio>
             <el-radio value="audio">{{ t('processor.inputModeAudio') }}</el-radio>
+            <el-radio value="subtitle">{{ t('processor.inputModeSubtitle') }}</el-radio>
           </el-radio-group>
         </el-form-item>
 
@@ -57,6 +58,55 @@
             ✓ {{ formData.audioFile.name }} ({{ formatFileSize(formData.audioFile.size) }})
           </div>
         </el-form-item>
+
+        <!-- 字幕跟读专属面板：完整音频 + SRT/LRC 字幕文件，按字幕时间轴切分后
+             固定用 Qwen3-ForcedAligner 逐句强制对齐，拼接成覆盖整段音频的 LAB。 -->
+        <template v-if="inputMode === 'subtitle'">
+          <el-form-item :label="t('processor.audioFile')">
+            <el-upload
+              :key="subtitleAudioUploadKey"
+              drag
+              action="#"
+              :auto-upload="false"
+              :limit="1"
+              :on-exceed="handleExceed"
+              @change="handleSubtitleAudioSelect"
+              accept=".wav,.mp3,.flac,.m4a,.aac,.ogg"
+            >
+              <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+              <div class="el-upload__text">{{ t('processor.dragAudio') }}</div>
+              <template #tip>
+                <div class="el-upload__tip">{{ t('processor.supportedAudio') }}</div>
+              </template>
+            </el-upload>
+            <div v-if="subtitleImport.audioFile" class="file-info">
+              ✓ {{ subtitleImport.audioFile.name }} ({{ formatFileSize(subtitleImport.audioFile.size) }})
+            </div>
+          </el-form-item>
+
+          <el-form-item :label="t('processor.subtitleFile')">
+            <el-upload
+              :key="subtitleFileUploadKey"
+              drag
+              action="#"
+              :auto-upload="false"
+              :limit="1"
+              :on-exceed="handleExceed"
+              @change="handleSubtitleFileSelect"
+              accept=".srt,.lrc,.txt"
+            >
+              <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+              <div class="el-upload__text">{{ t('processor.dragSubtitle') }}</div>
+              <template #tip>
+                <div class="el-upload__tip">{{ t('processor.supportedSubtitle') }}</div>
+              </template>
+            </el-upload>
+            <div v-if="subtitleImport.subtitleFile" class="file-info">
+              ✓ {{ subtitleImport.subtitleFile.name }} ({{ formatFileSize(subtitleImport.subtitleFile.size) }})
+            </div>
+            <div class="help-text">{{ t('processor.subtitleImportHint') }}</div>
+          </el-form-item>
+        </template>
 
         <!-- TTS跟读专属面板：讲述人 / EdgeTTS 音色 / 语速·音调·音量 / 预览
              （对应"音频跟读"下的音频上传区域；TTS跟读用合成语音代替上传音频） -->
@@ -365,7 +415,7 @@
           </template>
         </el-dialog>
 
-        <!-- 对齐后端选择器（TTS跟读固定使用 Qwen3-FA，不显示；project-only 模式不需要对齐） -->
+        <!-- 对齐后端选择器（TTS跟读 / 字幕跟读固定使用 Qwen3-FA，不显示；project-only 模式不需要对齐） -->
         <el-form-item v-if="inputMode === 'audio' && processingMode !== 'project-only'" :label="t('processor.backendLabel')">
           <el-radio-group v-model="alignerBackend">
             <el-radio value="mfa">
@@ -440,9 +490,9 @@
           </el-alert>
         </el-form-item>
 
-        <!-- 对齐工具运行设备（非 MFA 后端 或 TTS跟读固定的 Qwen3-FA 都需要） -->
+        <!-- 对齐工具运行设备（非 MFA 后端 或 TTS跟读/字幕跟读固定的 Qwen3-FA 都需要） -->
         <el-form-item
-          v-if="inputMode === 'tts' || (processingMode !== 'project-only' && alignerBackend !== 'mfa')"
+          v-if="inputMode === 'tts' || inputMode === 'subtitle' || (processingMode !== 'project-only' && alignerBackend !== 'mfa')"
           :label="t('processor.alignDevice')"
         >
           <el-radio-group v-model="advancedConfig.aligner_device">
@@ -580,7 +630,7 @@
 		</el-form-item>
 
 		<el-form-item
-		  v-if="processingMode !== 'project-only'"
+		  v-if="processingMode !== 'project-only' && inputMode !== 'subtitle'"
 		  :label="t('processor.inputText')"
 		>
 		  <el-input
@@ -662,7 +712,10 @@
             <el-radio v-if="inputMode === 'audio'" value="project-only">{{ t('processor.processingModeProjectOnly') }}</el-radio>
           </el-radio-group>
           <div class="mode-help">
-            <small v-if="processingMode === 'mfa-only'">
+            <small v-if="inputMode === 'subtitle'">
+              {{ t('processor.subtitleAlignerFixedHint') }}
+            </small>
+            <small v-else-if="processingMode === 'mfa-only'">
               {{ t('processor.processingModeMfaOnlyHint', { backend: alignerBackendLabel }) }}
             </small>
             <small v-else-if="processingMode === 'full'">
@@ -1346,7 +1399,7 @@ type TtsNarrator = { id: string; name: string; engine?: string; voice: string; r
 type TtsVoice = { id: string; name: string; gender?: string; locale: string }
 type TtsEngine = { id: string; label: string; label_zh: string; available: boolean; message: string }
 
-const inputMode = ref<'audio' | 'tts'>('audio')
+const inputMode = ref<'audio' | 'tts' | 'subtitle'>('audio')
 const ttsConfig = ref<{ engine: string; narratorId: string; voice: string; rateNum: number; pitchNum: number; volumeNum: number }>({
   engine: 'edge_tts',
   narratorId: '',
@@ -1785,6 +1838,30 @@ const audioUploadKey = ref(0)
 const midiLoaded = computed(() => processingMode.value === 'project-only' && !!formData.value.midiFile)
 const selectedNotationFile = computed(() => formData.value.labFile || formData.value.midiFile)
 
+// ── 字幕跟读（SRT/LRC 导入）状态 ─────────────────────────────────────
+// 与"音频跟读"/"TTS跟读"互斥：不需要用户手动填写文本，文本完全来自
+// 字幕文件的每一条内容；对齐固定使用 Qwen3-ForcedAligner（与 TTS跟读
+// 一致，不经过 alignerBackend 选择器）。
+const subtitleImport = ref<{ audioFile: File | null; subtitleFile: File | null }>({
+  audioFile: null,
+  subtitleFile: null,
+})
+const subtitleAudioUploadKey = ref(0)
+const subtitleFileUploadKey = ref(0)
+
+const handleSubtitleAudioSelect = (file: any) => {
+  const raw: File | null = file?.raw || null
+  if (!raw) return
+  subtitleImport.value.audioFile = raw
+}
+
+const handleSubtitleFileSelect = (file: any) => {
+  const raw: File | null = file?.raw || null
+  if (!raw) return
+  subtitleImport.value.subtitleFile = raw
+}
+
+
 // VSQX 歌手名 / ID：按处理模式 + 语种自动切换
 // project-only 无语种选择，固定使用日语歌手声库
 const vsqxSingerConfig = computed((): { name: string; id: string } => {
@@ -1810,8 +1887,8 @@ const normalizedModels = computed(() => {
 })
 
 const isReady = computed(() => {
-  // TTS跟读固定使用 Qwen3-ForcedAligner，就绪状态看它是否可用
-  if (inputMode.value === 'tts') {
+  // TTS跟读 / 字幕跟读固定使用 Qwen3-ForcedAligner，就绪状态看它是否可用
+  if (inputMode.value === 'tts' || inputMode.value === 'subtitle') {
     return alignerStatus.value['qwen3_aligner']?.available ?? false
   }
   // 替代后端不依赖 MFA 模型，只要后端可用或是 MFA 时检查模型
@@ -1919,6 +1996,12 @@ const alignerBackendLabel = computed(() => {
     qwen3_aligner: t('processor.backendQwen3Aligner'),
     nemo_aligner: t('processor.backendNemoAligner'),
   }
+  // TTS跟读 / 字幕跟读固定使用 Qwen3-ForcedAligner，不经过 alignerBackend
+  // 选择器（该 ref 在这两种模式下可能仍停留在用户上次在"音频跟读"模式
+  // 选过的其它后端），这里显式返回固定标签，避免界面误显示成错误的后端名。
+  if (inputMode.value === 'tts' || inputMode.value === 'subtitle') {
+    return labels.qwen3_aligner
+  }
   return labels[alignerBackend.value] || alignerBackend.value
 })
 
@@ -1944,6 +2027,12 @@ watch(() => formData.value.language, (lang) => {
 const isSubmitDisabled = computed(() => {
   if (inputMode.value === 'tts') {
     return !formData.value.text.trim() || !ttsConfig.value.voice || !isReady.value || segmentPreview.value.loading
+  }
+  if (inputMode.value === 'subtitle') {
+    // 字幕跟读用的是独立的 subtitleImport 状态（音频+字幕文件两个字段），
+    // 不经过 formData.value.audioFile / text，需要单独判断，否则会一直
+    // 沿用下面音频跟读模式的判断条件，误判为"未选择音频"而永久禁用。
+    return !subtitleImport.value.audioFile || !subtitleImport.value.subtitleFile || !isReady.value
   }
   if (processingMode.value === 'project-only') {
     return !formData.value.audioFile || (!formData.value.labFile && !formData.value.midiFile)
@@ -2096,6 +2185,8 @@ const handleInputModeChange = () => {
     if (processingMode.value === 'project-only') processingMode.value = 'full'
     fetchTtsEngines()
     fetchTtsVoices(formData.value.language)
+  } else if (inputMode.value === 'subtitle') {
+    if (processingMode.value === 'project-only') processingMode.value = 'full'
   }
 }
 
@@ -2597,6 +2688,112 @@ const processAudio = async () => {
       if (processingMode.value === 'full') {
         if (!normalized.projectPath) throw new Error(t('processor.projectMissing'))
         updateProcessingStep(0, t('processor.statusDone'), t('processor.ttsSynthesizeDone'))
+        updateProcessingStep(1, t('processor.statusDone'), t('processor.projectModeF0Done'))
+        updateProcessingStep(2, t('processor.statusDone'), `${t('processor.projectFile')}: ${getFileName(normalized.projectPath)}`)
+      } else {
+        if (!normalized.labContent) throw new Error(t('processor.labEmpty'))
+        const segCount = countLabSegments(normalized.labContent)
+        updateProcessingStep(0, t('processor.statusDone'), `${segCount} ${t('processor.segmentCount')}`)
+        updateProcessingStep(1, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
+        updateProcessingStep(2, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
+      }
+
+      result.value = normalized
+      progressPercent.value = 100
+      ElMessage.success(`✅ ${t('processor.success')}`)
+    } catch (e: any) {
+      error.value = e?.message || String(e)
+      ElMessage.error(`❌ ${error.value}`)
+    } finally {
+      if (progressTimer !== null) window.clearInterval(progressTimer)
+      clearJobPolling()
+      processing.value = false
+    }
+    return
+  }
+
+  // ============================================================
+  // 分支 0.5) 字幕跟读：完整音频 + SRT/LRC 字幕文件，按字幕时间轴切分
+  // 后固定用 Qwen3-ForcedAligner 逐句强制对齐，拼接成覆盖整段音频的 LAB。
+  // ============================================================
+  if (inputMode.value === 'subtitle') {
+    if (!subtitleImport.value.audioFile) {
+      ElMessage.warning(t('processor.selectAudio'))
+      return
+    }
+    if (!subtitleImport.value.subtitleFile) {
+      ElMessage.warning(t('processor.selectSubtitleFile'))
+      return
+    }
+    if (!isReady.value) {
+      ElMessage.error(t('processor.backendNotReady'))
+      return
+    }
+
+    clearJobPolling()
+    processing.value = true
+    progressPercent.value = 0
+    error.value = ''
+    result.value = null
+    currentJobId.value = ''
+    resetProcessingSteps()
+    updateProcessingStep(0, t('processor.statusProcessing'), `${alignerBackendLabel.value} ${t('processor.processing')}...`)
+    updateProcessingStep(1, t('processor.statusWaiting'), t('processor.stageExtractF0'))
+    updateProcessingStep(2, t('processor.statusWaiting'), t('processor.projectModeWaitProject'))
+
+    let progressTimer: number | null = null
+
+    try {
+      const formDataObj = new FormData()
+      formDataObj.append('audio_file', subtitleImport.value.audioFile)
+      formDataObj.append('subtitle_file', subtitleImport.value.subtitleFile)
+      formDataObj.append('language', formData.value.language)
+      formDataObj.append('aligner_device', advancedConfig.value.aligner_device)
+      formDataObj.append('align_pitch_shift_semitones', advancedConfig.value.align_pitch_shift_semitones.toString())
+      formDataObj.append('english_word_align', (englishWordAlign.value && formData.value.language !== 'jpn').toString())
+      formDataObj.append('processing_mode', processingMode.value === 'full' ? 'full' : 'mfa-only')
+
+      if (processingMode.value === 'full') {
+        formDataObj.append('format', formData.value.outputFormat)
+        if (formData.value.outputFormat === 'vsqx') {
+          formDataObj.append('vsqx_singer',    vsqxSingerConfig.value.name)
+          formDataObj.append('vsqx_singer_id', vsqxSingerConfig.value.id)
+          formDataObj.append('vsqx_pitch_smooth_window', advancedConfig.value.vsqx_pitch_smooth_window.toString())
+        }
+        formDataObj.append('title', formData.value.projectTitle)
+        formDataObj.append('bpm', advancedConfig.value.bpm.toString())
+        formDataObj.append('base_pitch', advancedConfig.value.base_pitch.toString())
+        formDataObj.append('f0_method', advancedConfig.value.f0_method)
+        formDataObj.append('f0_device', advancedConfig.value.f0_device)
+        formDataObj.append('crepe_model', advancedConfig.value.crepe_model)
+        formDataObj.append('f0_smooth', advancedConfig.value.f0_smooth.toString())
+        formDataObj.append('f0_smooth_window', advancedConfig.value.f0_smooth_window.toString())
+        formDataObj.append('precision', advancedConfig.value.precision)
+        formDataObj.append('f0_floor', advancedConfig.value.f0_floor.toString())
+        formDataObj.append('f0_ceil', advancedConfig.value.f0_ceil.toString())
+        formDataObj.append('auto_note_pitch', advancedConfig.value.auto_note_pitch.toString())
+        formDataObj.append('export_pitch_line', advancedConfig.value.export_pitch_line.toString())
+        formDataObj.append('word_phoneme_map', wordPhonemeMapEffective.value.toString())
+        formDataObj.append('dict_source', dictSource.value)
+      }
+
+      progressTimer = window.setInterval(() => {
+        if (progressPercent.value < 30) progressPercent.value += 3
+      }, 400)
+
+      const res = await fetch('/api/subtitle-import/align', { method: 'POST', body: formDataObj })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || t('processor.submitFailed'))
+
+      if (progressTimer !== null) { window.clearInterval(progressTimer); progressTimer = null }
+      progressPercent.value = 35
+
+      const finalPayload = await waitForJobFinished(data.job_id)
+      const normalized = normalizeResult(finalPayload)
+
+      if (processingMode.value === 'full') {
+        if (!normalized.projectPath) throw new Error(t('processor.projectMissing'))
+        updateProcessingStep(0, t('processor.statusDone'), `${alignerBackendLabel.value} ${t('processor.statusDone')}`)
         updateProcessingStep(1, t('processor.statusDone'), t('processor.projectModeF0Done'))
         updateProcessingStep(2, t('processor.statusDone'), `${t('processor.projectFile')}: ${getFileName(normalized.projectPath)}`)
       } else {

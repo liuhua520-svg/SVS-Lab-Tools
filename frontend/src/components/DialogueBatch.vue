@@ -389,7 +389,7 @@
 
       <el-divider />
 
-      <!-- ============== 文件夹导入 / 对话框列表 ============== -->
+      <!-- ============== 文件夹导入 / 导入字幕 / 对话框列表 ============== -->
       <input
         ref="folderInputRef"
         type="file"
@@ -398,12 +398,64 @@
         style="display: none"
         @change="handleFolderSelect"
       />
+      <input
+        ref="subtitleImportAudioInputRef"
+        type="file"
+        accept=".wav,.mp3,.flac,.m4a,.aac,.ogg"
+        style="display: none"
+        @change="handleSubtitleImportAudioPick"
+      />
+      <input
+        ref="subtitleImportFileInputRef"
+        type="file"
+        accept=".srt,.lrc,.txt"
+        style="display: none"
+        @change="handleSubtitleImportFilePick"
+      />
       <div class="folder-import-bar">
         <el-button :disabled="processing" @click="triggerFolderImport">📁 {{ t('dialogue.importFolder') }}</el-button>
+        <el-button :disabled="processing" @click="openSubtitleImportDialog">📝 {{ t('dialogue.importSubtitle') }}</el-button>
         <el-button :disabled="processing" @click="addBox">➕ {{ t('dialogue.addBox') }}</el-button>
         <el-button type="danger" plain :disabled="processing" @click="clearAllBoxes">🗑️ {{ t('dialogue.clearAll') }}</el-button>
       </div>
       <p class="help-text">{{ t('dialogue.importFolderHint') }}</p>
+
+      <el-dialog v-model="subtitleImportDialog.visible" :title="t('dialogue.importSubtitle')" width="520px">
+        <p class="help-text" style="margin-top:0">{{ t('dialogue.subtitleImportDialogHint') }}</p>
+
+        <el-form label-position="top">
+          <el-form-item :label="t('processor.audioFile')">
+            <el-button :disabled="subtitleImportDialog.loading" @click="subtitleImportAudioInputRef?.click()">
+              {{ t('dialogue.chooseFile') }}
+            </el-button>
+            <span v-if="subtitleImportDialog.audioFile" class="file-info" style="margin-left:8px">
+              ✓ {{ subtitleImportDialog.audioFile.name }}
+            </span>
+          </el-form-item>
+          <el-form-item :label="t('processor.subtitleFile')">
+            <el-button :disabled="subtitleImportDialog.loading" @click="subtitleImportFileInputRef?.click()">
+              {{ t('dialogue.chooseFile') }}
+            </el-button>
+            <span v-if="subtitleImportDialog.subtitleFile" class="file-info" style="margin-left:8px">
+              ✓ {{ subtitleImportDialog.subtitleFile.name }}
+            </span>
+          </el-form-item>
+        </el-form>
+
+        <template #footer>
+          <el-button :disabled="subtitleImportDialog.loading" @click="subtitleImportDialog.visible = false">
+            {{ t('dialogue.cancel') }}
+          </el-button>
+          <el-button
+            type="primary"
+            :loading="subtitleImportDialog.loading"
+            :disabled="!subtitleImportDialog.audioFile || !subtitleImportDialog.subtitleFile"
+            @click="runSubtitleImport"
+          >
+            {{ t('dialogue.startImport') }}
+          </el-button>
+        </template>
+      </el-dialog>
 
       <div class="box-list">
         <div v-for="(box, i) in boxes" :key="box.id" class="dialogue-box">
@@ -2278,6 +2330,129 @@ const showBoxError = (box: DialogueBox) => {
 // ============== 文件夹导入（按文件名自动配对） ==============
 const folderInputRef = ref<HTMLInputElement | null>(null)
 const AUDIO_EXTS = ['wav', 'mp3', 'flac', 'm4a', 'aac', 'ogg']
+
+// ── 导入字幕（SRT/LRC → 按时间轴切分音频 → 逐句追加对话框） ──────────
+// 与"导入文件夹"并列的另一种批量建框方式：用户只有一份完整音频 + 一份
+// 字幕文件，而不是逐句已经切好的多个文件。后端负责按字幕时间轴切分
+// 音频（静音间隙保留但不生成对话框，仅用于提示），前端把每个切片下载
+// 为 File 对象后像"文件夹导入"一样批量追加为对话框；追加后把页面级
+// alignerBackend 切到 Qwen3-ForcedAligner（与 TTS跟读一致的固定后端），
+// 每个框仍可以在"单独设置"里再单独覆盖。
+const subtitleImportAudioInputRef = ref<HTMLInputElement | null>(null)
+const subtitleImportFileInputRef = ref<HTMLInputElement | null>(null)
+const subtitleImportDialog = ref<{
+  visible: boolean
+  loading: boolean
+  audioFile: File | null
+  subtitleFile: File | null
+}>({
+  visible: false,
+  loading: false,
+  audioFile: null,
+  subtitleFile: null,
+})
+
+const openSubtitleImportDialog = () => {
+  subtitleImportDialog.value.audioFile = null
+  subtitleImportDialog.value.subtitleFile = null
+  subtitleImportDialog.value.loading = false
+  subtitleImportDialog.value.visible = true
+}
+
+const handleSubtitleImportAudioPick = (e: Event) => {
+  const input = e.target as HTMLInputElement
+  const file = input.files && input.files[0]
+  if (file) subtitleImportDialog.value.audioFile = file
+  input.value = ''
+}
+
+const handleSubtitleImportFilePick = (e: Event) => {
+  const input = e.target as HTMLInputElement
+  const file = input.files && input.files[0]
+  if (file) subtitleImportDialog.value.subtitleFile = file
+  input.value = ''
+}
+
+const runSubtitleImport = async () => {
+  const { audioFile, subtitleFile } = subtitleImportDialog.value
+  if (!audioFile || !subtitleFile) return
+
+  subtitleImportDialog.value.loading = true
+  let sessionId = ''
+  try {
+    const formDataObj = new FormData()
+    formDataObj.append('audio_file', audioFile)
+    formDataObj.append('subtitle_file', subtitleFile)
+
+    const res = await fetch('/api/subtitle-import/split', { method: 'POST', body: formDataObj })
+    const data = await res.json()
+    if (!res.ok || !data.success) throw new Error(data.error || t('processor.submitFailed'))
+
+    sessionId = data.session_id
+    const cues: Array<{ index: number; text: string; start: number; end: number }> = data.cues || []
+    if (!cues.length) throw new Error(t('dialogue.subtitleImportEmpty'))
+
+    // 逐个下载切片音频，包装成 File 对象后组装成新对话框；下载顺序按
+    // cue.index 串行进行即可（切片数量通常是几十到大几百条，串行请求
+    // 足够快，也避免一次性并发过多请求占满浏览器连接数）。
+    const newBoxes: DialogueBox[] = []
+    for (const cue of cues) {
+      const sliceRes = await fetch(`/api/subtitle-import/slice/${sessionId}/${cue.index}`)
+      if (!sliceRes.ok) throw new Error(t('dialogue.subtitleImportSliceFailed', { index: cue.index + 1 }))
+      const blob = await sliceRes.blob()
+      const file = new File([blob], `subtitle_${String(cue.index + 1).padStart(4, '0')}.wav`, { type: 'audio/wav' })
+      const box = createBox()
+      box.audioFile = file
+      box.text = cue.text
+      newBoxes.push(box)
+    }
+
+    const firstIsBlank =
+      boxes.value.length === 1 &&
+      !boxes.value[0].audioFile &&
+      !boxes.value[0].labFile &&
+      !boxes.value[0].midiFile &&
+      !boxes.value[0].text.trim()
+
+    if (firstIsBlank && newBoxes.length) {
+      boxes.value = newBoxes
+    } else {
+      boxes.value.push(...newBoxes)
+    }
+
+    if (boxes.value.length > MAX_BOXES) {
+      boxes.value = boxes.value.slice(0, MAX_BOXES)
+      ElMessage.warning(`Maximum ${MAX_BOXES} rows`)
+    }
+
+    // 字幕跟读固定使用 Qwen3-ForcedAligner，切好的每一句都是独立短音频，
+    // 逐句强制对齐通常比对整段长音频对齐更准；页面级设置切过去之后，
+    // 后续新增/未单独覆盖的框都会沿用这个后端，用户仍可在每个框的
+    // "单独设置"里改回其它后端。
+    alignerBackend.value = 'qwen3_aligner'
+
+    subtitleImportDialog.value.visible = false
+    ElMessage.success(
+      data.gap_count > 0
+        ? t('dialogue.subtitleImportSuccessWithGaps', { count: cues.length, gaps: data.gap_count })
+        : t('dialogue.subtitleImportSuccess', { count: cues.length })
+    )
+  } catch (e: any) {
+    ElMessage.error(`❌ ${e?.message || String(e)}`)
+  } finally {
+    subtitleImportDialog.value.loading = false
+    if (sessionId) {
+      // 切片已经全部下载为本地 File 对象，服务端临时目录可以立即清理，
+      // 不需要等对话框继续处理完才清；清理失败（例如网络抖动）不影响
+      // 已经导入到页面里的对话框，静默忽略即可。
+      fetch('/api/subtitle-import/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId }),
+      }).catch(() => {})
+    }
+  }
+}
 
 const triggerFolderImport = () => {
   const probe = document.createElement('input')

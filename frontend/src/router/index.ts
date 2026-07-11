@@ -23,6 +23,11 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../components/DialogueBatch.vue'),
   },
   {
+    path: '/subtitle',
+    name: 'subtitle',
+    component: () => import('../components/SubtitleRecognizer.vue'),
+  },
+  {
     path: '/about',
     name: 'about',
     component: () => import('../components/AboutPage.vue'),
@@ -31,6 +36,11 @@ const routes: RouteRecordRaw[] = [
     path: '/help',
     name: 'help',
     component: () => import('../components/HelpPage.vue'),
+  },
+  {
+    path: '/english-g2p',
+    name: 'englishG2P',
+    component: () => import('../components/EnglishG2P.vue'),
   },
   {
     // 未知路径统一回退到主页（对齐处理页）
