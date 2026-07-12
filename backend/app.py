@@ -599,6 +599,18 @@ def dictionary_delete_all(source):
     return jsonify({"success": True}), 200
 
 
+@app.route("/api/dictionary/<source>", methods=["PATCH"])
+def dictionary_rename(source):
+    """重命名一本独立词典。body: {"name": "新名称"}"""
+    data = request.get_json(force=True, silent=True) or {}
+    new_name = data.get("name", "")
+    try:
+        renamed = dictionary_manager.rename_dictionary(source, new_name)
+        return jsonify({"success": True, "dictionary": renamed}), 200
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
 @app.route("/api/dictionary/<source>", methods=["GET"])
 def dictionary_list(source):
     """列出指定来源词典的全部词条"""
@@ -648,6 +660,28 @@ def _safe_filename_component(name: str) -> str:
     return cleaned[:80]
 
 
+def _ascii_fallback_filename(name: str) -> str:
+    """
+    生成一个仅含 ASCII 字符的文件名，用作 Content-Disposition 里传统
+    filename= 参数的取值。
+
+    【中文词典名无法下载 CSV 的根因修复】HTTP 头的取值按规范只能是
+    ASCII 字节（RFC 6266），此前 filename= 参数直接塞入原始中文字符，
+    是一个非法的头内容——Chrome 等浏览器在解析到这种非法 filename=
+    时会把整个 Content-Disposition 头判定为不可用（哪怕后面还带着
+    合法的 filename* 扩展参数），表现出来就是点击"导出 CSV"没有反应，
+    文件下载不下来。
+    真正的中文文件名交给 filename*=UTF-8''... 这个符合 RFC 5987 编码
+    规则的扩展参数传递，支持它的浏览器都会优先使用并正确显示中文
+    文件名；这里的 filename= 只是给不支持 filename* 的极少数客户端
+    兜底，所以把非 ASCII 字符都替换掉，保证整个头都是合法 ASCII。
+    """
+    ascii_only = name.encode("ascii", "ignore").decode("ascii").strip()
+    ascii_only = "".join(ch if ch.isalnum() or ch in "_-." else "_" for ch in ascii_only)
+    ascii_only = ascii_only.strip("_") or "dictionary"
+    return ascii_only[:80]
+
+
 @app.route("/api/dictionary/<source>/export", methods=["GET"])
 def dictionary_export(source):
     """导出词典。?format=json（默认，直接返回 JSON）或 ?format=csv（文件下载）"""
@@ -660,12 +694,13 @@ def dictionary_export(source):
             # 其他编码打开后出现乱码（这也是此前"CSV 词典无法正常使用"
             # 反馈的常见成因之一）。
             csv_bytes = ("\ufeff" + csv_text).encode("utf-8")
+            ascii_name = _ascii_fallback_filename(safe_name)
             return Response(
                 csv_bytes,
                 mimetype="text/csv",
                 headers={
                     "Content-Disposition": (
-                        f"attachment; filename={safe_name}_dictionary.csv; "
+                        f"attachment; filename={ascii_name}_dictionary.csv; "
                         f"filename*=UTF-8''{quote(safe_name)}_dictionary.csv"
                     )
                 },

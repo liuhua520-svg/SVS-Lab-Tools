@@ -637,6 +637,34 @@ def _get_whisperx_prepass_settings() -> Dict[str, object]:
     return fallback
 
 
+def _get_sentence_chunking_enabled() -> bool:
+    """
+    读取"Qwen3-ForcedAligner 按句子分段对齐"总开关
+    （qwen3_fa_enable_sentence_chunking，默认 False/禁用）。
+
+    该开关是 _align_chunked() 这一整套"按句末标点规划分段 + 逐段独立
+    对齐"流程的总闸门：为 False 时，Qwen3ForcedAligner.align() 会完全
+    跳过 _align_chunked()，直接调用 _align_single_chunk() 做整段单次
+    对齐，行为等同于 v3 分段逻辑引入之前的原始版本；WhisperX 粗测预处理
+    （_get_whisperx_prepass_settings）是分段流程内部的一个子选项，只在
+    本开关为 True 时才可能被实际用到——两者的父子关系由
+    app_settings.save_settings() 在保存时强制维护（总开关关闭时粗测
+    预处理会被一并强制置为 False），这里读取到的值已经是校验过的结果，
+    不需要再额外处理"父开关关闭但子开关仍为 True"这种矛盾状态。
+
+    与 _get_whisperx_prepass_settings() 一样，只在每次 align() 任务
+    开始时读取一次，不做 mtime 缓存；读取失败时安全回退到"关闭"，
+    与该功能默认不开启保持一致，不影响任何现有行为。
+    """
+    try:
+        import app_settings
+        settings = app_settings.load_settings()
+        return bool(settings.get("qwen3_fa_enable_sentence_chunking", False))
+    except Exception as e:
+        logger.debug("读取按句子分段对齐总开关失败，使用默认值（关闭）: %s", e)
+        return False
+
+
 def _get_whisperx_batch_size() -> int:
     """
     读取 WhisperX ASR 转录使用的 batch_size 调优设置（默认 16，与
@@ -3762,33 +3790,48 @@ class Qwen3ForcedAligner(AltAlignerBase):
             total_sec = self._get_audio_duration_100ns(audio_path) / 1e7
 
             tuning = _get_alignment_tuning()
-            # 【v3：不再用音频总时长的阈值/目标时长来决定要不要分段】旧版
-            # qwen3_fa_chunk_threshold_sec（超过多少秒才分段）/
-            # qwen3_fa_chunk_target_sec（每段目标多长）都已放弃使用——这两
-            # 个参数只看音频总时长，不看文本本身的句子结构，本质上仍是
-            # "猜"语速、猜切点。现在统一交给 _align_chunked ->
-            # _plan_sentence_aligned_chunks 按参考文本自身的句末标点
-            # （。！？.!?…；\n）决定切不切、切在哪：只要文本能按标点切出
-            # 2 句及以上，就会分段独立对齐；如果只有 1 句（或短到需要与
-            # 相邻句合并成 1 组）、或完全没有可用标点，_align_chunked 内部
-            # 会自动退化为整段单次对齐——因此这里不需要、也不应该再用一个
-            # 单独的时长阈值去"提前"决定是否进入分段路径。
-            # min/max 这两个值只处理"单句过短需要并入相邻句子"（min）/
-            # "单句过长需要先按句内逗号顿号再切一刀"（max）这两种边缘
-            # 情况，不影响"按句子边界切分"这个大前提本身。
-            min_sentence_chunk_sec = float(tuning.get("qwen3_fa_min_sentence_chunk_sec", 3.0))
-            max_sentence_chunk_sec = float(tuning.get("qwen3_fa_max_sentence_chunk_sec", 20.0))
 
-            logger.info(
-                f"[Qwen3-FA] 音频时长 {total_sec:.1f}s，按参考文本句末标点"
-                f"规划分段（单句下限 {min_sentence_chunk_sec:.1f}s / 上限 "
-                f"{max_sentence_chunk_sec:.1f}s；仅 1 句或无可用标点时会"
-                "自动退化为整段单次对齐）"
-            )
-            word_entries = self._align_chunked(
-                audio_path, text, lang_name, int_lang, total_sec,
-                min_sentence_chunk_sec, max_sentence_chunk_sec,
-            )
+            # 【总开关】qwen3_fa_enable_sentence_chunking（默认 False/
+            # 禁用）：为 False 时完全跳过下面 _align_chunked() 的整套
+            # "按句末标点规划分段 + 逐段独立对齐"流程，直接整段单次对齐，
+            # 行为等同于分段逻辑引入之前的原始版本——不做静音感知分段，
+            # 也不会用到 WhisperX 粗测预处理（该子开关此时已被
+            # app_settings.save_settings() 强制置为 False）。
+            if not _get_sentence_chunking_enabled():
+                logger.info(
+                    f"[Qwen3-FA] 音频时长 {total_sec:.1f}s，"
+                    "「按句子分段对齐」总开关已禁用，直接整段单次对齐"
+                )
+                word_entries = self._align_single_chunk(audio_path, text, lang_name, int_lang)
+            else:
+                # 【v3：不再用音频总时长的阈值/目标时长来决定要不要分段】
+                # 旧版 qwen3_fa_chunk_threshold_sec（超过多少秒才分段）/
+                # qwen3_fa_chunk_target_sec（每段目标多长）都已放弃使用——
+                # 这两个参数只看音频总时长，不看文本本身的句子结构，本质
+                # 上仍是"猜"语速、猜切点。现在统一交给 _align_chunked ->
+                # _plan_sentence_aligned_chunks 按参考文本自身的句末标点
+                # （。！？.!?…；\n）决定切不切、切在哪：只要文本能按标点
+                # 切出 2 句及以上，就会分段独立对齐；如果只有 1 句（或短到
+                # 需要与相邻句合并成 1 组）、或完全没有可用标点，
+                # _align_chunked 内部会自动退化为整段单次对齐——因此这里
+                # 不需要、也不应该再用一个单独的时长阈值去"提前"决定是否
+                # 进入分段路径。
+                # min/max 这两个值只处理"单句过短需要并入相邻句子"（min）/
+                # "单句过长需要先按句内逗号顿号再切一刀"（max）这两种边缘
+                # 情况，不影响"按句子边界切分"这个大前提本身。
+                min_sentence_chunk_sec = float(tuning.get("qwen3_fa_min_sentence_chunk_sec", 3.0))
+                max_sentence_chunk_sec = float(tuning.get("qwen3_fa_max_sentence_chunk_sec", 20.0))
+
+                logger.info(
+                    f"[Qwen3-FA] 音频时长 {total_sec:.1f}s，按参考文本句末标点"
+                    f"规划分段（单句下限 {min_sentence_chunk_sec:.1f}s / 上限 "
+                    f"{max_sentence_chunk_sec:.1f}s；仅 1 句或无可用标点时会"
+                    "自动退化为整段单次对齐）"
+                )
+                word_entries = self._align_chunked(
+                    audio_path, text, lang_name, int_lang, total_sec,
+                    min_sentence_chunk_sec, max_sentence_chunk_sec,
+                )
 
             if not word_entries:
                 return {

@@ -220,11 +220,48 @@ def create_dictionary(name: str, notation: str = DEFAULT_NOTATION) -> Dict[str, 
     notation = _normalize_notation(notation)
     with _lock:
         store = {k: dict(v, entries=dict(v.get("entries", {}))) for k, v in _load().items()}
-        if n in store:
-            raise ValueError(f"词典 {n!r} 已存在")
+        # 大小写不敏感判重：避免出现 "MyDict" / "mydict" 这种仅大小写不同、
+        # 实际上会让用户误以为是同一本词典的"重名"词典（下拉框里看起来
+        # 像是重复项，选择/维护时容易搞混）。
+        existing_key = _find_case_insensitive_key(
+            {k: "" for k in store.keys()}, n
+        )
+        if existing_key is not None:
+            raise ValueError(f"词典 {existing_key!r} 已存在（名称不区分大小写）")
         store[n] = {"notation": notation, "entries": {}}
         _save(store)
         return {"name": n, "notation": notation, "count": 0}
+
+
+def rename_dictionary(old_name: str, new_name: str) -> Dict[str, object]:
+    """
+    重命名一本已存在的独立词典。
+
+    名称判重按大小写不敏感处理（与 create_dictionary 一致），但允许
+    "改成大小写不同的自己"这种情况（例如 "mydict" -> "MyDict"）。
+    """
+    old_n = (old_name or "").strip()
+    new_n = _normalize_name(new_name)
+    with _lock:
+        store = {k: dict(v, entries=dict(v.get("entries", {}))) for k, v in _load().items()}
+        if old_n not in store:
+            raise ValueError(f"词典 {old_n!r} 不存在")
+
+        if old_n != new_n:
+            existing_key = _find_case_insensitive_key(
+                {k: "" for k in store.keys() if k != old_n}, new_n
+            )
+            if existing_key is not None:
+                raise ValueError(f"词典 {existing_key!r} 已存在（名称不区分大小写）")
+
+            store[new_n] = store.pop(old_n)
+            _save(store)
+        entry = store[new_n]
+        return {
+            "name": new_n,
+            "notation": entry.get("notation", DEFAULT_NOTATION),
+            "count": len(entry.get("entries", {})),
+        }
 
 
 def delete_dictionary(name: str) -> bool:

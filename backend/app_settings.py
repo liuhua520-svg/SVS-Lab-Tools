@@ -83,6 +83,22 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     # Qwen3ForcedAligner._align_chunked() / _plan_sentence_aligned_chunks()
     # 的说明）。
     #
+    # 【总开关】是否启用"按句子分段对齐"这一整套流程。
+    # False → 禁用（默认）：Qwen3ForcedAligner.align() 跳过
+    #         _align_chunked() 规划分段这一步，始终走 _align_single_chunk()
+    #         整段单次对齐——不管音频多长、参考文本能不能按标点切出多句，
+    #         都不做静音感知分段。行为与改造前（v3 分段逻辑引入之前）
+    #         完全一致。
+    # True  → 启用：按 _align_chunked() 里的规则，先按参考文本句末标点
+    #         规划分段边界，再逐段独立对齐（详见下面两项 min/max 的说明）。
+    #
+    # 该开关与下面【WhisperX 粗测预处理】(qwen3_fa_use_whisperx_prepass)
+    # 是父子关系：粗测预处理只在"按句子分段对齐"这一整套流程内部生效
+    # （用于规划分段边界），一旦本开关被设为 False，粗测预处理开关会被
+    # save_settings() 强制一并置为 False，避免出现"分段对齐已禁用，但
+    # 粗测预处理仍显示已开启"这种无意义的状态。
+    "qwen3_fa_enable_sentence_chunking": False,
+    #
     # 【v3】此前的 qwen3_fa_chunk_threshold_sec（音频超过多少秒才分段）和
     # qwen3_fa_chunk_target_sec（每段目标多长）已废弃移除——这两个参数只按
     # 音频总时长的比例猜句子边界，猜错了就会把切点定在句子中间。现在完全
@@ -90,7 +106,8 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     # 默认就是独立的一段，不再需要"音频够长才分段"这个前置条件，也不再
     # 需要一个目标时长把多句"凑"成一段。
     #
-    # 下面两项只用来处理分句之后的两种边缘情况：
+    # 下面两项只用来处理分句之后的两种边缘情况，且只在
+    # qwen3_fa_enable_sentence_chunking 为 True 时才会生效：
     # 单句时长下限（秒）：短于此值的句子（如单字/叹词句"嗯。""啊！"）会
     # 并入相邻句子，避免生成过短、难以稳定对齐的独立音频片段。
     "qwen3_fa_min_sentence_chunk_sec": 3.0,
@@ -99,6 +116,10 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "qwen3_fa_max_sentence_chunk_sec": 20.0,
 
     # ── Qwen3-FA 长音频分段：WhisperX 粗测时间戳预处理（可选）──────────────
+    # 仅在 qwen3_fa_enable_sentence_chunking 为 True（即"按句子分段对齐"
+    # 总开关已启用）时才有意义——分段对齐本身被禁用时，不存在"规划分段
+    # 边界"这一步，本开关会被 save_settings() 强制一并置为 False。
+    #
     # True  → 在 Qwen3-ForcedAligner 做长音频分段对齐之前，先用 WhisperX
     #         对同一段音频做一次轻量 ASR 转录（只转录，不做 wav2vec2 强制
     #         对齐），借用 Whisper 自身 VAD 分段给出的真实语音起止时间戳
@@ -230,9 +251,18 @@ def save_settings(new_settings: Dict[str, object]) -> Dict[str, object]:
         current["skip_start_qwen3_server"] = bool(current.get("skip_start_qwen3_server"))
         current["skip_start_nemo_server"] = bool(current.get("skip_start_nemo_server"))
 
-        # Qwen3-FA WhisperX 粗测预处理：bool 开关 + 模型档位字符串（非法/
-        # 空值回退为默认档位，逻辑与上面 mirror_url 的兜底一致）。
+        # Qwen3-FA「按句子分段对齐」总开关，以及与其构成父子关系的
+        # WhisperX 粗测预处理：bool 开关 + 模型档位字符串（非法/空值回退
+        # 为默认档位，逻辑与上面 mirror_url 的兜底一致）。
+        current["qwen3_fa_enable_sentence_chunking"] = bool(current.get("qwen3_fa_enable_sentence_chunking"))
         current["qwen3_fa_use_whisperx_prepass"] = bool(current.get("qwen3_fa_use_whisperx_prepass"))
+        # 联动：总开关（按句子分段对齐）关闭时，粗测预处理这个子开关
+        # 强制一并关闭——不管前端本次提交了什么值，都不允许"分段对齐
+        # 已禁用，但粗测预处理仍显示已开启"这种矛盾状态被写入磁盘。
+        # 前端已经做了同步的 UI 隐藏 + 置空处理，这里是服务端侧的最终
+        # 兜底，防止绕过前端直接调用 /api/settings 写入脏数据。
+        if not current["qwen3_fa_enable_sentence_chunking"]:
+            current["qwen3_fa_use_whisperx_prepass"] = False
         prepass_model = str(current.get("qwen3_fa_whisperx_prepass_model") or "").strip()
         current["qwen3_fa_whisperx_prepass_model"] = (
             prepass_model or DEFAULT_SETTINGS["qwen3_fa_whisperx_prepass_model"]
