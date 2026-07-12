@@ -25,6 +25,10 @@
           />
         </el-select>
 
+        <el-button v-if="activeSource" @click="openRenameDialog">
+          ✏️ {{ t('dictionary.renameDictionary') }}
+        </el-button>
+
         <el-button v-if="activeSource" type="danger" plain @click="confirmDeleteDictionary">
           🗑️ {{ t('dictionary.deleteDictionary') }}
         </el-button>
@@ -190,6 +194,27 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 重命名词典弹窗 -->
+    <el-dialog v-model="showRenameDialog" :title="t('dictionary.renameDictionaryTitle')" width="420px">
+      <el-form label-position="top" @submit.prevent>
+        <el-form-item :label="t('dictionary.dictNameLabel')">
+          <el-input
+            v-model="renameDictName"
+            :placeholder="t('dictionary.dictNamePlaceholder')"
+            maxlength="60"
+            show-word-limit
+            @keyup.enter="doRenameDictionary"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showRenameDialog = false">{{ t('dictionary.cancel') }}</el-button>
+        <el-button type="primary" :loading="renaming" @click="doRenameDictionary">
+          {{ t('dictionary.renameDictionary') }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -226,6 +251,10 @@ const newPhonemes = ref('')
 const showCreateDialog = ref(false)
 const newDictName = ref('')
 const newDictNotation = ref<'synthesizerv' | 'vocaloid'>('synthesizerv')
+
+const showRenameDialog = ref(false)
+const renameDictName = ref('')
+const renaming = ref(false)
 
 const pendingImportFile = ref<File | null>(null)
 const importOverwrite = ref(true)
@@ -373,6 +402,13 @@ const doCreateDictionary = async () => {
     ElMessage.warning(t('dictionary.dictNameRequired'))
     return
   }
+  // 客户端先做一次大小写不敏感判重，给出即时反馈；后端 create_dictionary
+  // 也会做同样的校验兜底（避免并发创建等情况下客户端检查被绕过）。
+  const dupe = dictionaries.value.find(d => d.name.toLowerCase() === name.toLowerCase())
+  if (dupe) {
+    ElMessage.error(t('dictionary.createFailed', { error: `"${dupe.name}"` }))
+    return
+  }
   creating.value = true
   try {
     const res = await fetch('/api/dictionary', {
@@ -391,6 +427,51 @@ const doCreateDictionary = async () => {
     ElMessage.error(t('dictionary.createFailed', { error: e?.message || String(e) }))
   } finally {
     creating.value = false
+  }
+}
+
+const openRenameDialog = () => {
+  if (!activeSource.value) return
+  renameDictName.value = activeSource.value
+  showRenameDialog.value = true
+}
+
+const doRenameDictionary = async () => {
+  const newName = renameDictName.value.trim()
+  if (!newName) {
+    ElMessage.warning(t('dictionary.dictNameRequired'))
+    return
+  }
+  if (newName === activeSource.value) {
+    showRenameDialog.value = false
+    return
+  }
+  // 同样先做一次客户端大小写不敏感判重（允许改成大小写不同的自己，
+  // 例如 "mydict" -> "MyDict"，这种情况交给后端处理）。
+  const dupe = dictionaries.value.find(
+    d => d.name !== activeSource.value && d.name.toLowerCase() === newName.toLowerCase()
+  )
+  if (dupe) {
+    ElMessage.error(t('dictionary.renameFailed', { error: `"${dupe.name}"` }))
+    return
+  }
+  renaming.value = true
+  try {
+    const res = await fetch(`/api/dictionary/${encodeURIComponent(activeSource.value)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName }),
+    })
+    const data = await res.json()
+    if (!res.ok || !data.success) throw new Error(data.error || res.statusText)
+
+    ElMessage.success(t('dictionary.renameSuccess'))
+    showRenameDialog.value = false
+    await fetchDictionaries(newName)
+  } catch (e: any) {
+    ElMessage.error(t('dictionary.renameFailed', { error: e?.message || String(e) }))
+  } finally {
+    renaming.value = false
   }
 }
 

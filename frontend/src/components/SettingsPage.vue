@@ -155,7 +155,13 @@
         </el-row>
 
         <p class="group-label">{{ t('settings.tuningGroupChunking') }}</p>
-        <el-row :gutter="16">
+
+        <el-form-item :label="t('settings.qwen3FaEnableSentenceChunking')">
+          <el-switch v-model="form.qwen3_fa_enable_sentence_chunking" />
+          <p class="help-text">{{ t('settings.qwen3FaEnableSentenceChunkingHint') }}</p>
+        </el-form-item>
+
+        <el-row v-if="form.qwen3_fa_enable_sentence_chunking" :gutter="16">
           <el-col :xs="24" :sm="12">
             <el-form-item :label="t('settings.qwen3FaMinSentenceChunkSec')">
               <el-input-number
@@ -186,47 +192,53 @@
 
         <el-divider />
 
-        <div class="section-heading">
-          <span>🚀 {{ t('settings.whisperxSectionTitle') }}</span>
-        </div>
-        <p class="page-subtitle">{{ t('settings.whisperxSectionSubtitle') }}</p>
+        <!-- 🚀 WhisperX 粗测/批处理设置：整块仅在"按句子分段对齐"总开关
+             启用时才显示。总开关关闭时，粗测预处理这个子功能没有意义
+             （分段这一步本身都不会执行），所以直接连同标题、说明、提示
+             一起隐藏，而不只是隐藏内部的开关本身。 -->
+        <template v-if="form.qwen3_fa_enable_sentence_chunking">
+          <div class="section-heading">
+            <span>🚀 {{ t('settings.whisperxSectionTitle') }}</span>
+          </div>
+          <p class="page-subtitle">{{ t('settings.whisperxSectionSubtitle') }}</p>
 
-        <el-alert type="success" :closable="false" show-icon class="no-restart-hint">
-          <template #title>{{ t('settings.tuningNoRestartHint') }}</template>
-        </el-alert>
+          <el-alert type="success" :closable="false" show-icon class="no-restart-hint">
+            <template #title>{{ t('settings.tuningNoRestartHint') }}</template>
+          </el-alert>
 
-        <el-form-item :label="t('settings.qwen3FaUseWhisperxPrepass')">
-          <el-switch v-model="form.qwen3_fa_use_whisperx_prepass" />
-          <p class="help-text">{{ t('settings.qwen3FaUseWhisperxPrepassHint') }}</p>
-        </el-form-item>
+          <el-form-item :label="t('settings.qwen3FaUseWhisperxPrepass')">
+            <el-switch v-model="form.qwen3_fa_use_whisperx_prepass" />
+            <p class="help-text">{{ t('settings.qwen3FaUseWhisperxPrepassHint') }}</p>
+          </el-form-item>
 
-        <el-row :gutter="16">
-          <el-col v-if="form.qwen3_fa_use_whisperx_prepass" :xs="24" :sm="12">
-            <el-form-item :label="t('settings.qwen3FaWhisperxPrepassModel')">
-              <el-select v-model="form.qwen3_fa_whisperx_prepass_model" style="width: 100%; max-width: 320px">
-                <el-option
-                  v-for="model in WHISPERX_MODEL_OPTIONS"
-                  :key="model"
-                  :value="model"
-                  :label="t(`processor.whisperModel${modelLabelKey(model)}`)"
+          <el-row :gutter="16">
+            <el-col v-if="form.qwen3_fa_use_whisperx_prepass" :xs="24" :sm="12">
+              <el-form-item :label="t('settings.qwen3FaWhisperxPrepassModel')">
+                <el-select v-model="form.qwen3_fa_whisperx_prepass_model" style="width: 100%; max-width: 320px">
+                  <el-option
+                    v-for="model in WHISPERX_MODEL_OPTIONS"
+                    :key="model"
+                    :value="model"
+                    :label="t(`processor.whisperModel${modelLabelKey(model)}`)"
+                  />
+                </el-select>
+                <p class="help-text">{{ t('settings.qwen3FaWhisperxPrepassModelHint') }}</p>
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="12">
+              <el-form-item :label="t('settings.whisperxBatchSize')">
+                <el-input-number
+                  v-model="form.whisperx_batch_size"
+                  :min="1" :max="128" :step="1" :precision="0"
+                  controls-position="right" style="width: 100%; max-width: 240px"
                 />
-              </el-select>
-              <p class="help-text">{{ t('settings.qwen3FaWhisperxPrepassModelHint') }}</p>
-            </el-form-item>
-          </el-col>
-          <el-col :xs="24" :sm="12">
-            <el-form-item :label="t('settings.whisperxBatchSize')">
-              <el-input-number
-                v-model="form.whisperx_batch_size"
-                :min="1" :max="128" :step="1" :precision="0"
-                controls-position="right" style="width: 100%; max-width: 240px"
-              />
-              <p class="help-text">{{ t('settings.whisperxBatchSizeHint') }}</p>
-            </el-form-item>
-          </el-col>
-        </el-row>
+                <p class="help-text">{{ t('settings.whisperxBatchSizeHint') }}</p>
+              </el-form-item>
+            </el-col>
+          </el-row>
 
-        <el-divider />
+          <el-divider />
+        </template>
 
         <div class="section-heading">
           <span>✂️ {{ t('settings.ttsSegmentSectionTitle') }}</span>
@@ -340,7 +352,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 
@@ -371,11 +383,17 @@ interface AppSettings {
   // 调优参数组。现在按参考文本句末标点分段，这两项只用来处理单句过短/
   // 过长这两种边缘情况（详见 alt_aligners.py _plan_sentence_aligned_
   // chunks() 顶部说明）。
+  // 总开关：是否启用"按句子分段对齐"这一整套流程，默认 false（禁用）。
+  // 关闭时 Qwen3-ForcedAligner 始终整段单次对齐，下面两项及整个 WhisperX
+  // 粗测/批处理区块都不再生效——WhisperX 粗测预处理开关会随本开关关闭
+  // 被强制一并置为 false（见 watch(qwen3_fa_enable_sentence_chunking)）。
+  qwen3_fa_enable_sentence_chunking: boolean
   qwen3_fa_min_sentence_chunk_sec: number
   qwen3_fa_max_sentence_chunk_sec: number
   // ── WhisperX 相关（同样"实时生效，无需重启"）──────────────────────────
   // 开启后，Qwen3-ForcedAligner 在长音频分段对齐前先用 WhisperX 做一次
-  // 轻量 ASR 粗测，用真实语音起止时间戳规划分段边界。
+  // 轻量 ASR 粗测，用真实语音起止时间戳规划分段边界。仅在
+  // qwen3_fa_enable_sentence_chunking 为 true 时才会展示/生效。
   qwen3_fa_use_whisperx_prepass: boolean
   // 上面粗测步骤专用的 Whisper 模型档位，仅在开关打开时才需要展示/生效。
   qwen3_fa_whisperx_prepass_model: string
@@ -421,6 +439,12 @@ const TUNING_DEFAULTS = {
   ctc_min_sp_sec: 0.15,
   qwen3_fa_min_sentence_chunk_sec: 3.0,
   qwen3_fa_max_sentence_chunk_sec: 20.0,
+} as const
+
+// "按句子分段对齐"总开关默认值：与 app_settings.py 的 DEFAULT_SETTINGS
+// 保持一致，默认禁用（需要用户显式开启）。
+const SENTENCE_CHUNKING_DEFAULTS = {
+  qwen3_fa_enable_sentence_chunking: false,
 } as const
 
 // WhisperX 相关默认值：与 app_settings.py 的 DEFAULT_SETTINGS 保持一致。
@@ -476,14 +500,32 @@ const form = ref<AppSettings>({
   skip_start_qwen3_server: false,
   skip_start_nemo_server: false,
   ...TUNING_DEFAULTS,
+  ...SENTENCE_CHUNKING_DEFAULTS,
   ...WHISPERX_DEFAULTS,
   ...TTS_SEGMENT_LEN_DEFAULTS,
   ...TTS_SPLIT_OPTION_DEFAULTS,
   ...SUBTITLE_IMPORT_SPLIT_DEFAULTS,
 })
 
+// 「按句子分段对齐」总开关一旦被用户在表单里关闭，立即强制同步关闭
+// WhisperX 粗测预处理子开关（该子开关只在总开关开启时才有意义），
+// 不等到点击"保存"才生效——与截图需求一致："已开启时会强制关闭"。
+// 只在 false→关闭 时触发；总开关重新打开不会自动恢复粗测预处理，
+// 需要用户重新显式勾选，避免"关闭再打开总开关"意外带出一个用户
+// 本来没打算开启的子功能。
+watch(
+  () => form.value.qwen3_fa_enable_sentence_chunking,
+  (enabled: boolean) => {
+    if (!enabled && form.value.qwen3_fa_use_whisperx_prepass) {
+      form.value.qwen3_fa_use_whisperx_prepass = false
+    }
+  },
+)
+
 const resetTuningToDefaults = () => {
-  Object.assign(form.value, TUNING_DEFAULTS)
+  Object.assign(form.value, TUNING_DEFAULTS, SENTENCE_CHUNKING_DEFAULTS)
+  // 总开关被一并重置为默认值（禁用）时，watch() 会自动同步强制关闭
+  // WhisperX 粗测预处理，这里无需重复处理。
   ElMessage.info(t('settings.tuningResetHint'))
 }
 
@@ -570,9 +612,15 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     ctc_max_cjk_particle_sec: num('ctc_max_cjk_particle_sec'),
     ctc_max_en_word_sec: num('ctc_max_en_word_sec'),
     ctc_min_sp_sec: num('ctc_min_sp_sec'),
+    qwen3_fa_enable_sentence_chunking: !!settings?.qwen3_fa_enable_sentence_chunking,
     qwen3_fa_min_sentence_chunk_sec: num('qwen3_fa_min_sentence_chunk_sec'),
     qwen3_fa_max_sentence_chunk_sec: num('qwen3_fa_max_sentence_chunk_sec'),
-    qwen3_fa_use_whisperx_prepass: !!settings?.qwen3_fa_use_whisperx_prepass,
+    // 前端侧兜底：总开关为 false 时，不管后端返回什么值，WhisperX 粗测
+    // 预处理开关在表单里也强制显示为关闭，避免出现"总开关已禁用，但
+    // 粗测预处理开关仍勾选"的矛盾展示（正常情况下后端 save_settings()
+    // 已经保证不会有这种脏数据，这里只是双保险）。
+    qwen3_fa_use_whisperx_prepass:
+      !!settings?.qwen3_fa_enable_sentence_chunking && !!settings?.qwen3_fa_use_whisperx_prepass,
     qwen3_fa_whisperx_prepass_model:
       (WHISPERX_MODEL_OPTIONS as readonly string[]).includes(prepassModel)
         ? prepassModel
