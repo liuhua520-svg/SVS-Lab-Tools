@@ -108,12 +108,36 @@
 
         <div class="entry-count">{{ t('dictionary.entryCount', { count: entryList.length }) }}</div>
 
+        <!-- 搜索单词：定位并跳转到该单词所在的分页 -->
+        <div class="search-row">
+          <el-input
+            v-model="searchQuery"
+            :placeholder="t('dictionary.searchPlaceholder')"
+            clearable
+            style="max-width: 320px"
+            @keyup.enter="jumpToWord(searchQuery)"
+            @clear="searchQuery = ''"
+          >
+            <template #prefix>
+              <el-icon><Search /></el-icon>
+            </template>
+          </el-input>
+          <el-button type="primary" plain @click="jumpToWord(searchQuery)">
+            🔍 {{ t('dictionary.searchButton') }}
+          </el-button>
+          <span v-if="searchQuery" class="search-result-hint">
+            {{ t('dictionary.searchResultCount', { count: filteredEntryList.length }) }}
+          </span>
+        </div>
+
         <el-table
+          ref="entryTableRef"
           v-if="entryList.length"
           v-loading="loading"
-          :data="entryList"
+          :data="pagedEntryList"
           stripe
           style="width: 100%"
+          :row-class-name="rowClassName"
         >
           <el-table-column prop="word" :label="t('dictionary.tableWord')" width="220">
             <template #default="{ row }">
@@ -165,6 +189,17 @@
             </template>
           </el-table-column>
         </el-table>
+        <el-pagination
+          v-if="entryList.length"
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :page-sizes="[10, 20, 50, 100, 500, 1000]"
+          :total="filteredEntryList.length"
+          layout="total, sizes, prev, pager, next, jumper"
+          class="pagination"
+          @size-change="handlePageSizeChange"
+          @current-change="handlePageChange"
+        />
         <p v-if="entryList.length" class="help-text">{{ t('dictionary.editHint') }}</p>
         <el-empty v-else v-loading="loading" :description="t('dictionary.emptyState')" />
       </template>
@@ -219,8 +254,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Search } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
@@ -345,6 +381,88 @@ const entryList = computed(() =>
     .sort((a, b) => a.word.localeCompare(b.word))
 )
 
+// ============== 分页（词条量大时避免整表渲染导致卡顿） ==============
+const currentPage = ref(1)
+const pageSize = ref(10)
+
+// ============== 搜索单词并跳转 ==============
+const searchQuery = ref('')
+const entryTableRef = ref()
+const highlightedWord = ref('')
+let highlightTimer: ReturnType<typeof setTimeout> | null = null
+
+// 搜索框内容用于筛选表格（大小写不敏感的子串匹配）
+const filteredEntryList = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return entryList.value
+  return entryList.value.filter(e => e.word.toLowerCase().includes(q))
+})
+
+// 输入搜索内容变化时回到第一页，避免停留在筛选结果之外的页码
+watch(searchQuery, () => {
+  currentPage.value = 1
+})
+
+const pagedEntryList = computed(() => {
+  const totalPages = Math.max(1, Math.ceil(filteredEntryList.value.length / pageSize.value))
+  if (currentPage.value > totalPages) {
+    currentPage.value = totalPages
+  }
+  const start = (currentPage.value - 1) * pageSize.value
+  const end = start + pageSize.value
+  return filteredEntryList.value.slice(start, end)
+})
+
+const handlePageSizeChange = (size: number) => {
+  pageSize.value = size
+  currentPage.value = 1
+}
+
+const handlePageChange = (page: number) => {
+  currentPage.value = page
+}
+
+const rowClassName = ({ row }: { row: { word: string } }) =>
+  row.word === highlightedWord.value ? 'highlighted-row' : ''
+
+/** 搜索并跳转到指定单词所在的分页，滚动到该行并高亮提示 */
+const jumpToWord = async (query: string) => {
+  const q = query.trim().toLowerCase()
+  if (!q) return
+
+  // 优先精确匹配（大小写不敏感），找不到则退回第一个包含该子串的单词
+  const idx = entryList.value.findIndex(e => e.word.toLowerCase() === q)
+  const targetIdx = idx >= 0 ? idx : entryList.value.findIndex(e => e.word.toLowerCase().includes(q))
+
+  if (targetIdx < 0) {
+    ElMessage.warning(t('dictionary.searchNotFound', { word: query }))
+    return
+  }
+
+  const target = entryList.value[targetIdx]
+  // 跳转基于当前筛选后的列表定位页码，这样搜索结果始终在第一页可见
+  const filteredIdx = filteredEntryList.value.findIndex(e => e.word === target.word)
+  const posIdx = filteredIdx >= 0 ? filteredIdx : targetIdx
+  currentPage.value = Math.floor(posIdx / pageSize.value) + 1
+
+  highlightedWord.value = target.word
+  if (highlightTimer) clearTimeout(highlightTimer)
+  highlightTimer = setTimeout(() => {
+    highlightedWord.value = ''
+  }, 2000)
+
+  await nextTick()
+  const rows = entryTableRef.value?.$el?.querySelectorAll?.('.el-table__row')
+  if (rows) {
+    for (const rowEl of rows) {
+      if (rowEl.classList.contains('highlighted-row')) {
+        rowEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        break
+      }
+    }
+  }
+}
+
 const fetchDictionaries = async (selectAfter?: string) => {
   loadingList.value = true
   try {
@@ -393,6 +511,8 @@ const fetchEntries = async (source: string) => {
 const onSourceChange = () => {
   pendingImportFile.value = null
   importUploadKey.value += 1
+  currentPage.value = 1
+  searchQuery.value = ''
   fetchEntries(activeSource.value)
 }
 
@@ -706,6 +826,37 @@ onMounted(() => {
   color: #606266;
   font-size: 13px;
   margin-bottom: 10px;
+}
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.search-result-hint {
+  color: #909399;
+  font-size: 12px;
+}
+
+:deep(.highlighted-row) {
+  animation: highlight-fade 2s ease-out;
+}
+
+@keyframes highlight-fade {
+  0% {
+    background-color: #fdf6ec;
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.pagination {
+  margin-top: 16px;
+  text-align: right;
 }
 
 .editable-cell {

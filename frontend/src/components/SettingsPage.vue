@@ -47,6 +47,11 @@
           <p class="help-text">{{ t('settings.skipStartNemoHint') }}</p>
         </el-form-item>
 
+        <el-form-item :label="t('settings.skipStartQwen3Tts')">
+          <el-switch v-model="form.skip_start_qwen3tts_server" />
+          <p class="help-text">{{ t('settings.skipStartQwen3TtsHint') }}</p>
+        </el-form-item>
+
         <el-alert type="info" :closable="false" show-icon class="no-restart-hint">
           <template #title>{{ t('settings.skipStartApplyHint') }}</template>
         </el-alert>
@@ -235,10 +240,48 @@
                 <p class="help-text">{{ t('settings.whisperxBatchSizeHint') }}</p>
               </el-form-item>
             </el-col>
+            <el-col :xs="24" :sm="12">
+              <el-form-item :label="t('settings.qwen3BatchSize')">
+                <el-input-number
+                  v-model="form.qwen3_batch_size"
+                  :min="1" :max="128" :step="1" :precision="0"
+                  controls-position="right" style="width: 100%; max-width: 240px"
+                />
+                <p class="help-text">{{ t('settings.qwen3BatchSizeHint') }}</p>
+              </el-form-item>
+            </el-col>
           </el-row>
 
           <el-divider />
         </template>
+
+        <div class="section-heading">
+          <span>🗣️ {{ t('settings.qwen3TtsSectionTitle') }}</span>
+        </div>
+        <p class="page-subtitle">{{ t('settings.qwen3TtsSectionSubtitle') }}</p>
+
+        <el-alert type="warning" :closable="false" show-icon class="restart-hint">
+          <template #title>{{ t('settings.restartHint') }}</template>
+        </el-alert>
+
+        <el-form-item :label="t('settings.qwen3TtsModelSize')">
+          <el-radio-group v-model="form.qwen3_tts_model_size">
+            <el-radio-button value="1.7B">1.7B</el-radio-button>
+            <el-radio-button value="0.6B">0.6B</el-radio-button>
+          </el-radio-group>
+          <p class="help-text">{{ t('settings.qwen3TtsModelSizeHint') }}</p>
+        </el-form-item>
+
+        <el-alert type="success" :closable="false" show-icon class="no-restart-hint">
+          <template #title>{{ t('settings.tuningNoRestartHint') }}</template>
+        </el-alert>
+
+        <el-form-item :label="t('settings.qwen3TtsXVectorOnlyDefault')">
+          <el-switch v-model="form.qwen3_tts_x_vector_only_default" />
+          <p class="help-text">{{ t('settings.qwen3TtsXVectorOnlyDefaultHint') }}</p>
+        </el-form-item>
+
+        <el-divider />
 
         <div class="section-heading">
           <span>✂️ {{ t('settings.ttsSegmentSectionTitle') }}</span>
@@ -368,6 +411,13 @@ interface AppSettings {
   // 进程，也不会像上面几项一样触发保存后的自动重启。
   skip_start_qwen3_server: boolean
   skip_start_nemo_server: boolean
+  skip_start_qwen3tts_server: boolean
+  // ── Qwen3-TTS（TTS跟读独立引擎，qwen3tts_server.py，端口 5003）────────
+  // 模型规模需要重启 qwen3tts_server.py 才能生效（决定下次加载模型时用
+  // 哪套 checkpoint）；x-vector 默认值只影响"语音预设管理"里新建 Voice
+  // Clone 预设时开关的初始状态，不涉及任何进程，保存后立即生效。
+  qwen3_tts_model_size: string
+  qwen3_tts_x_vector_only_default: boolean
   // ── alt_aligners.py 对齐调优参数（均以秒为单位）────────────────────────
   // 这批参数只被主进程内的 alt_aligners.py 消费，保存后无需重启任何进程，
   // 下一次对齐任务即可生效（与上面三项需要重启 Qwen3 / NeMo 微服务不同）。
@@ -399,6 +449,12 @@ interface AppSettings {
   qwen3_fa_whisperx_prepass_model: string
   // WhisperX 转录 batch_size，独立对齐后端与上面的粗测预处理共用同一个值。
   whisperx_batch_size: number
+  // Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner 共用 batch_size。
+  // Qwen3-ASR：直接对应官方 max_inference_batch_size；Qwen3-ForcedAligner /
+  // NeMo Forced Aligner：两者都没有原生批处理概念（每次对齐任务始终只送
+  // 1 条音频），这个值仅作为显存不足自动降级重试时的参考值写入日志，
+  // 不影响正常（未 OOM）情况下的对齐结果。
+  qwen3_batch_size: number
   // ── tts_processor.py 逐句合成分段长度（字符数，同样"实时生效，无需
   // 重启"）── 单行文本超过 tts_max_segment_len 才会二次切割，切割点落在
   // [tts_min_segment_len, tts_max_segment_len] 区间内。
@@ -455,6 +511,18 @@ const WHISPERX_DEFAULTS = {
   whisperx_batch_size: 16,
 } as const
 
+// Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner 共用 batch_size
+// 默认值：与 app_settings.py 的 DEFAULT_SETTINGS["qwen3_batch_size"] 保持一致。
+const QWEN3_BATCH_DEFAULTS = {
+  qwen3_batch_size: 8,
+} as const
+
+// Qwen3-TTS 默认值：与 app_settings.py 的 DEFAULT_SETTINGS 保持一致。
+const QWEN3_TTS_DEFAULTS = {
+  qwen3_tts_model_size: '1.7B',
+  qwen3_tts_x_vector_only_default: false,
+} as const
+
 // TTS 逐句合成分段长度默认值：与 app_settings.py 的 DEFAULT_SETTINGS 保持一致。
 const TTS_SEGMENT_LEN_DEFAULTS = {
   tts_min_segment_len: 250,
@@ -499,9 +567,12 @@ const form = ref<AppSettings>({
   hide_console_window: false,
   skip_start_qwen3_server: false,
   skip_start_nemo_server: false,
+  skip_start_qwen3tts_server: false,
   ...TUNING_DEFAULTS,
   ...SENTENCE_CHUNKING_DEFAULTS,
   ...WHISPERX_DEFAULTS,
+  ...QWEN3_BATCH_DEFAULTS,
+  ...QWEN3_TTS_DEFAULTS,
   ...TTS_SEGMENT_LEN_DEFAULTS,
   ...TTS_SPLIT_OPTION_DEFAULTS,
   ...SUBTITLE_IMPORT_SPLIT_DEFAULTS,
@@ -541,13 +612,13 @@ const resetSubtitleImportSplitToDefaults = () => {
 
 const loading = ref(false)
 const saving = ref(false)
-// 最近一次保存后，Qwen3 / NeMo 两个微服务各自的重启结果（未保存过则为 null）
-const restartResult = ref<{ qwen3: RestartResult; nemo: RestartResult } | null>(null)
+// 最近一次保存后，Qwen3 / NeMo / Qwen3-TTS 三个微服务各自的重启结果（未保存过则为 null）
+const restartResult = ref<{ qwen3: RestartResult; nemo: RestartResult; qwen3tts: RestartResult } | null>(null)
 
 const restartSummary = computed(() => {
   if (!restartResult.value) return []
   const rows: { service: string; type: 'success' | 'info' | 'warning'; text: string }[] = []
-  for (const [key, label] of [['qwen3', 'Qwen3-ASR'], ['nemo', 'NeMo Forced Aligner']] as const) {
+  for (const [key, label] of [['qwen3', 'Qwen3-ASR'], ['nemo', 'NeMo Forced Aligner'], ['qwen3tts', 'Qwen3-TTS']] as const) {
     const r = restartResult.value[key]
     if (!r) continue
     if (r.status === 'restarted') {
@@ -570,6 +641,9 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
   }
   // whisperx_batch_size 走独立的整数校验（1-128），与后端 save_settings() 的钳制范围一致
   const batchSize = Number(settings?.whisperx_batch_size)
+  // qwen3_batch_size 同样走 [1, 128] 整数校验，与后端 save_settings() 的
+  // 钳制范围一致（见 app_settings.py qwen3_batch_size 校验逻辑）。
+  const qwen3BatchSize = Number(settings?.qwen3_batch_size)
   const prepassModel = String(settings?.qwen3_fa_whisperx_prepass_model || '').trim()
   // tts_min_segment_len / tts_max_segment_len：整数校验 + 钳制到 [1, 5000]，
   // 与后端 save_settings() 的钳制范围一致；若钳制后 min > max 则交换两者，
@@ -597,6 +671,9 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
   const skipSplitN = Number.isFinite(rawSkipSplitN)
     ? Math.min(Math.max(Math.round(rawSkipSplitN), 1), 50)
     : SUBTITLE_IMPORT_SPLIT_DEFAULTS.subtitle_import_skip_split_every_n
+  // qwen3_tts_model_size：只允许 "1.7B" / "0.6B"，与后端 save_settings()
+  // 的校验规则一致，非法值回退到默认值。
+  const ttsModelSize = String(settings?.qwen3_tts_model_size || '').trim()
   form.value = {
     auto_update_models: !!settings?.auto_update_models,
     use_mirror: !!settings?.use_mirror,
@@ -604,6 +681,9 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     hide_console_window: !!settings?.hide_console_window,
     skip_start_qwen3_server: !!settings?.skip_start_qwen3_server,
     skip_start_nemo_server: !!settings?.skip_start_nemo_server,
+    skip_start_qwen3tts_server: !!settings?.skip_start_qwen3tts_server,
+    qwen3_tts_model_size: ttsModelSize === '1.7B' || ttsModelSize === '0.6B' ? ttsModelSize : QWEN3_TTS_DEFAULTS.qwen3_tts_model_size,
+    qwen3_tts_x_vector_only_default: !!settings?.qwen3_tts_x_vector_only_default,
     qwen3_fa_onset_delay_sec: num('qwen3_fa_onset_delay_sec'),
     qwen3_asr_onset_delay_sec: num('qwen3_asr_onset_delay_sec'),
     qwen3_fa_min_syl_dur_sec: num('qwen3_fa_min_syl_dur_sec'),
@@ -628,6 +708,9 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     whisperx_batch_size: Number.isFinite(batchSize)
       ? Math.min(Math.max(Math.round(batchSize), 1), 128)
       : WHISPERX_DEFAULTS.whisperx_batch_size,
+    qwen3_batch_size: Number.isFinite(qwen3BatchSize)
+      ? Math.min(Math.max(Math.round(qwen3BatchSize), 1), 128)
+      : QWEN3_BATCH_DEFAULTS.qwen3_batch_size,
     tts_min_segment_len: ttsMinLen,
     tts_max_segment_len: ttsMaxLen,
     tts_newline_split_every_n: newlineEveryN,

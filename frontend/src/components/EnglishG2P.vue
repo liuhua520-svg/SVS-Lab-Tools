@@ -135,14 +135,38 @@
         </div>
       </div>
 
+      <!-- 搜索单词：定位并跳转到该单词所在的分页 -->
+      <div class="search-row">
+        <el-input
+          v-model="searchQuery"
+          :placeholder="t('englishG2P.searchPlaceholder')"
+          clearable
+          style="max-width: 320px"
+          @keyup.enter="jumpToWord(searchQuery)"
+        >
+          <template #prefix>
+            <el-icon><Search /></el-icon>
+          </template>
+        </el-input>
+        <el-button type="primary" plain @click="jumpToWord(searchQuery)">
+          <el-icon><Search /></el-icon>
+          {{ t('englishG2P.searchButton') }}
+        </el-button>
+        <span v-if="searchQuery" class="search-result-hint">
+          {{ t('englishG2P.searchResultCount', { count: filteredResults.length }) }}
+        </span>
+      </div>
+
       <!-- 分页表格 -->
       <el-table
+        ref="resultsTableRef"
         :data="paginatedResults"
         border
         stripe
         :default-sort="{ prop: 'index', order: 'ascending' }"
         max-height="500"
         class="results-table"
+        :row-class-name="rowClassName"
       >
         <el-table-column prop="index" :label="t('englishG2P.index')" width="60" align="center" />
         <el-table-column prop="word" :label="t('englishG2P.word')" min-width="120">
@@ -194,8 +218,8 @@
       <el-pagination
         v-model:current-page="currentPage"
         v-model:page-size="pageSize"
-        :page-sizes="[10, 20, 50, 100]"
-        :total="results.length"
+        :page-sizes="[10, 20, 50, 100, 500, 1000]"
+        :total="filteredResults.length"
         layout="total, sizes, prev, pager, next, jumper"
         class="pagination"
         @size-change="handlePageSizeChange"
@@ -226,7 +250,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick, watch } from 'vue'
 import {
   Document,
   QuestionFilled,
@@ -237,6 +261,7 @@ import {
   Download,
   ArrowDown,
   Upload,
+  Search,
 } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -520,13 +545,13 @@ const options = ref({
 // ═══════════════════════════════════════════════════════════
 
 const paginatedResults = computed(() => {
-  const totalPages = Math.max(1, Math.ceil(results.value.length / pageSize.value))
+  const totalPages = Math.max(1, Math.ceil(filteredResults.value.length / pageSize.value))
   if (currentPage.value > totalPages) {
     currentPage.value = totalPages
   }
   const start = (currentPage.value - 1) * pageSize.value
   const end = start + pageSize.value
-  return results.value.slice(start, end)
+  return filteredResults.value.slice(start, end)
 })
 
 /** 每页条数变化时：跳回第一页，避免出现"当前页超出总页数"导致列表空白的问题 */
@@ -539,6 +564,61 @@ const handlePageSizeChange = (size: number) => {
  *  这里仅保留 hook 以便未来扩展（例如滚动回表格顶部）。 */
 const handlePageChange = (page: number) => {
   currentPage.value = page
+}
+
+// ============== 搜索单词并跳转 ==============
+const searchQuery = ref('')
+const resultsTableRef = ref()
+const highlightedWord = ref('')
+let highlightTimer: ReturnType<typeof setTimeout> | null = null
+
+const filteredResults = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return results.value
+  return results.value.filter(r => r.word.toLowerCase().includes(q))
+})
+
+watch(searchQuery, () => {
+  currentPage.value = 1
+})
+
+const rowClassName = ({ row }: { row: ExtractedWord }) =>
+  row.word === highlightedWord.value ? 'highlighted-row' : ''
+
+/** 搜索并跳转到指定单词所在的分页，滚动到该行并高亮提示 */
+const jumpToWord = async (query: string) => {
+  const q = query.trim().toLowerCase()
+  if (!q) return
+
+  const idx = results.value.findIndex(r => r.word.toLowerCase() === q)
+  const targetIdx = idx >= 0 ? idx : results.value.findIndex(r => r.word.toLowerCase().includes(q))
+
+  if (targetIdx < 0) {
+    ElMessage.warning(t('englishG2P.searchNotFound', { word: query }))
+    return
+  }
+
+  const target = results.value[targetIdx]
+  const filteredIdx = filteredResults.value.findIndex(r => r.word === target.word && r.index === target.index)
+  const posIdx = filteredIdx >= 0 ? filteredIdx : targetIdx
+  currentPage.value = Math.floor(posIdx / pageSize.value) + 1
+
+  highlightedWord.value = target.word
+  if (highlightTimer) clearTimeout(highlightTimer)
+  highlightTimer = setTimeout(() => {
+    highlightedWord.value = ''
+  }, 2000)
+
+  await nextTick()
+  const rows = resultsTableRef.value?.$el?.querySelectorAll?.('.el-table__row')
+  if (rows) {
+    for (const rowEl of rows) {
+      if (rowEl.classList.contains('highlighted-row')) {
+        rowEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        break
+      }
+    }
+  }
 }
 
 const repeatedWordsCount = computed(() => {
@@ -646,6 +726,7 @@ const extractAndConvert = async () => {
     progress.value = 100
     statusText.value = t('englishG2P.complete')
     currentPage.value = 1
+    searchQuery.value = ''
 
     ElMessage.success(`${t('englishG2P.extractionSuccess')} ${results.value.length} ${t('englishG2P.words')}`)
   } catch (err) {
@@ -666,6 +747,7 @@ const clearAll = () => {
       results.value = []
       error.value = ''
       currentPage.value = 1
+      searchQuery.value = ''
     })
     .catch(() => {})
 }
@@ -908,6 +990,32 @@ const exportResults = (format: 'json' | 'csv', scope: 'arpa' | 'vocaloid' | 'all
 
 .part-tag {
   font-size: 11px;
+}
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+
+.search-result-hint {
+  color: #909399;
+  font-size: 12px;
+}
+
+:deep(.highlighted-row) {
+  animation: highlight-fade 2s ease-out;
+}
+
+@keyframes highlight-fade {
+  0% {
+    background-color: #fdf6ec;
+  }
+  100% {
+    background-color: transparent;
+  }
 }
 
 .pagination {

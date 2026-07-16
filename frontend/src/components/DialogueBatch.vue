@@ -71,6 +71,7 @@
             <el-radio value="cpu">{{ t('processor.deviceCpu') }}</el-radio>
             <el-radio value="cuda">{{ t('processor.deviceCuda') }}</el-radio>
           </el-radio-group>
+          <div class="help-text" v-if="advanced.aligner_device !== 'cpu'">🛡️ {{ t('processor.deviceOomFallbackHint') }}</div>
         </el-form-item>
 
         <el-form-item v-if="inputMode === 'tts'">
@@ -93,10 +94,11 @@
           </el-select>
         </el-form-item>
 
-        <!-- WhisperX 批处理大小（仅 aligner_device=cuda 时对显存占用有实际意义；
-             CPU 模式下隐藏控件，提交时后端仍会收到默认值 16） -->
+        <!-- WhisperX 批处理大小（cuda 下对显存占用有直接意义；auto 档实际
+             解析为 GPU 时同样生效，一并展示；CPU 模式下隐藏控件，提交时
+             后端仍会收到默认值 16） -->
         <el-form-item
-          v-if="processingMode === 'full' && alignerBackend === 'whisperx' && advanced.aligner_device === 'cuda'"
+          v-if="processingMode === 'full' && alignerBackend === 'whisperx' && advanced.aligner_device !== 'cpu'"
           :label="t('processor.whisperxBatchSize')"
         >
           <el-input-number
@@ -107,8 +109,31 @@
             :step="1"
             style="width:160px"
           />
-          <div class="help-text">⚠️ {{ t('processor.whisperxBatchSizeHint') }}</div>
+          <div class="help-text" v-if="advanced.aligner_device === 'auto'">💡 {{ t('processor.batchSizeAutoHint') }}</div>
+          <div class="help-text" v-else>⚠️ {{ t('processor.whisperxBatchSizeHint') }}</div>
         </el-form-item>
+
+        <!-- Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner 批处理大小
+             （语义说明见 MFAProcessor.vue 同一控件旁的注释：Qwen3-ASR 直接
+             对应官方 max_inference_batch_size，Qwen3-FA / NeMo-FA 则仅作为
+             显存不足自动降级重试的参考值） -->
+        <el-form-item
+          v-if="processingMode === 'full' && (alignerBackend === 'qwen3_asr' || alignerBackend === 'qwen3_aligner' || alignerBackend === 'nemo_aligner') && advanced.aligner_device !== 'cpu'"
+          :label="t('processor.qwen3BatchSize')"
+        >
+          <el-input-number
+            v-model="advanced.qwen3_batch_size"
+            :disabled="processing"
+            :min="1"
+            :max="64"
+            :step="1"
+            style="width:160px"
+          />
+          <div class="help-text" v-if="alignerBackend === 'qwen3_asr' && advanced.aligner_device === 'auto'">💡 {{ t('processor.batchSizeAutoHint') }}</div>
+          <div class="help-text" v-else-if="alignerBackend === 'qwen3_asr'">⚠️ {{ t('processor.qwen3BatchSizeHintAsr') }}</div>
+          <div class="help-text" v-else>ℹ️ {{ t('processor.qwen3BatchSizeHintAligner') }}</div>
+        </el-form-item>
+
 
         <el-form-item v-if="processingMode === 'full' && alignerBackend === 'nemo_aligner'" :label="t('processor.nemoModel')">
           <el-input
@@ -182,6 +207,17 @@
           </div>
           <div class="help-text" style="margin-top:4px">
             <small style="color:#909399">⚠ {{ t('dialogue.phonemeWarning') }}</small>
+          </div>
+          <!-- 去母音化音素写入：仅当已选择合并/平假名/片假名（有实际去
+               母音化音节可写入）且输出格式支持音素字段（sv/vsqx）时才有
+               意义——USTX 始终使用原始音素/文字，不支持该写入。 -->
+          <div v-if="phonemeMode !== 'none' && (outputFormat === 'sv' || outputFormat === 'vsqx')" style="margin-top:8px">
+            <el-checkbox v-model="jaDevoicedPhoneme" :disabled="processing">
+              {{ t('dialogue.jaDevoicedPhoneme') }}
+            </el-checkbox>
+            <div class="help-text">
+              <small>{{ t('dialogue.jaDevoicedPhonemeHint') }}</small>
+            </div>
           </div>
         </el-form-item>
 
@@ -297,7 +333,7 @@
             <el-row v-if="advanced.f0_smooth" :gutter="20">
               <el-col :xs="24" :sm="12">
                 <el-form-item :label="t('processor.smoothWindow')">
-                  <el-input-number v-model="advanced.f0_smooth_window" :min="1" :max="29" :step="2" controls-position="right" :disabled="processing || !advanced.export_pitch_line" />
+                  <el-input-number v-model="advanced.f0_smooth_window" :min="1" :max="21" :step="2" controls-position="right" :disabled="processing || !advanced.export_pitch_line" />
                   <span class="help-text">{{ t('processor.smoothWindowTip') }}</span>
                 </el-form-item>
               </el-col>
@@ -306,7 +342,7 @@
             <el-row v-if="outputFormat === 'vsqx' && advanced.f0_smooth" :gutter="20">
               <el-col :xs="24" :sm="12">
                 <el-form-item :label="t('processor.vsqxPitchSmoothWindow')">
-                  <el-input-number v-model="advanced.vsqx_pitch_smooth_window" :min="1" :max="29" :step="2" controls-position="right" :disabled="processing || !advanced.export_pitch_line" />
+                  <el-input-number v-model="advanced.vsqx_pitch_smooth_window" :min="1" :max="21" :step="2" controls-position="right" :disabled="processing || !advanced.export_pitch_line" />
                   <span class="help-text">{{ t('processor.vsqxPitchSmoothWindowTip') }}</span>
                 </el-form-item>
               </el-col>
@@ -414,7 +450,13 @@
       />
       <div class="folder-import-bar">
         <el-button :disabled="processing" @click="triggerFolderImport">📁 {{ t('dialogue.importFolder') }}</el-button>
-        <el-button :disabled="processing" @click="openSubtitleImportDialog">📝 {{ t('dialogue.importSubtitle') }}</el-button>
+        <el-button 
+          v-if="!(inputMode === 'tts' || (inputMode === 'audio' && processingMode === 'project-only'))"
+          :disabled="processing" 
+          @click="openSubtitleImportDialog"
+        >
+          📝 {{ t('dialogue.importSubtitle') }}
+        </el-button>
         <el-button :disabled="processing" @click="addBox">➕ {{ t('dialogue.addBox') }}</el-button>
         <el-button type="danger" plain :disabled="processing" @click="clearAllBoxes">🗑️ {{ t('dialogue.clearAll') }}</el-button>
       </div>
@@ -574,9 +616,15 @@
                     :value="eng.id"
                     :disabled="!eng.available"
                   >
-                    <span>{{ engineLabel(eng.id) }}</span>
-                    <span v-if="!eng.available" style="float: right; color: var(--el-color-danger); font-size: 12px; margin-left: 12px">
-                      {{ eng.message }}
+                    <!-- 【修复】float: right 会在 eng.available === false 时
+                         把这个被 teleport 到 <body> 的下拉面板撑到接近整个
+                         视口宽度，改用 flex 布局后两个 span 始终在正常文档
+                         流内并排（与 MFAProcessor.vue 同款修复）。 -->
+                    <span style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+                      <span>{{ engineLabel(eng.id) }}</span>
+                      <span v-if="!eng.available" style="color: var(--el-color-danger); font-size: 12px; white-space: nowrap;">
+                        {{ eng.message }}
+                      </span>
                     </span>
                   </el-option>
                 </el-select>
@@ -592,7 +640,107 @@
                   <el-option :label="t('processor.narratorCustom')" value="" />
                   <el-option v-for="n in narratorsForEngine(box.ttsEngine)" :key="n.id" :label="n.name" :value="n.id" />
                 </el-select>
+
+                <!-- Qwen3-TTS 模式切换：CustomVoice（预设音色+可选风格指令）/
+                     VoiceDesign（仅文本描述音色）/ VoiceClone（导入参考音频
+                     克隆），每个对话框独立选择、独立维护，与 MFAProcessor.vue
+                     主面板同款 UI，字段全部换成该框自己的 box.ttsQwen3*。 -->
+                <template v-if="box.ttsEngine === 'qwen3_tts'">
+                  <div class="tts-mini-label" style="margin-top: 6px">{{ t('processor.qwen3TtsMode') }}</div>
+                  <el-radio-group v-model="box.ttsQwen3Mode" size="small" @change="(mode: any) => { if (mode !== 'voice_clone') { box.ttsQwen3RefAudioFile = null; box.ttsQwen3RefAudioPath = '' } }">
+                    <el-radio-button value="custom_voice">{{ t('processor.qwen3TtsModeCustomVoice') }}</el-radio-button>
+                    <el-radio-button value="voice_design">{{ t('processor.qwen3TtsModeVoiceDesign') }}</el-radio-button>
+                    <el-radio-button value="voice_clone">{{ t('processor.qwen3TtsModeVoiceClone') }}</el-radio-button>
+                  </el-radio-group>
+
+                  <div class="tts-mini-label" style="margin-top: 6px">{{ t('processor.qwen3TtsSize') }}</div>
+                  <el-radio-group v-model="box.ttsQwen3Size" size="small">
+                    <el-radio-button value="1.7B">1.7B</el-radio-button>
+                    <el-radio-button value="0.6B">0.6B</el-radio-button>
+                  </el-radio-group>
+                  <span v-if="box.ttsQwen3Mode === 'voice_design' && box.ttsQwen3Size === '0.6B'" style="margin-left: 8px; font-size: 12px; color: var(--el-text-color-secondary)">
+                    {{ t('processor.qwen3TtsVoiceDesignNo06bHint') }}
+                  </span>
+
+                  <!-- CustomVoice：预设音色下拉（复用 box.ttsVoices，engine=
+                       'qwen3_tts' 时后端返回 9 个预设音色）+ 可选风格指令 -->
+                  <template v-if="box.ttsQwen3Mode === 'custom_voice'">
+                    <el-select
+                      v-model="box.ttsVoice"
+                      filterable
+                      size="small"
+                      :loading="box.ttsVoicesLoading"
+                      style="width: 100%; margin-top: 6px"
+                      :disabled="processing"
+                      :placeholder="t('processor.ttsVoicePlaceholder')"
+                    >
+                      <el-option v-for="v in box.ttsVoices" :key="v.id" :label="`${v.name} (${v.locale})`" :value="v.id">
+                        <span style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+                          <span>{{ v.name }} ({{ v.locale }})</span>
+                          <span v-if="v.desc" style="color: var(--el-text-color-secondary); font-size: 12px; white-space: nowrap;">{{ v.desc }}</span>
+                        </span>
+                      </el-option>
+                    </el-select>
+                    <el-input
+                      v-model="box.ttsQwen3Instruct"
+                      type="textarea"
+                      :rows="2"
+                      :disabled="processing"
+                      style="margin-top: 6px"
+                      :placeholder="t('processor.qwen3TtsInstructCustomVoicePlaceholder')"
+                    />
+                  </template>
+
+                  <!-- VoiceDesign：仅凭文本描述"设计"一个新音色，不使用预设音色下拉 -->
+                  <el-input
+                    v-if="box.ttsQwen3Mode === 'voice_design'"
+                    v-model="box.ttsQwen3Instruct"
+                    type="textarea"
+                    :rows="3"
+                    :disabled="processing"
+                    style="margin-top: 6px"
+                    :placeholder="t('processor.qwen3TtsInstructVoiceDesignPlaceholder')"
+                  />
+
+                  <!-- VoiceClone（Base 模型）：导入参考音频 + 可选参考文本 + x-vector 开关 -->
+                  <template v-if="box.ttsQwen3Mode === 'voice_clone'">
+                    <div style="margin-top: 6px">
+                      <el-upload
+                        drag
+                        action="#"
+                        :auto-upload="false"
+                        :show-file-list="false"
+                        accept="audio/*"
+                        :disabled="processing"
+                        :on-change="(f: any) => { box.ttsQwen3RefAudioFile = f.raw; box.ttsQwen3RefAudioPath = '' }"
+                        class="compact-upload"
+                      >
+                        <div class="el-upload__text">{{ t('processor.qwen3TtsRefAudioChoose') }}</div>
+                      </el-upload>
+                      <span v-if="boxQwen3RefAudioName(box)" style="margin-left: 10px; font-size: 12px; color: var(--el-text-color-secondary)">
+                        {{ boxQwen3RefAudioName(box) }}
+                        <el-button link type="danger" size="small" :disabled="processing" @click="box.ttsQwen3RefAudioFile = null; box.ttsQwen3RefAudioPath = ''">✖</el-button>
+                      </span>
+                    </div>
+                    <div style="margin-top: 6px">
+                      <span class="tts-mini-label">{{ t('processor.qwen3TtsXVectorOnly') }}</span>
+                      <el-switch v-model="box.ttsQwen3XVectorOnly" :disabled="processing" size="small" />
+                      <span style="margin-left: 8px; font-size: 12px; color: var(--el-text-color-secondary)">{{ t('processor.qwen3TtsXVectorOnlyHint') }}</span>
+                    </div>
+                    <el-input
+                      v-if="!box.ttsQwen3XVectorOnly"
+                      v-model="box.ttsQwen3RefText"
+                      type="textarea"
+                      :rows="2"
+                      :disabled="processing"
+                      style="margin-top: 6px"
+                      :placeholder="t('processor.qwen3TtsRefTextPlaceholder')"
+                    />
+                  </template>
+                </template>
+
                 <el-select
+                  v-if="box.ttsEngine !== 'qwen3_tts'"
                   v-model="box.ttsVoice"
                   filterable
                   size="small"
@@ -603,7 +751,7 @@
                 >
                   <el-option v-for="v in box.ttsVoices" :key="v.id" :label="`${v.name} (${v.locale})`" :value="v.id" />
                 </el-select>
-				<div class="tts-box-sliders">
+				<div v-if="box.ttsEngine !== 'qwen3_tts'" class="tts-box-sliders">
 				  <span class="tts-mini-label">{{ t('processor.ttsRate') }}</span>
 				  <el-input-number v-model="box.ttsRate" :min="-50" :max="100" size="small" :disabled="processing" controls-position="right" style="width: 90px" />
 
@@ -613,6 +761,7 @@
 				  <span class="tts-mini-label">{{ t('processor.ttsVolume') }}</span>
 				  <el-input-number v-model="box.ttsVolume" :min="-50" :max="50" size="small" :disabled="processing" controls-position="right" style="width: 90px" />
 				</div>
+                <el-alert v-else :closable="false" type="info" :title="t('processor.qwen3TtsNoRateHint')" show-icon style="margin-top: 6px" />
                 <!-- 手动分段预览：只在点击按钮时把该框完整文本按句合成
                      （不做对齐）；生成期间共享的"开始处理"按钮会被禁用，
                      生成完成后点击"开始处理"会直接复用这份分句音频去
@@ -623,7 +772,7 @@
                   <el-button
                     size="small"
                     :loading="box.ttsSegmentPreviewLoading"
-                    :disabled="processing || !box.ttsVoice || !box.text.trim()"
+                    :disabled="processing || !boxQwen3TtsModeReady(box) || !box.text.trim()"
                     @click="runBoxSegmentPreview(box)"
                   >
                     🔄 {{ box.ttsSegmentPreviewUrl ? t('processor.ttsRegeneratePreview') : t('processor.ttsGeneratePreview') }}
@@ -725,7 +874,7 @@
         <el-button v-if="processing" @click="stopProcessing">⏹ {{ t('dialogue.stopProcessing') }}</el-button>
         <span v-if="isSubmitDisabled && !processing" class="disabled-text">
           <template v-if="inputMode === 'tts'">
-            <template v-if="!boxes.some((b) => b.text.trim() && b.ttsVoice)">
+            <template v-if="!boxes.some((b) => b.text.trim() && boxQwen3TtsModeReady(b))">
               ({{ t('dialogue.ttsEmptyBoxesWarning') }})
             </template>
           </template>
@@ -773,10 +922,18 @@
           <el-table-column :label="t('processor.ttsEngine')" width="90">
             <template #default="{ row }">{{ engineLabel(row.engine) }}</template>
           </el-table-column>
-          <el-table-column prop="voice" :label="t('processor.ttsVoice')" show-overflow-tooltip />
+          <el-table-column :label="t('processor.ttsVoice')" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span v-if="row.engine === 'qwen3_tts'">{{ qwen3TtsModeLabel(row.qwen3_tts_mode) }}</span>
+              <span v-else>{{ row.voice }}</span>
+            </template>
+          </el-table-column>
           <el-table-column :label="t('processor.narratorParamsColumn')" width="140" show-overflow-tooltip>
             <template #default="{ row }">
-              <span style="font-size: 12px; color: var(--el-text-color-secondary)">
+              <span v-if="row.engine === 'qwen3_tts'" style="font-size: 12px; color: var(--el-text-color-secondary)">
+                {{ row.qwen3_tts_size || '1.7B' }}
+              </span>
+              <span v-else style="font-size: 12px; color: var(--el-text-color-secondary)">
                 {{ row.rate || '+0%' }} / {{ row.pitch || '+0Hz' }} / {{ row.volume || '+0%' }}
               </span>
             </template>
@@ -804,7 +961,133 @@
               />
             </el-select>
           </el-form-item>
-          <el-form-item :label="t('processor.ttsVoice')">
+
+          <template v-if="narratorForm.engine === 'qwen3_tts'">
+            <el-form-item :label="t('processor.qwen3TtsMode')">
+              <el-radio-group v-model="narratorForm.qwen3_tts_mode">
+                <el-radio-button value="custom_voice">{{ t('processor.qwen3TtsModeCustomVoice') }}</el-radio-button>
+                <el-radio-button value="voice_design">{{ t('processor.qwen3TtsModeVoiceDesign') }}</el-radio-button>
+                <el-radio-button value="voice_clone">{{ t('processor.qwen3TtsModeVoiceClone') }}</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item :label="t('processor.qwen3TtsSize')">
+              <el-radio-group v-model="narratorForm.qwen3_tts_size">
+                <el-radio-button value="1.7B">1.7B</el-radio-button>
+                <el-radio-button value="0.6B">0.6B</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+
+            <el-form-item v-if="(narratorForm.qwen3_tts_mode || 'custom_voice') === 'custom_voice'" :label="t('processor.ttsVoice')">
+              <el-select
+                v-model="narratorForm.voice"
+                filterable
+                :loading="narratorFormVoicesLoading"
+                style="width: 100%"
+                :placeholder="t('processor.ttsVoicePlaceholder')"
+              >
+                <el-option v-for="v in narratorFormVoices" :key="v.id" :label="`${v.name} (${v.locale})`" :value="v.id" />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="(narratorForm.qwen3_tts_mode || 'custom_voice') === 'custom_voice'" :label="t('processor.qwen3TtsInstructOptional')">
+              <el-input v-model="narratorForm.qwen3_tts_instruct" type="textarea" :rows="2" :placeholder="t('processor.qwen3TtsInstructCustomVoicePlaceholder')" />
+            </el-form-item>
+
+            <!-- Voice Design 下的子选项：仅声音描述文本 / 预览音色并另存为
+                 音色克隆，二者互斥，用下拉选择框切换（与 MFAProcessor.vue
+                 同款）。 -->
+            <el-form-item v-if="narratorForm.qwen3_tts_mode === 'voice_design'" :label="t('processor.qwen3TtsVoiceDesignSubMode')">
+              <el-select v-model="narratorFormVoiceDesignSubMode" style="width: 100%">
+                <el-option value="desc_only" :label="t('processor.qwen3TtsVoiceDesignSubModeDescOnly')" />
+                <el-option value="save_clone" :label="t('processor.qwen3TtsVoiceDesignSubModeSaveClone')" />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item v-if="narratorForm.qwen3_tts_mode === 'voice_design' && narratorFormVoiceDesignSubMode === 'desc_only'" :label="t('processor.qwen3TtsInstructRequired')">
+              <el-input v-model="narratorForm.qwen3_tts_instruct" type="textarea" :rows="3" :placeholder="t('processor.qwen3TtsInstructVoiceDesignPlaceholder')" />
+            </el-form-item>
+
+            <!-- Voice Design → 预览并另存为音色克隆：与 MFAProcessor.vue
+                 同款功能，见该文件同一位置的注释。 -->
+            <template v-if="narratorForm.qwen3_tts_mode === 'voice_design' && narratorFormVoiceDesignSubMode === 'save_clone'">
+              <el-form-item :label="t('processor.qwen3TtsInstructRequired')">
+                <el-input v-model="narratorForm.qwen3_tts_instruct" type="textarea" :rows="3" :placeholder="t('processor.qwen3TtsInstructVoiceDesignPlaceholder')" />
+              </el-form-item>
+              <el-form-item :label="t('processor.qwen3TtsPreviewAsCloneTitle')">
+                <div style="width: 100%; border: 1px solid var(--el-border-color); border-radius: 6px; padding: 12px; background: var(--el-fill-color-lighter)">
+                  <div style="font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 8px">
+                    {{ t('processor.qwen3TtsPreviewAsCloneHint') }}
+                  </div>
+                  <el-input
+                    v-model="narratorFormPreviewText"
+                    type="textarea"
+                    :rows="2"
+                    :placeholder="t('processor.qwen3TtsPreviewTextPlaceholder')"
+                  />
+                  <div style="margin-top: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+                    <el-button size="small" :loading="narratorFormPreviewLoading" @click="generateNarratorPreview">
+                      🔊 {{ t('processor.qwen3TtsGeneratePreview') }}
+                    </el-button>
+                    <audio v-if="narratorFormPreviewUrl" :src="narratorFormPreviewUrl" controls style="height: 32px; vertical-align: middle" />
+                  </div>
+                  <el-alert v-if="narratorFormPreviewError" :closable="false" type="error" :title="narratorFormPreviewError" show-icon style="margin-top: 8px" />
+
+                  <template v-if="narratorFormPreviewBlob">
+                    <div style="margin-top: 12px">
+                      <span class="tts-mini-label">{{ t('processor.qwen3TtsXVectorOnly') }}</span>
+                      <el-switch v-model="narratorFormPreviewXVectorOnly" size="small" />
+                      <span style="margin-left: 8px; font-size: 12px; color: var(--el-text-color-secondary)">{{ t('processor.qwen3TtsXVectorOnlyHint') }}</span>
+                    </div>
+                    <el-input
+                      v-if="!narratorFormPreviewXVectorOnly"
+                      v-model="narratorFormPreviewRefText"
+                      type="textarea"
+                      :rows="2"
+                      style="margin-top: 8px"
+                      :placeholder="t('processor.qwen3TtsRefTextPlaceholder')"
+                    />
+                    <el-button
+                      type="primary"
+                      size="small"
+                      style="margin-top: 8px"
+                      :loading="narratorSaving"
+                      @click="saveNarratorPreviewAsVoiceClone"
+                    >
+                      💾 {{ t('processor.qwen3TtsSaveAsClone') }}
+                    </el-button>
+                  </template>
+                </div>
+              </el-form-item>
+            </template>
+
+            <template v-if="narratorForm.qwen3_tts_mode === 'voice_clone'">
+              <el-form-item :label="t('processor.qwen3TtsRefAudio')">
+                <el-upload
+                  drag
+                  action="#"
+                  :auto-upload="false"
+                  :show-file-list="false"
+                  accept="audio/*"
+                  :on-change="(f: any) => { narratorFormQwen3RefAudioFile = f.raw; narratorForm.qwen3_tts_ref_audio_path = '' }"
+                  class="compact-upload"
+                >
+                  <div class="el-upload__text">{{ t('processor.qwen3TtsRefAudioChoose') }}</div>
+                </el-upload>
+                <span v-if="narratorFormQwen3RefAudioName" style="margin-left: 10px; font-size: 13px; color: var(--el-text-color-secondary)">
+                  {{ narratorFormQwen3RefAudioName }}
+                  <el-button link type="danger" size="small" @click="narratorFormQwen3RefAudioFile = null; narratorForm.qwen3_tts_ref_audio_path = ''">✖</el-button>
+                </span>
+              </el-form-item>
+              <el-form-item :label="t('processor.qwen3TtsXVectorOnly')">
+                <el-switch v-model="narratorForm.qwen3_tts_x_vector_only" />
+                <span style="margin-left: 10px; font-size: 12px; color: var(--el-text-color-secondary)">{{ t('processor.qwen3TtsXVectorOnlyHint') }}</span>
+              </el-form-item>
+              <el-form-item v-if="!narratorForm.qwen3_tts_x_vector_only" :label="t('processor.qwen3TtsRefText')">
+                <el-input v-model="narratorForm.qwen3_tts_ref_text" type="textarea" :rows="2" :placeholder="t('processor.qwen3TtsRefTextPlaceholder')" />
+              </el-form-item>
+            </template>
+          </template>
+
+          <el-form-item v-else :label="t('processor.ttsVoice')">
             <el-select
               v-model="narratorForm.voice"
               filterable
@@ -816,24 +1099,40 @@
             </el-select>
           </el-form-item>
           <!-- 语音预设需要连同语速/音调/音量一起保存，否则套用预设时只会
-               恢复引擎+音色，语速等参数还得用户手动重新调 -->
-          <el-form-item :label="t('processor.ttsRate')">
-            <el-slider v-model="narratorFormRateNum" :min="-50" :max="100" show-input style="max-width: 420px" />
-          </el-form-item>
-          <el-form-item :label="t('processor.ttsPitch')">
-            <el-slider v-model="narratorFormPitchNum" :min="-50" :max="50" show-input style="max-width: 420px" />
-          </el-form-item>
-          <el-form-item v-if="narratorForm.engine === 'windows_sapi'">
-            <el-alert :closable="false" type="info" :title="t('processor.ttsPitchBestEffortHint')" show-icon />
-          </el-form-item>
-          <el-form-item :label="t('processor.ttsVolume')">
-            <el-slider v-model="narratorFormVolumeNum" :min="-50" :max="50" show-input style="max-width: 420px" />
-          </el-form-item>
+               恢复引擎+音色，语速等参数还得用户手动重新调。Qwen3-TTS 没有
+               这套参数，跳过。 -->
+          <template v-if="narratorForm.engine !== 'qwen3_tts'">
+            <el-form-item :label="t('processor.ttsRate')">
+              <el-slider v-model="narratorFormRateNum" :min="-50" :max="100" show-input style="max-width: 420px" />
+            </el-form-item>
+            <el-form-item :label="t('processor.ttsPitch')">
+              <el-slider v-model="narratorFormPitchNum" :min="-50" :max="50" show-input style="max-width: 420px" />
+            </el-form-item>
+            <el-form-item v-if="narratorForm.engine === 'windows_sapi'">
+              <el-alert :closable="false" type="info" :title="t('processor.ttsPitchBestEffortHint')" show-icon />
+            </el-form-item>
+            <el-form-item :label="t('processor.ttsVolume')">
+              <el-slider v-model="narratorFormVolumeNum" :min="-50" :max="50" show-input style="max-width: 420px" />
+            </el-form-item>
+          </template>
         </el-form>
 
         <template #footer>
+          <el-alert
+            v-if="narratorForm.qwen3_tts_mode === 'voice_design' && narratorFormVoiceDesignSubMode === 'save_clone'"
+            :closable="false"
+            type="warning"
+            :title="t('processor.qwen3TtsSaveClonePanelActiveHint')"
+            show-icon
+            style="margin-bottom: 12px"
+          />
           <el-button @click="resetNarratorForm">{{ t('processor.reset') }}</el-button>
-          <el-button type="primary" :loading="narratorSaving" @click="saveNarrator">{{ t('processor.save') }}</el-button>
+          <el-button
+            type="primary"
+            :loading="narratorSaving"
+            :disabled="narratorForm.qwen3_tts_mode === 'voice_design' && narratorFormVoiceDesignSubMode === 'save_clone'"
+            @click="saveNarrator"
+          >{{ t('processor.save') }}</el-button>
         </template>
       </el-dialog>
 
@@ -1042,6 +1341,14 @@
                   <small v-else-if="boxSettings.draft.phonemeMode === 'hiragana'">{{ t('dialogue.phonemeHiraganaHint') }}</small>
                   <small v-else>{{ t('dialogue.phonemeKatakanaHint') }}</small>
                 </div>
+                <div v-if="boxSettings.draft.phonemeMode !== 'none' && (outputFormat === 'sv' || outputFormat === 'vsqx')" style="margin-top:8px">
+                  <el-checkbox v-model="boxSettings.draft.jaDevoicedPhoneme">
+                    {{ t('dialogue.jaDevoicedPhoneme') }}
+                  </el-checkbox>
+                  <div class="help-text">
+                    <small>{{ t('dialogue.jaDevoicedPhonemeHint') }}</small>
+                  </div>
+                </div>
               </el-form-item>
             </template>
 
@@ -1145,7 +1452,7 @@
                     <el-form-item :label="t('processor.smoothWindow')">
                       <el-input-number
                         v-model="boxSettings.draft.advanced.f0_smooth_window"
-                        :min="1" :max="29" :step="2" controls-position="right"
+                        :min="1" :max="21" :step="2" controls-position="right"
                         :disabled="!boxSettings.draft.advanced.export_pitch_line"
                       />
                       <span class="help-text">{{ t('processor.smoothWindowTip') }}</span>
@@ -1158,7 +1465,7 @@
                     <el-form-item :label="t('processor.vsqxPitchSmoothWindow')">
                       <el-input-number
                         v-model="boxSettings.draft.advanced.vsqx_pitch_smooth_window"
-                        :min="1" :max="29" :step="2" controls-position="right"
+                        :min="1" :max="21" :step="2" controls-position="right"
                         :disabled="!boxSettings.draft.advanced.export_pitch_line"
                       />
                       <span class="help-text">{{ t('processor.vsqxPitchSmoothWindowTip') }}</span>
@@ -1251,6 +1558,18 @@ interface DialogueBox {
   ttsRate: number         // 语速，百分比增量，如 10 → "+10%"
   ttsPitch: number        // 音调，Hz 增量，如 -5 → "-5Hz"
   ttsVolume: number       // 音量，百分比增量
+  // ── Qwen3-TTS 专用（box.ttsEngine === 'qwen3_tts' 时生效）：与
+  // EdgeTTS/讲述人的"音色下拉+语速/音调/音量"是完全不同的参数体系，
+  // 每个对话框独立维护自己的一套，互不干扰（与 MFAProcessor.vue 主面板
+  // 的全局单例字段相对，这里按 box 维度隔离）。
+  ttsQwen3Mode: Qwen3TtsMode
+  ttsQwen3Size: '1.7B' | '0.6B'
+  ttsQwen3Instruct: string
+  ttsQwen3RefText: string
+  ttsQwen3XVectorOnly: boolean
+  ttsQwen3RefAudioFile: File | null
+  ttsQwen3RefAudioPath: string   // 已保存预设自带的参考音频路径（套用预设
+                                 // 但未重新选择文件时，转发这个路径）
   ttsPreviewUrl: string
   ttsPreviewLoading: boolean
   // ── 手动分段预览（与上面的"试听音色"按钮是两回事）：点击后调用
@@ -1279,6 +1598,7 @@ interface AdvancedConfig {
   aligner_device: 'auto' | 'cpu' | 'cuda'
   whisperx_model: string
   whisperx_batch_size: number
+  qwen3_batch_size: number
   nemo_model: string
   crepe_model: 'full' | 'tiny'
   precision: 'single' | 'double'
@@ -1318,6 +1638,7 @@ interface BoxOverride {
   wordPhonemeMap: boolean
   // ── 仅生成工程模式专属 ──
   phonemeMode: 'none' | 'merge' | 'hiragana' | 'katakana'
+  jaDevoicedPhoneme: boolean         // 日语辅音起始音素锁定（<p lock="1">），仅 vsqx 有意义
   // ── 两种模式共用 ──
   dictSource: string
   advanced: BoxAdvancedOverride
@@ -1330,8 +1651,23 @@ const checkingStatus = ref(false)
 
 // 输入模式：TTS跟读（讲述人 + EdgeTTS，每个对话框不再上传音频，而是选择
 // 音色由 EdgeTTS 合成）/ 音频跟读（原有的每框上传音频对齐流程）。
-type TtsNarrator = { id: string; name: string; engine?: string; voice: string; rate: string; pitch: string; volume: string; language?: string }
-type TtsVoice = { id: string; name: string; gender?: string; locale: string }
+// Qwen3-TTS 三种模式（每个对话框可独立选择，与 MFAProcessor.vue 主面板的
+// 语义完全一致，只是这里按 box 维度隔离）：
+//   custom_voice ：voice 字段作为预设音色 id，qwen3Instruct 是可选风格指令
+//   voice_design ：qwen3Instruct 是必填的音色描述文本，不使用 voice
+//   voice_clone  ：qwen3RefAudioFile(File) / qwen3RefAudioPath(已保存预设
+//                  自带的参考音频路径，二选一) + qwen3RefText + qwen3XVectorOnly
+type Qwen3TtsMode = 'custom_voice' | 'voice_design' | 'voice_clone'
+type TtsNarrator = {
+  id: string; name: string; engine?: string; voice: string; rate: string; pitch: string; volume: string; language?: string
+  qwen3_tts_mode?: Qwen3TtsMode
+  qwen3_tts_size?: string
+  qwen3_tts_instruct?: string
+  qwen3_tts_ref_text?: string
+  qwen3_tts_x_vector_only?: boolean
+  qwen3_tts_ref_audio_path?: string
+}
+type TtsVoice = { id: string; name: string; gender?: string; locale: string; desc?: string }
 type TtsEngine = { id: string; label: string; label_zh: string; available: boolean; message: string }
 
 const inputMode = ref<'audio' | 'tts'>('audio')
@@ -1339,7 +1675,11 @@ const narrators = ref<TtsNarrator[]>([])
 const ttsEngines = ref<TtsEngine[]>([])
 const ttsEnginesLoading = ref(false)
 const narratorManagerVisible = ref(false)
-const narratorForm = ref<TtsNarrator>({ id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%' })
+const narratorForm = ref<TtsNarrator>({
+  id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%',
+  qwen3_tts_mode: 'custom_voice', qwen3_tts_size: '1.7B', qwen3_tts_instruct: '', qwen3_tts_ref_text: '',
+  qwen3_tts_x_vector_only: false, qwen3_tts_ref_audio_path: '',
+})
 const narratorSaving = ref(false)
 
 // ── "优化文本"弹窗（与 MFAProcessor.vue 的实现逻辑一致：弹窗内编辑的是
@@ -1643,6 +1983,45 @@ const narratorFormVolumeNum = computed<number>({
 // 与每个对话框各自的 box.ttsVoices 互相独立，避免串扰（同 MFAProcessor.vue）。
 const narratorFormVoices = ref<TtsVoice[]>([])
 const narratorFormVoicesLoading = ref(false)
+// 语音预设弹窗内 Voice Clone 模式的参考音频：与每个对话框各自的
+// box.ttsQwen3RefAudioFile 分开维护，避免"在弹窗里选的参考音频，被
+// 某个对话框当前正在编辑的参考音频覆盖"这类串扰（同 MFAProcessor.vue）。
+const narratorFormQwen3RefAudioFile = ref<File | null>(null)
+const narratorFormQwen3RefAudioName = computed(() =>
+  narratorFormQwen3RefAudioFile.value?.name || (narratorForm.value.qwen3_tts_ref_audio_path ? narratorForm.value.qwen3_tts_ref_audio_path.split(/[\\/]/).pop() : '')
+)
+
+// 切出 voice_clone 模式时清空弹窗内已选的参考音频，避免残留状态。
+watch(() => narratorForm.value.qwen3_tts_mode, (mode) => {
+  if (mode !== 'voice_clone') {
+    narratorFormQwen3RefAudioFile.value = null
+    narratorForm.value.qwen3_tts_ref_audio_path = ''
+  }
+})
+
+// Voice Design 下的两个互斥子选项（下拉选择框切换），与 MFAProcessor.vue
+// 同款：desc_only=仅声音描述文本（原本的普通 Voice Design 表单）；
+// save_clone=预览音色并另存为音色克隆。纯前端 UI 状态，不随表单提交。
+const narratorFormVoiceDesignSubMode = ref<'desc_only' | 'save_clone'>('desc_only')
+
+// ── Voice Design → 预览并另存为音色克隆（视为 Voice Clone）───────────
+// 与 MFAProcessor.vue 同款功能：先用声音描述合成一段试听音频，满意后
+// 把这段音频固化成一份可长期复用的 Voice Clone 参考音频，不必每次套用
+// 预设都重新调用 Voice Design（结果也更稳定，不受随机性影响）。
+const narratorFormPreviewText = ref('')
+const narratorFormPreviewLoading = ref(false)
+const narratorFormPreviewError = ref('')
+const narratorFormPreviewBlob = ref<Blob | null>(null)
+const narratorFormPreviewUrl = ref('')
+const narratorFormPreviewRefText = ref('')
+const narratorFormPreviewXVectorOnly = ref(false)
+
+watch([() => narratorForm.value.qwen3_tts_instruct, narratorFormPreviewText, () => narratorForm.value.engine, () => narratorForm.value.qwen3_tts_mode], () => {
+  narratorFormPreviewBlob.value = null
+  if (narratorFormPreviewUrl.value) URL.revokeObjectURL(narratorFormPreviewUrl.value)
+  narratorFormPreviewUrl.value = ''
+  narratorFormPreviewError.value = ''
+})
 
 // 引擎中/英文名按当前界面语言展示，"选择 TTS"下拉框、语音预设管理对话框、
 // 预设列表的引擎列都复用这一个函数。
@@ -1682,6 +2061,11 @@ const processingMode = ref<'full' | 'project-only'>('full')
 // 仅在音轨来自 LAB 且输出格式非 USTX 时才真正生效（与后端语义一致）。
 const phonemeMode = ref<'none' | 'merge' | 'hiragana' | 'katakana'>('none')
 
+// 日语音素锁定：仅生成工程模式 + phonemeMode 非 none + 输出格式为 vsqx 时
+// 才在界面上显示。开启后，合并音节的辅音起始（如 s/sh/ky）会写入 VSQX
+// <p lock="1">，跳过 VOCALOID 自带 G2P；标准元音/ん/っ 不受影响。
+const jaDevoicedPhoneme = ref(false)
+
 const advanced = ref<AdvancedConfig>({
   bpm: 120,
   base_pitch: 60,
@@ -1692,6 +2076,7 @@ const advanced = ref<AdvancedConfig>({
   aligner_device: 'auto',
   whisperx_model: 'large-v3',
   whisperx_batch_size: 16,
+  qwen3_batch_size: 8,
   nemo_model: '',
   crepe_model: 'full',
   precision: 'double',
@@ -1870,6 +2255,66 @@ const handleBoxEngineChange = (box: DialogueBox, engine: string) => {
   fetchBoxTtsVoices(box, engine)
 }
 
+// 该框参考音频文件名展示：新选择的 File 优先，否则回退到已保存预设自带的
+// 路径（与 MFAProcessor.vue 的 qwen3TtsRefAudioName 同款逻辑，按框隔离）。
+const boxQwen3RefAudioName = (box: DialogueBox): string =>
+  box.ttsQwen3RefAudioFile?.name || (box.ttsQwen3RefAudioPath ? box.ttsQwen3RefAudioPath.split(/[\\/]/).pop() || '' : '')
+
+// 该框 Qwen3-TTS 三种模式各自的"是否已经具备可以合成的最小条件"（与
+// MFAProcessor.vue 的 qwen3TtsModeReady 语义一致，按框隔离）：
+//   custom_voice ：需要选好预设音色（box.ttsVoice）
+//   voice_design ：需要填写声音描述（box.ttsQwen3Instruct）
+//   voice_clone  ：需要提供参考音频（新选择的文件，或已保存预设自带的路径）
+// 非 Qwen3-TTS 引擎直接回退到原有的"是否选好音色"判断。
+const boxQwen3TtsModeReady = (box: DialogueBox): boolean => {
+  if (box.ttsEngine !== 'qwen3_tts') return !!box.ttsVoice
+  if (box.ttsQwen3Mode === 'voice_design') return !!box.ttsQwen3Instruct.trim()
+  if (box.ttsQwen3Mode === 'voice_clone') return !!(box.ttsQwen3RefAudioFile || box.ttsQwen3RefAudioPath)
+  return !!box.ttsVoice
+}
+
+// Qwen3-TTS 三种模式的展示名（讲述人列表 / 语音预设表格用，与
+// MFAProcessor.vue 同款）。
+const qwen3TtsModeLabel = (mode?: string): string => {
+  if (mode === 'voice_design') return t('processor.qwen3TtsModeVoiceDesign')
+  if (mode === 'voice_clone') return t('processor.qwen3TtsModeVoiceClone')
+  return t('processor.qwen3TtsModeCustomVoice')
+}
+
+// File → 纯 base64（不含 "data:...;base64," 前缀），供 Voice Clone 参考
+// 音频走 JSON 预览接口时使用（与 MFAProcessor.vue 同款）。
+const fileToBase64 = (file: File): Promise<string> => new Promise((resolve, reject) => {
+  const reader = new FileReader()
+  reader.onload = () => resolve(String(reader.result).split(',')[1] || '')
+  reader.onerror = reject
+  reader.readAsDataURL(file)
+})
+
+// 组装该框提交给后端的 qwen3_tts_options（仅 box.ttsEngine==='qwen3_tts'
+// 时使用），与 tts_processor._qwen3_tts_synth_to_file() 顶部约定的字段
+// 一一对应（与 MFAProcessor.vue 的 buildQwen3TtsOptionsForPreview 同款，
+// 按框隔离，device 固定用 'auto'——DialogueBatch 没有 aligner_device
+// 高级设置项，交由后端按框自行判定）。
+const buildBoxQwen3TtsOptionsForPreview = async (box: DialogueBox): Promise<Record<string, any> | undefined> => {
+  if (box.ttsEngine !== 'qwen3_tts') return undefined
+  const opts: Record<string, any> = { mode: box.ttsQwen3Mode, size: box.ttsQwen3Size, device: 'auto' }
+  if (box.ttsQwen3Mode === 'custom_voice') {
+    if (box.ttsQwen3Instruct.trim()) opts.instruct = box.ttsQwen3Instruct.trim()
+  } else if (box.ttsQwen3Mode === 'voice_design') {
+    opts.instruct = box.ttsQwen3Instruct.trim()
+  } else if (box.ttsQwen3Mode === 'voice_clone') {
+    opts.x_vector_only = box.ttsQwen3XVectorOnly
+    if (!box.ttsQwen3XVectorOnly) opts.ref_text = box.ttsQwen3RefText.trim()
+    if (box.ttsQwen3RefAudioFile) {
+      opts.ref_audio_base64 = await fileToBase64(box.ttsQwen3RefAudioFile)
+      opts.ref_audio_ext = `.${(box.ttsQwen3RefAudioFile.name.split('.').pop() || 'wav')}`
+    } else if (box.ttsQwen3RefAudioPath) {
+      opts.ref_audio_path = box.ttsQwen3RefAudioPath
+    }
+  }
+  return opts
+}
+
 const fetchNarratorFormVoices = async (engine: string) => {
   narratorFormVoicesLoading.value = true
   try {
@@ -1911,10 +2356,12 @@ const handleBoxNarratorSelect = async (box: DialogueBox, narratorId: string) => 
   if (!narratorId) {
     // 切回"不使用预设"（自定义）时，把这个对话框的语速/音调/音量重置为
     // 默认值——否则下拉框显示"不使用预设"，滑块却还停留在上一个预设的
-    // 参数上，容易误以为已经跟预设脱钩了。
+    // 参数上，容易误以为已经跟预设脱钩了。同时清空 Qwen3-TTS 参考音频。
     box.ttsRate = 0
     box.ttsPitch = 0
     box.ttsVolume = 0
+    box.ttsQwen3RefAudioFile = null
+    box.ttsQwen3RefAudioPath = ''
     return
   }
   const n = narrators.value.find((x) => x.id === narratorId)
@@ -1928,6 +2375,20 @@ const handleBoxNarratorSelect = async (box: DialogueBox, narratorId: string) => 
   box.ttsRate = parseInt(n.rate) || 0
   box.ttsPitch = parseInt(n.pitch) || 0
   box.ttsVolume = parseInt(n.volume) || 0
+
+  // Qwen3-TTS 专用字段：套用预设时一并恢复模式/规模/风格指令/参考音频等，
+  // 否则用户会看到"选了一个 Voice Clone 预设，但这个框还停留在 Custom
+  // Voice 模式、参考音频也没跟着填上"这种不一致状态（与 MFAProcessor.vue
+  // 的 handleNarratorSelect 同款，按框隔离）。
+  if (engine === 'qwen3_tts') {
+    box.ttsQwen3Mode = (n.qwen3_tts_mode as Qwen3TtsMode) || 'custom_voice'
+    box.ttsQwen3Size = (n.qwen3_tts_size as '1.7B' | '0.6B') || '1.7B'
+    box.ttsQwen3Instruct = n.qwen3_tts_instruct || ''
+    box.ttsQwen3RefText = n.qwen3_tts_ref_text || ''
+    box.ttsQwen3XVectorOnly = !!n.qwen3_tts_x_vector_only
+    box.ttsQwen3RefAudioFile = null
+    box.ttsQwen3RefAudioPath = n.qwen3_tts_ref_audio_path || ''
+  }
 }
 
 const previewBoxTts = async (box: DialogueBox) => {
@@ -1973,12 +2434,13 @@ const previewBoxTts = async (box: DialogueBox) => {
 let boxSegmentPreviewSeq = 0
 const runBoxSegmentPreview = async (box: DialogueBox) => {
   const text = (box.text || '').trim()
-  if (!text || !box.ttsVoice) return
+  if (!text || !boxQwen3TtsModeReady(box)) return
 
   const mySeq = ++boxSegmentPreviewSeq
   box.ttsSegmentPreviewLoading = true
   box.ttsSegmentPreviewError = ''
   try {
+    const qwen3_tts_options = await buildBoxQwen3TtsOptionsForPreview(box)
     const res = await fetch('/api/tts/synthesize_preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1994,6 +2456,7 @@ const runBoxSegmentPreview = async (box: DialogueBox) => {
         rate: `${box.ttsRate >= 0 ? '+' : ''}${box.ttsRate}%`,
         pitch: `${box.ttsPitch >= 0 ? '+' : ''}${box.ttsPitch}Hz`,
         volume: `${box.ttsVolume >= 0 ? '+' : ''}${box.ttsVolume}%`,
+        qwen3_tts_options,
       }),
     })
     const data = await res.json()
@@ -2039,34 +2502,179 @@ const runBoxSegmentPreview = async (box: DialogueBox) => {
 // （watch 本身需要在 boxes 声明之后才能建立，定义见下方 boxes 声明处）
 const _boxSegmentPreviewSignatures = new Map<number, string>()
 const _boxSegmentPreviewSignature = (box: DialogueBox, language: string) =>
-  JSON.stringify([box.text, box.ttsEngine, box.ttsVoice, box.ttsRate, box.ttsPitch, box.ttsVolume, language])
+  JSON.stringify([
+    box.text, box.ttsEngine, box.ttsVoice, box.ttsRate, box.ttsPitch, box.ttsVolume, language,
+    box.ttsQwen3Mode, box.ttsQwen3Size, box.ttsQwen3Instruct, box.ttsQwen3RefText,
+    box.ttsQwen3XVectorOnly, box.ttsQwen3RefAudioFile?.name || '', box.ttsQwen3RefAudioPath,
+  ])
 
 const openNarratorManager = () => {
+  resetNarratorPreviewState()
   narratorManagerVisible.value = true
   fetchNarratorFormVoices(narratorForm.value.engine || 'edge_tts')
 }
 
 const editNarrator = (n: TtsNarrator) => {
-  narratorForm.value = { engine: 'edge_tts', ...n }
+  narratorForm.value = { engine: 'edge_tts', qwen3_tts_mode: 'custom_voice', qwen3_tts_size: '1.7B', ...n }
+  narratorFormQwen3RefAudioFile.value = null
+  resetNarratorPreviewState()
   fetchNarratorFormVoices(narratorForm.value.engine || 'edge_tts')
 }
 
 const resetNarratorForm = () => {
-  narratorForm.value = { id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%' }
+  narratorForm.value = {
+    id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%',
+    qwen3_tts_mode: 'custom_voice', qwen3_tts_size: '1.7B', qwen3_tts_instruct: '', qwen3_tts_ref_text: '',
+    qwen3_tts_x_vector_only: false, qwen3_tts_ref_audio_path: '',
+  }
+  narratorFormQwen3RefAudioFile.value = null
+  resetNarratorPreviewState()
   fetchNarratorFormVoices('edge_tts')
 }
 
-const saveNarrator = async () => {
-  if (!narratorForm.value.name.trim() || !narratorForm.value.voice) {
+// 清空"Voice Design → 预览并另存为音色克隆"的全部临时状态，避免上一个
+// 预设试听生成的音频遗留下来、被误当成当前预设的可保存内容（同
+// MFAProcessor.vue）。
+const resetNarratorPreviewState = () => {
+  narratorFormVoiceDesignSubMode.value = 'desc_only'
+  narratorFormPreviewText.value = ''
+  narratorFormPreviewLoading.value = false
+  narratorFormPreviewError.value = ''
+  narratorFormPreviewBlob.value = null
+  if (narratorFormPreviewUrl.value) URL.revokeObjectURL(narratorFormPreviewUrl.value)
+  narratorFormPreviewUrl.value = ''
+  narratorFormPreviewRefText.value = ''
+  narratorFormPreviewXVectorOnly.value = false
+}
+
+const generateNarratorPreview = async () => {
+  const instruct = (narratorForm.value.qwen3_tts_instruct || '').trim()
+  const text = narratorFormPreviewText.value.trim()
+  if (!instruct) {
+    ElMessage.warning(t('processor.qwen3TtsInstructRequiredWarning'))
+    return
+  }
+  if (!text) {
+    ElMessage.warning(t('processor.qwen3TtsPreviewTextRequiredWarning'))
+    return
+  }
+  narratorFormPreviewLoading.value = true
+  narratorFormPreviewError.value = ''
+  try {
+    const res = await fetch('/api/tts/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        engine: 'qwen3_tts',
+        qwen3_tts_options: { mode: 'voice_design', size: narratorForm.value.qwen3_tts_size || '1.7B', instruct },
+      }),
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.error || t('processor.submitFailed'))
+    }
+    const blob = await res.blob()
+    narratorFormPreviewBlob.value = blob
+    if (narratorFormPreviewUrl.value) URL.revokeObjectURL(narratorFormPreviewUrl.value)
+    narratorFormPreviewUrl.value = URL.createObjectURL(blob)
+    if (!narratorFormPreviewRefText.value.trim()) narratorFormPreviewRefText.value = text
+  } catch (e: any) {
+    narratorFormPreviewError.value = e?.message || String(e)
+  } finally {
+    narratorFormPreviewLoading.value = false
+  }
+}
+
+const saveNarratorPreviewAsVoiceClone = async () => {
+  if (!narratorForm.value.name.trim()) {
     ElMessage.warning(t('processor.narratorNameVoiceRequired'))
     return
   }
+  if (!narratorFormPreviewBlob.value) {
+    ElMessage.warning(t('processor.qwen3TtsPreviewRequiredWarning'))
+    return
+  }
+  if (!narratorFormPreviewXVectorOnly.value && !narratorFormPreviewRefText.value.trim()) {
+    ElMessage.warning(t('processor.qwen3TtsRefTextRequiredWarning'))
+    return
+  }
+
   narratorSaving.value = true
   try {
+    const previewFile = new File([narratorFormPreviewBlob.value], 'preview.wav', { type: 'audio/wav' })
+    const body: Record<string, any> = {
+      ...narratorForm.value,
+      language: sharedLanguage.value,
+      qwen3_tts_mode: 'voice_clone',
+      qwen3_tts_instruct: '',
+      qwen3_tts_ref_text: narratorFormPreviewXVectorOnly.value ? '' : narratorFormPreviewRefText.value.trim(),
+      qwen3_tts_x_vector_only: narratorFormPreviewXVectorOnly.value,
+      qwen3_tts_ref_audio_base64: await fileToBase64(previewFile),
+      qwen3_tts_ref_audio_ext: '.wav',
+    }
     const res = await fetch('/api/tts/narrators', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...narratorForm.value, language: sharedLanguage.value }),
+      body: JSON.stringify(body),
+    })
+    const data = await res.json()
+    if (!data.success) throw new Error(data.error || t('processor.submitFailed'))
+    await fetchNarrators()
+    resetNarratorForm()
+    ElMessage.success(`✅ ${t('processor.success')}`)
+  } catch (e: any) {
+    ElMessage.error(`❌ ${e?.message || String(e)}`)
+  } finally {
+    narratorSaving.value = false
+  }
+}
+
+const saveNarrator = async () => {
+  if (!narratorForm.value.name.trim()) {
+    ElMessage.warning(t('processor.narratorNameVoiceRequired'))
+    return
+  }
+
+  const isQwen3 = narratorForm.value.engine === 'qwen3_tts'
+  const mode = narratorForm.value.qwen3_tts_mode || 'custom_voice'
+  if (isQwen3) {
+    // "另存为音色克隆"子面板必须走 saveNarratorPreviewAsVoiceClone（会强制
+    // mode=voice_clone 并绑定预览音频），不能让这里把它当普通 voice_design
+    // 存掉——否则用户明明是在存 Voice Clone，结果预设列表里却显示成
+    // "声音设计"，且声音描述文字被当成了合成参数保留下来，语义不一致。
+    if (mode === 'voice_design' && narratorFormVoiceDesignSubMode.value === 'save_clone') {
+      ElMessage.warning(t('processor.qwen3TtsPreviewRequiredWarning'))
+      return
+    }
+    if (mode === 'custom_voice' && !narratorForm.value.voice) {
+      ElMessage.warning(t('processor.narratorNameVoiceRequired'))
+      return
+    }
+    if (mode === 'voice_design' && !narratorForm.value.qwen3_tts_instruct?.trim()) {
+      ElMessage.warning(t('processor.qwen3TtsInstructRequiredWarning'))
+      return
+    }
+    if (mode === 'voice_clone' && !narratorFormQwen3RefAudioFile.value && !narratorForm.value.qwen3_tts_ref_audio_path) {
+      ElMessage.warning(t('processor.qwen3TtsRefAudioRequiredWarning'))
+      return
+    }
+  } else if (!narratorForm.value.voice) {
+    ElMessage.warning(t('processor.narratorNameVoiceRequired'))
+    return
+  }
+
+  narratorSaving.value = true
+  try {
+    const body: Record<string, any> = { ...narratorForm.value, language: sharedLanguage.value }
+    if (isQwen3 && mode === 'voice_clone' && narratorFormQwen3RefAudioFile.value) {
+      body.qwen3_tts_ref_audio_base64 = await fileToBase64(narratorFormQwen3RefAudioFile.value)
+      body.qwen3_tts_ref_audio_ext = `.${(narratorFormQwen3RefAudioFile.value.name.split('.').pop() || 'wav')}`
+    }
+    const res = await fetch('/api/tts/narrators', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
     })
     const data = await res.json()
     if (!data.success) throw new Error(data.error || t('processor.submitFailed'))
@@ -2118,6 +2726,7 @@ const createBoxOverride = (): BoxOverride => ({
   englishWordAlign: false,
   wordPhonemeMap: false,
   phonemeMode: 'none',
+  jaDevoicedPhoneme: false,
   dictSource: 'default',
   advanced: createBoxAdvancedOverride(),
 })
@@ -2142,6 +2751,13 @@ const createBox = (): DialogueBox => ({
   ttsRate: 0,
   ttsPitch: 0,
   ttsVolume: 0,
+  ttsQwen3Mode: 'custom_voice',
+  ttsQwen3Size: '1.7B',
+  ttsQwen3Instruct: '',
+  ttsQwen3RefText: '',
+  ttsQwen3XVectorOnly: false,
+  ttsQwen3RefAudioFile: null,
+  ttsQwen3RefAudioPath: '',
   ttsPreviewUrl: '',
   ttsPreviewLoading: false,
   ttsSegmentPreviewLoading: false,
@@ -2635,7 +3251,7 @@ const isSubmitDisabled = computed(() => {
   if (processing.value) return true
   if (boxes.value.some((b) => b.ttsSegmentPreviewLoading)) return true
   if (inputMode.value === 'tts') {
-    return !boxes.value.some((b) => b.text.trim() && b.ttsVoice)
+    return !boxes.value.some((b) => b.text.trim() && boxQwen3TtsModeReady(b))
   }
   if (!boxes.value.some((b) => b.audioFile)) return true
   if (processingMode.value === 'project-only') {
@@ -2644,11 +3260,12 @@ const isSubmitDisabled = computed(() => {
   return false
 })
 
-const buildFormData = (): FormData => {
+const buildFormData = async (): Promise<FormData> => {
   const fd = new FormData()
   fd.append('box_count', String(boxes.value.length))
   fd.append('input_mode', inputMode.value)
-  boxes.value.forEach((box, i) => {
+  for (let i = 0; i < boxes.value.length; i++) {
+    const box = boxes.value[i]
     if (box.text.trim()) fd.append(`text_${i}`, box.text)
     // 对齐辅助移调：每个对话框独立提交，只在该框自身的对齐阶段生效。
     fd.append(`align_pitch_shift_${i}`, String(box.align_pitch_shift_semitones))
@@ -2673,6 +3290,12 @@ const buildFormData = (): FormData => {
         (outputFormat.value === 'sv' || outputFormat.value === 'vsqx')
       fd.append(`override_word_phoneme_map_${i}`, String(boxShowWordPhonemeMap && ov.wordPhonemeMap))
       fd.append(`override_phoneme_mode_${i}`, processingMode.value === 'project-only' ? ov.phonemeMode : 'none')
+      fd.append(`override_ja_devoiced_phoneme_${i}`, String(
+        processingMode.value === 'project-only'
+        && ov.phonemeMode !== 'none'
+        && (outputFormat.value === 'sv' || outputFormat.value === 'vsqx')
+        && ov.jaDevoicedPhoneme
+      ))
       fd.append(`override_dict_source_${i}`, ov.dictSource)
       fd.append(`override_base_pitch_${i}`, String(ov.advanced.base_pitch))
       fd.append(`override_auto_note_pitch_${i}`, String(ov.advanced.auto_note_pitch))
@@ -2689,7 +3312,7 @@ const buildFormData = (): FormData => {
     }
 
     if (inputMode.value === 'tts') {
-      if (box.text.trim() && box.ttsVoice) {
+      if (box.text.trim() && boxQwen3TtsModeReady(box)) {
         fd.append(`tts_text_${i}`, box.text)
         fd.append(`tts_engine_${i}`, box.ttsEngine)
         fd.append(`tts_voice_${i}`, box.ttsVoice)
@@ -2701,6 +3324,30 @@ const buildFormData = (): FormData => {
         // 音频，跳过重新合成直接对齐；否则是空字符串，该框退回"先合成
         // 再对齐"的完整流程。
         fd.append(`tts_preview_id_${i}`, box.ttsSegmentPreviewId)
+
+        // Qwen3-TTS 专用参数：与 MFAProcessor.vue 单文件提交同款逻辑，
+        // 按框独立组装。参考音频走 multipart 文件字段（ref_audio_{i}），
+        // 不转 base64，减少表单体积；其余模式/风格指令/参考文本/
+        // x-vector 开关打包成一个 JSON 字符串字段（后端 json.loads 解析）。
+        if (box.ttsEngine === 'qwen3_tts') {
+          const qwen3OptionsForSubmit: Record<string, any> = {
+            mode: box.ttsQwen3Mode, size: box.ttsQwen3Size, device: 'auto',
+          }
+          if (box.ttsQwen3Mode === 'custom_voice') {
+            if (box.ttsQwen3Instruct.trim()) qwen3OptionsForSubmit.instruct = box.ttsQwen3Instruct.trim()
+          } else if (box.ttsQwen3Mode === 'voice_design') {
+            qwen3OptionsForSubmit.instruct = box.ttsQwen3Instruct.trim()
+          } else if (box.ttsQwen3Mode === 'voice_clone') {
+            qwen3OptionsForSubmit.x_vector_only = box.ttsQwen3XVectorOnly
+            if (!box.ttsQwen3XVectorOnly) qwen3OptionsForSubmit.ref_text = box.ttsQwen3RefText.trim()
+            if (box.ttsQwen3RefAudioFile) {
+              fd.append(`ref_audio_${i}`, box.ttsQwen3RefAudioFile)
+            } else if (box.ttsQwen3RefAudioPath) {
+              qwen3OptionsForSubmit.ref_audio_path = box.ttsQwen3RefAudioPath
+            }
+          }
+          fd.append(`qwen3_tts_options_${i}`, JSON.stringify(qwen3OptionsForSubmit))
+        }
       }
       // TTS 模式下极少见但仍保留兼容：若该框另外手动提供了 LAB/MIDI，
       // 后端会优先沿用它，不用 TTS 自动对齐结果覆盖（见 app.py 注释）。
@@ -2713,7 +3360,7 @@ const buildFormData = (): FormData => {
       if (box.labFile) fd.append(`lab_${i}`, box.labFile)
       else if (box.midiFile) fd.append(`mid_${i}`, box.midiFile)
     }
-  })
+  }
 
   fd.append('language', sharedLanguage.value)
   fd.append('format', outputFormat.value)
@@ -2727,6 +3374,15 @@ const buildFormData = (): FormData => {
   // 静默应用到完整处理流程（该模式下音轨来自对齐结果，音素转换本就
   // 不该生效）。
   fd.append('phoneme_mode', processingMode.value === 'project-only' ? phonemeMode.value : 'none')
+  // 去母音化音素写入：与 phoneme_mode 同样的门槛（仅生成工程 + 非 none），
+  // 额外要求输出格式支持音素字段（sv 的 phonemes 字段 / vsqx 的
+  // <p lock="1">）；ustx 始终使用原始音素/文字，不提交 true。
+  fd.append('ja_devoiced_phoneme', String(
+    processingMode.value === 'project-only'
+    && phonemeMode.value !== 'none'
+    && (outputFormat.value === 'sv' || outputFormat.value === 'vsqx')
+    && jaDevoicedPhoneme.value
+  ))
   fd.append('bpm', String(advanced.value.bpm))
   fd.append('base_pitch', String(advanced.value.base_pitch))
   fd.append('f0_method', advanced.value.f0_method)
@@ -2743,6 +3399,7 @@ const buildFormData = (): FormData => {
   fd.append('aligner_device', advanced.value.aligner_device)
   fd.append('whisperx_model', advanced.value.whisperx_model)
   fd.append('whisperx_batch_size', String(advanced.value.whisperx_batch_size))
+  fd.append('qwen3_batch_size', String(advanced.value.qwen3_batch_size))
   fd.append('nemo_model', advanced.value.nemo_model || '')
   fd.append(
     'english_word_align',
@@ -2832,11 +3489,19 @@ const pollJob = (jobId: string): Promise<void> => {
 }
 
 const startProcessing = async () => {
-  if (!boxes.value.some((b) => b.audioFile)) {
+  // 校验入口是否有可提交的框：TTS跟读模式下没有 audioFile 的概念（音频
+  // 当场合成），用"文本非空 + 该框 TTS 参数已就绪"判断；音频跟读模式
+  // 沿用原有的 audioFile 判断。与上面 isSubmitDisabled 的分支逻辑保持
+  // 一致，避免 TTS跟读模式被误判为"没有可提交内容"而拦截。
+  const hasSubmittableBox = inputMode.value === 'tts'
+    ? boxes.value.some((b) => b.text.trim() && boxQwen3TtsModeReady(b))
+    : boxes.value.some((b) => b.audioFile)
+  if (!hasSubmittableBox) {
     ElMessage.warning(t('dialogue.emptyBoxesWarning'))
     return
   }
   if (
+    inputMode.value === 'audio' &&
     processingMode.value === 'project-only' &&
     !boxes.value.some((b) => b.audioFile && (b.labFile || b.midiFile))
   ) {
@@ -2852,9 +3517,15 @@ const startProcessing = async () => {
   projectResult.value = null
   boxes.value.forEach((b) => {
     b.error = ''
-    if (!b.audioFile) {
+    // 每个框的"是否有可提交内容"同样按 inputMode 分支判断（TTS跟读模式
+    // 看文本，不看 audioFile），否则 TTS跟读模式下所有框会被误标为
+    // idle（未提交），导致进度/状态展示与实际提交情况不符。
+    const boxSubmittable = inputMode.value === 'tts'
+      ? !!(b.text.trim() && boxQwen3TtsModeReady(b))
+      : !!b.audioFile
+    if (!boxSubmittable) {
       b.status = 'idle'
-    } else if (processingMode.value === 'project-only' && !b.labFile && !b.midiFile) {
+    } else if (inputMode.value === 'audio' && processingMode.value === 'project-only' && !b.labFile && !b.midiFile) {
       // 「仅生成工程」模式下，既没有 LAB 也没有 MIDI 的对话框会被后端直接
       // 跳过（不报错中断整体），这里提前标记，避免误显示为"排队中"。
       b.status = 'skipped_empty'
@@ -2869,18 +3540,17 @@ const startProcessing = async () => {
   pollActive = true
 
   try {
-    const res = await fetch('/api/dialogue/process', { method: 'POST', body: buildFormData() })
+    const res = await fetch('/api/dialogue/process', { method: 'POST', body: await buildFormData() })
     const data = await res.json()
     if (!res.ok || !data.success) throw new Error(data.error || t('processor.submitFailed'))
 
     await pollJob(data.job_id)
-    // 后端一旦读取某个框的 tts_preview_id_{i} 就会立刻把那条缓存记录
-    // 消费掉（无论最终对齐是否成功），所以这里统一清空所有框的
-    // ttsSegmentPreviewId——避免用户不改文本、直接再点一次"开始处理"
-    // 时，前端还误以为存在可复用的预览音频。
-    boxes.value.forEach((b) => {
-      if (b.ttsSegmentPreviewId) b.ttsSegmentPreviewId = ''
-    })
+    // 注意：不再在这里清空各框的 ttsSegmentPreviewId ——后端的预览缓存
+    // 现在支持反复复用（每次使用只复制副本去对齐，不消费/删除缓存
+    // 原件），只要某个框没有改动文本/引擎/音色/语速/音调/音量，即使
+    // 不重新生成预览、连续多次点击共享的"开始处理"，也应该一直复用
+    // 同一份预览音频。previewId 真正失效的时机交给下面按框签名比对的
+    // watch，以及用户主动为该框点击"重新生成预览"时处理。
   } catch (e: any) {
     topError.value = e?.message || String(e)
     ElMessage.error(`❌ ${topError.value}`)

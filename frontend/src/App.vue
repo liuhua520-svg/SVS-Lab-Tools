@@ -156,7 +156,14 @@ const onSystemStatusChanged = (status?: { mfa?: { installed?: boolean } }) => {
   flex-direction: column;
   min-height: 100vh;
   background: linear-gradient(135deg, #3b4175 0%, #1e1b4b 100%);
-  overflow-x: hidden;
+  /* 【修复】原先这里的 overflow-x: hidden 会让 el-select/el-dropdown 等基于
+     Popper.js "position: fixed" 定位、并 teleport 到 <body> 的下拉面板，
+     在部分 Chromium 版本下把这个 overflow:hidden 的祖先容器误当作定位基准，
+     导致下拉面板宽度/位置跟随本容器（几乎等于整个视口宽度）而不是触发它的
+     输入框本身，出现"讲述人"等下拉框异常撑宽、贴左边缘的问题。
+     改用 overflow-x: clip 只裁剪本容器自身的横向溢出内容（不影响子孙的
+     fixed 定位计算），效果与 hidden 基本一致但不再触发该定位 bug。 */
+  overflow-x: clip;
 }
 
 .app-header {
