@@ -154,8 +154,46 @@ def _resolve_model_name(language: str, model_override: str = "") -> str:
     return model_name
 
 
+def _is_cuda_oom_or_env_error(exc: Exception) -> bool:
+    """
+    与 alt_aligners.py 里同名函数用途一致（NeMo 这里是独立进程，不能直接
+    import 主进程模块，因此各自维护一份）：判断异常是否属于"显存不足"
+    或"CUDA 环境本身有问题"（Toolkit 缺失/驱动不匹配/无法初始化 CUDA
+    context 等）——这两类问题都应该触发"整体切换到 CPU 重试"，而不是把
+    原始报错直接抛给用户。
+    """
+    msg = str(exc).lower()
+    _KEYWORDS = (
+        "out of memory",
+        "cuda out of memory",
+        "cublas_status_alloc_failed",
+        "cudnn_status_not_initialized",
+        "cuda error",
+        "no cuda gpus are available",
+        "cuda driver",
+        "cuda toolkit",
+        "cuda-capable device",
+        "cuda initialization",
+        "cuda_error",
+        "device-side assert",
+        "nvrtc",
+        "nvml",
+    )
+    return any(kw in msg for kw in _KEYWORDS)
+
+
 def load_model(model_name: str, device_override: str = "auto"):
-    """惰性加载并缓存 NeMo ASR 模型，按 (model_name, device) 缓存。"""
+    """
+    惰性加载并缓存 NeMo ASR 模型，按 (model_name, device) 缓存。
+
+    显存不足 / CUDA 环境异常自动降级：加载阶段如果命中 GPU 相关错误，
+    自动改在 CPU 上重新加载一次并以 "{model_name}@cpu" 为 key 缓存，
+    不会把原始 CUDA 报错直接抛给调用方（align() 路由）。NeMo Forced
+    Aligner 官方接口同样没有可调的 batch_size（每次请求都是单条音频
+    单次前向，参见 _get_log_probs），因此这里与 Qwen3-ForcedAligner
+    一致：能做的唯一有效降级就是整体切到 CPU；qwen3_batch_size 设置
+    值目前只在下面的警告日志里作为参考展示。
+    """
     global _model_device
     cache_key = f"{model_name}@{device_override}"
 
@@ -167,12 +205,33 @@ def load_model(model_name: str, device_override: str = "auto"):
         device = _pick_device(device_override)
 
         import nemo.collections.asr as nemo_asr
+        import torch
 
         # 严格遵守 app_settings 带来的 HF_HUB_OFFLINE 设置，不再强行突破限制
-        model = nemo_asr.models.ASRModel.from_pretrained(
-            model_name=model_name,
-            map_location=device,
-        )
+        try:
+            model = nemo_asr.models.ASRModel.from_pretrained(
+                model_name=model_name,
+                map_location=device,
+            )
+        except Exception as e:
+            if device == "cpu" or not _is_cuda_oom_or_env_error(e):
+                raise
+            logger.warning(
+                f"⚠️  在 {device} 上加载 NeMo 模型失败（{e}），自动切换到 CPU 重新加载..."
+            )
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            device = "cpu"
+            cache_key = f"{model_name}@cpu"
+            if cache_key in _models:
+                return _models[cache_key]
+            model = nemo_asr.models.ASRModel.from_pretrained(
+                model_name=model_name,
+                map_location=device,
+            )
 
         # Hybrid CTC-Transducer 模型默认解码器是 RNNT/TDT，NFA 要求强制
         # 切到 CTC 模式才能拿到逐帧 log-probs。纯 CTC 模型没有这个方法。
@@ -192,10 +251,14 @@ def load_model(model_name: str, device_override: str = "auto"):
         except Exception:
             pass
 
-        _models[cache_key] = model
+        # 缓存值本身连同"实际生效设备"一起存，避免调用方（/align 路由）
+        # 事后再独立调用一次 _pick_device(device_override) 重新推断——
+        # 那样在这里发生了 CUDA→CPU 自动降级时，调用方推断出的设备会与
+        # 模型实际所在设备不一致，导致后续张量搬运到错误的 device 上。
+        _models[cache_key] = (model, device)
         _model_device = device_override
         logger.info(f"✅ NeMo 模型加载成功: {model_name} → {device}")
-        return model
+        return model, device
 
 
 # ── CTC 辅助函数（与 alt_aligners.py 中曾经的进程内实现逻辑一致，现在搬到
@@ -381,7 +444,11 @@ def align():
         "text": "参考文本（必填，NFA 是强制对齐，不做纯 ASR）",
         "language": "en" / "zh" / "ja" / ...,
         "model": "可选，覆盖默认模型名（NGC 名 或 'nvidia/xxx' HF 名）",
-        "device": "auto" | "cpu" | "cuda"
+        "device": "auto" | "cpu" | "cuda",
+        "batch_size": "可选，int，仅作为显存不足自动降级重试时的参考值
+                       记录到日志——NeMo Forced Aligner 的推理本身是单条
+                       音频单次前向（见 _get_log_probs），没有真正意义上
+                       可调的批大小；未提供时不影响任何行为。"
       }
 
     返回:
@@ -404,6 +471,10 @@ def align():
     device_override = data.get("device", "auto")
     if device_override not in ("auto", "cpu", "cuda"):
         device_override = "auto"
+    try:
+        batch_size_hint = max(1, int(data.get("batch_size", 8)))
+    except (TypeError, ValueError):
+        batch_size_hint = 8
 
     if not audio_path or not Path(audio_path).exists():
         return jsonify({"success": False, "error": "音频文件不存在或未提供 audio 参数"}), 400
@@ -416,7 +487,7 @@ def align():
         return jsonify({"success": False, "error": str(e)}), 400
 
     try:
-        model = load_model(model_name, device_override)
+        model, device = load_model(model_name, device_override)
     except Exception as e:
         logger.error(f"模型加载失败: {e}", exc_info=True)
         return jsonify({"success": False, "error": f"模型加载失败: {e}"}), 500
@@ -425,8 +496,30 @@ def align():
         import torch
         import torchaudio
 
-        device = _pick_device(device_override)
-        log_probs, T, audio_sec = _get_log_probs(model, audio_path, device)
+        # 【显存不足自动降级】_get_log_probs() 是单条音频单次前向，没有
+        # batch_size 可调（与 Qwen3-ForcedAligner 同样的限制，详见
+        # alt_aligners.py 里 Qwen3ForcedAligner._align_single_chunk() 的
+        # 说明）。命中 GPU 相关错误时，整体重新在 CPU 上加载一次模型并
+        # 重试，而不是把原始 CUDA 报错直接返回给前端。
+        try:
+            log_probs, T, audio_sec = _get_log_probs(model, audio_path, device)
+        except Exception as e:
+            if device == "cpu" or not _is_cuda_oom_or_env_error(e):
+                raise
+            logger.warning(
+                f"[NeMo-FA] GPU 推理失败（{e}），自动切换到 CPU 重新加载模型并重试"
+                f"（客户端传入的参考批大小 batch_size={batch_size_hint}，"
+                "但 NeMo Forced Aligner 单次前向没有批可降，"
+                "此处直接整体切换运行设备）..."
+            )
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            model, device = load_model(model_name, "cpu")
+            log_probs, T, audio_sec = _get_log_probs(model, audio_path, device)
+
         if T == 0:
             return jsonify({"success": False, "error": "模型未返回任何编码帧，请检查音频文件"}), 500
 

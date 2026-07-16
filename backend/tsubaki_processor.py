@@ -42,6 +42,12 @@ class LabelSegment:
     start_time: int  # 100ns 单位
     end_time: int
     label: str
+    # 可选：VOCALOID 风格辅音起始音素（例如 's'、'sh'、'ky'），仅在
+    # "仅生成工程"模式下、且用户开启了日语音素锁定开关（ja_devoiced_phoneme）
+    # 时由 apply_phoneme_mode(..., with_devoiced_phoneme=True) 填充。
+    # 单独元音 / ん・ン・N / っ・ッ / 静音段没有辅音起始 → 保持 None，
+    # 届时 VSQX <p> 字段留空，交给 VOCALOID 自带 G2P 处理。
+    devoiced_phoneme: Optional[str] = None
 
 
 @dataclass
@@ -456,137 +462,11 @@ class TsubakiProcessor:
     # ----------------------------
     # F0 后处理工具
     # ----------------------------
-    @staticmethod
-    def _median_filter_1d(arr: np.ndarray, kernel_size: int = 3) -> np.ndarray:
-        """纯 numpy 实现的一维中值滤波"""
-        if len(arr) < kernel_size:
-            return arr
-        pad_size = kernel_size // 2
-        padded = np.pad(arr, (pad_size, pad_size), mode='edge')
-        windows = np.lib.stride_tricks.sliding_window_view(padded, kernel_size)
-        return np.median(windows, axis=1)
-
-    @staticmethod
-    def _contiguous_runs(mask: np.ndarray) -> List[Tuple[int, int]]:
-        idx = np.flatnonzero(mask)
-        if idx.size == 0:
-            return []
-        splits = np.where(np.diff(idx) > 1)[0] + 1
-        groups = np.split(idx, splits)
-        return [(int(g[0]), int(g[-1]) + 1) for g in groups if len(g) > 0]
-
-
-    def _soft_reject_spikes(
-        self,
-        f0: np.ndarray,
-        suspicious: np.ndarray,
-        max_jump_semitones: float = 3.0,
-        local_win: int = 5,
-    ) -> np.ndarray:
-        out = np.array(f0, dtype=np.float64, copy=True)
-        voiced = out > 0
-        if voiced.sum() < 3:
-            return out
-
-        midi = np.full(out.shape, np.nan, dtype=np.float64)
-        midi[voiced] = 69.0 + 12.0 * np.log2(np.maximum(out[voiced], 1e-12) / 440.0)
-
-        runs = self._contiguous_runs(voiced)
-        for s, e in runs:
-            seg = midi[s:e]
-            valid = np.isfinite(seg)
-            if valid.sum() < 3:
-                continue
-
-            half = max(1, local_win // 2)
-            for i in range(s, e):
-                if not suspicious[i] or not np.isfinite(midi[i]):
-                    continue
-
-                left = max(s, i - half)
-                right = min(e, i + half + 1)
-                win = midi[left:right]
-                win = win[np.isfinite(win)]
-                if win.size < 3:
-                    continue
-
-                local_med = float(np.nanmedian(win))
-                if abs(midi[i] - local_med) >= max_jump_semitones:
-                    out[i] = 0.0
-
-        return out
-
-
-    def _post_process_f0(self, f0: np.ndarray, config: AudioProcessingConfig) -> np.ndarray:
-            """六步 F0 后处理流水线 (对数域、桥接、平滑)"""
-            f0_clean = f0.copy()
-            
-            # Step 1: 消除高频假阳性 (擦音尖峰)
-            ceiling_threshold = config.f0_ceil * 0.92
-            f0_clean[f0_clean > ceiling_threshold] = 0.0
-            
-            # Step 2: 移除极短的孤立有声段 (单帧爆破音噪声)
-            voiced_mask = (f0_clean > 0).astype(float)
-            voiced_mask = self._median_filter_1d(voiced_mask, 3)
-            f0_clean[voiced_mask == 0] = 0.0
-
-            if not config.f0_smooth:
-                return f0_clean
-
-            # Step 3: 转换到 Log 域 (半音域) 避免 Hz 域计算导致高频异常拉高均值
-            f0_log = np.zeros_like(f0_clean)
-            voiced_idx = f0_clean > 0
-            f0_log[voiced_idx] = np.log2(f0_clean[voiced_idx])
-
-            # Step 4: 去毛刺 (中值滤波)
-            if config.f0_smooth_window >= 3:
-                f0_log[voiced_idx] = self._median_filter_1d(f0_log[voiced_idx], 3)
-
-            # Step 5: 对短促的无声间隙进行线性插值 (桥接)
-            max_gap = config.f0_smooth_window * 2
-            is_zero = f0_log == 0
-            
-            # 寻找连续 0 区间的起始和结束索引
-            diffs = np.diff(np.concatenate(([0], is_zero.view(np.int8), [0])))
-            starts = np.where(diffs == 1)[0]
-            ends = np.where(diffs == -1)[0]
-            
-            for s, e in zip(starts, ends):
-                length = e - s
-                # 仅桥接首尾都接触到有声段的短暂无声区
-                if length <= max_gap and s > 0 and e < len(f0_log):
-                    start_val = f0_log[s - 1]
-                    end_val = f0_log[e]
-                    f0_log[s:e] = np.linspace(start_val, end_val, length + 2)[1:-1]
-
-            # Step 6: 移动平均平滑 (均值滤波) - 仅在有声区域及其桥接带内平滑
-            window = config.f0_smooth_window
-            if window > 0:
-                kernel = np.ones(window) / window
-                smoothed_log = np.zeros_like(f0_log)
-                active_mask = f0_log > 0
-                
-                if np.any(active_mask):
-                    padded = np.pad(f0_log, (window//2, window//2), mode='edge')
-                    smoothed_log_full = np.convolve(padded, kernel, mode="valid")
-                    # 只有现在有效（即非0）的位置才覆盖回去，防止拉拽0点
-                    smoothed_log[active_mask] = smoothed_log_full[active_mask]
-                
-                f0_log = smoothed_log
-
-            # 还原到 Hz 域
-            f0_final = np.zeros_like(f0_clean)
-            final_voiced = f0_log > 0
-            f0_final[final_voiced] = np.exp2(f0_log[final_voiced])
-            
-            return f0_final
-
-    # ----------------------------
-    # F0 提取
-    # ----------------------------
-    # 替换 process_audio_f0
-    # ----------------------------
-    # F0 后处理工具
+    # 说明：本类此前存在两套同名的 _median_filter_1d /
+    # _contiguous_runs / _soft_reject_spikes / _post_process_f0
+    # （一套重构前、一套重构后），Python 类体按定义顺序后者覆盖前者，
+    # 旧的一套从未被实际调用过，属于重构遗留的死代码，此处已删除，
+    # 只保留下面这套（新版，含 log2 域去尖峰）。
     # ----------------------------
     @staticmethod
     def _median_filter_1d(arr: np.ndarray, kernel_size: int) -> np.ndarray:
@@ -635,6 +515,40 @@ class TsubakiProcessor:
         return np.convolve(padded, kernel, mode="valid")
 
     @staticmethod
+    def _hann_smooth_1d(arr: np.ndarray, kernel_size: int) -> np.ndarray:
+        """
+        使用 Hann 窗进行居中平滑，并保持输入长度不变。
+
+        VSQX 的 PIT 控制点在编辑器中按阶梯保持，而不是自动绘制成连续曲线。
+        使用 Hann 窗可减少箱式移动平均造成的
+        高频旁瓣，同时不会像大窗口块平均那样把真实音高走势压成宽台阶。
+        """
+        arr = np.asarray(arr, dtype=np.float64)
+        if arr.size == 0:
+            return arr.copy()
+
+        k = int(kernel_size)
+        if k <= 1 or arr.size < 3:
+            return arr.copy()
+        if k % 2 == 0:
+            k += 1
+        if k > arr.size:
+            k = int(arr.size)
+            if k % 2 == 0:
+                k -= 1
+        if k < 3:
+            return arr.copy()
+
+        weights = np.hanning(k)
+        weight_sum = float(weights.sum())
+        if weight_sum <= 0:
+            return arr.copy()
+
+        pad = k // 2
+        padded = np.pad(arr, (pad, pad), mode="edge")
+        return np.convolve(padded, weights / weight_sum, mode="valid")
+
+    @staticmethod
     def _contiguous_runs(mask: np.ndarray) -> List[Tuple[int, int]]:
         idx = np.flatnonzero(mask)
         if idx.size == 0:
@@ -642,6 +556,72 @@ class TsubakiProcessor:
         splits = np.where(np.diff(idx) > 1)[0] + 1
         groups = np.split(idx, splits)
         return [(int(g[0]), int(g[-1]) + 1) for g in groups if len(g) > 0]
+
+    @staticmethod
+    def _correct_octave_errors(
+        f0: np.ndarray,
+        voiced: np.ndarray,
+        local_win: int = 31,
+        tol: float = 0.25,
+    ) -> np.ndarray:
+        """
+        检测并纠正倍频/半频误跟踪（octave jump），这是 DIO/Harvest 一类
+        DSP 音高提取器最典型的失败模式之一：某一段帧被错误地跟踪到
+        真实音高的 2 倍或 1/2（偶尔 3 倍/1/3），在 log2 domain 里表现为
+        与邻域中位数正好相差 ±1（或 ±log2(3)）个八度。
+
+        【为什么普通中值滤波不够】_median_filter_1d 去尖峰依赖"异常值
+        在窗口内占少数"这个假设：核大小为 N 时只能纠正连续不超过
+        (N-1)//2 帧的异常。但真实的倍频误判经常持续 20-50ms（4-10 帧
+        @ 5ms/帧），一旦超过窗口能扛住的长度，中值本身就落在错误值
+        上，之后的 moving average 只会在"错误值"和"正确值"之间画一条
+        平滑但依然错误的过渡曲线——看起来顺滑，实际音高是错的。
+
+        【做法】octave 误判有一个中值滤波没有利用到的强特征：误差幅度
+        几乎精确等于整数个八度，而不是任意随机幅度。这里用一个明显
+        更宽的邻域窗口（默认 31 帧 ≈ 150ms，足以跨越常见的误判持续
+        时长，让邻域中位数仍然由"多数正确帧"主导）计算 log2 音高的
+        局部中位数，只要某一帧与该中位数的差值落在 (0.75, 1.25) 个
+        八度或 (log2(3)-tol, log2(3)+tol) 个八度范围内，就按最近的整数
+        八度（或 3 倍）纠正，而不是依赖窗口"扛过去"。
+
+        真实的大幅音高变化（比如滑音/甩音跨越 5-6 个半音≈0.4-0.5
+        个八度）远小于 0.75 个八度的检测下限，不会被误纠正。
+        """
+        f0 = np.asarray(f0, dtype=np.float64)
+        out = f0.copy()
+        if voiced.sum() < 5:
+            return out
+
+        f0_log = np.full(f0.shape, np.nan, dtype=np.float64)
+        f0_log[voiced] = np.log2(np.maximum(f0[voiced], 1e-12))
+
+        half = max(3, int(local_win) // 2)
+        # 允许纠正的倍数：±1 个八度（2x/0.5x）与 ±log2(3) 个八度（3x/(1/3)x）
+        candidate_octaves = [1.0, np.log2(3.0)]
+
+        for s, e in TsubakiProcessor._contiguous_runs(voiced):
+            n = e - s
+            if n < 5:
+                continue
+            for i in range(s, e):
+                lo, hi = max(s, i - half), min(e, i + half + 1)
+                # 邻域中位数排除自身，避免异常帧本身拉偏中位数（尤其是
+                # 误判段落靠近邻域窗口一端时）
+                local_slice = np.concatenate([
+                    f0_log[lo:i], f0_log[i + 1:hi]
+                ])
+                local_slice = local_slice[np.isfinite(local_slice)]
+                if local_slice.size < 5:
+                    continue
+                local_med = float(np.median(local_slice))
+                delta = f0_log[i] - local_med
+                for oct_val in candidate_octaves:
+                    if abs(abs(delta) - oct_val) <= tol:
+                        sign = 1.0 if delta > 0 else -1.0
+                        out[i] = f0[i] / (2.0 ** (sign * oct_val))
+                        break
+        return out
 
     def _soft_reject_spikes(
         self,
@@ -822,14 +802,70 @@ class TsubakiProcessor:
                         unvoiced_idx, voiced_idx, f0[voiced_idx]
                     )
 
-            # 可选平滑（移动平均）
+            # 可选平滑：① 倍频/半频误判纠正 → ② log2（半音）域中值滤波
+            # 去尖峰 → ③ 移动平均。
+            #
+            # 【修复】原实现直接在 Hz 域对原始值做移动平均，没有去尖峰
+            # 步骤——均值滤波对孤立尖峰没有抑制能力，尖峰只会被摊薄扩散
+            # 到相邻几帧而不是被消除，表现为"开了平滑窗口但仍有锯齿"。
+            # 同时 Hz 域平均本身在感知上也不准确（音高感知是对数关系），
+            # 这里改为与 VSQX PIT 曲线平滑（_build_vsqx_part_xml）一致的
+            # "log2 域中值去尖峰 + 移动平均"，避免两处平滑策略不一致导致
+            # 叠加后行为难以预测（例如两个平滑窗口都调大时被压缩两次）。
+            #
+            # 【进一步修复：倍频/半频误判专项纠正】中值滤波去尖峰依赖
+            # "异常值在窗口内占少数"这个假设：核大小为 N 时只能纠正连续
+            # 不超过 (N-1)//2 帧的异常。但倍频/半频误判（DIO/Harvest 这类
+            # DSP 音高提取器最典型的失败模式之一）经常连续持续 20-50ms
+            # （4-10 帧 @ 5ms/帧），一旦超过中值滤波窗口能扛住的长度，
+            # 中值本身就落在错误值上，之后的 moving average 只会在错误值
+            # 和正确值之间画一条平滑但依然错误的过渡曲线——看起来顺滑，
+            # 实际音高是错的（实测：合成信号里连续 8 帧的半频误判，仅靠
+            # 中值滤波+移动平均完全未被修正）。
+            #
+            # 倍频误判有一个中值滤波没有利用到的强特征：误差幅度几乎
+            # 精确等于整数个八度（2x/0.5x，偶尔 3x/(1/3)x），而不是任意
+            # 随机幅度；真实的大幅音高变化（滑音/甩音跨越 5-6 个半音，
+            # 约 0.4-0.5 个八度）远小于八度检测的下限，不会被误纠正。
+            # 因此在中值滤波之前先用更宽的邻域窗口（150ms 量级，足以
+            # 跨越常见误判持续时长，让邻域中位数仍由多数正确帧主导）
+            # 专门检测并按整数八度直接纠正，不再依赖"中值滤波窗口能否
+            # 扛过去"这种和误判段落长度赛跑的运气。
             if config.f0_smooth and len(f0) > 2:
                 win = int(config.f0_smooth_window)
                 if win % 2 == 0:
                     win += 1
                 if win > 1:
-                    padded = np.pad(f0, win // 2, mode="edge")
-                    f0 = np.convolve(padded, np.ones(win) / win, mode="valid")
+                    voiced = f0 > 0
+                    if np.any(voiced):
+                        # ① 倍频/半频误判专项纠正（先于去尖峰/平滑）
+                        f0 = self._correct_octave_errors(f0, voiced)
+
+                        f0_log = np.zeros_like(f0)
+                        f0_log[voiced] = np.log2(f0[voiced])
+
+                        # ② 去尖峰：中值滤波（仅在有声帧上，避免污染静音）。
+                        # 窗口跟随平滑窗口自适应，能剔除连续多帧的异常值，
+                        # 而不只是孤立单帧。此前上限固定在 9 点（能扛住
+                        # 连续 4 帧异常），现在放宽到 11 点（能扛住连续
+                        # 5 帧异常）——八度级的大误判已经交给上面的专项
+                        # 纠正处理，这里的中值滤波窗口不必再为"扛住大
+                        # 误判"而束手束脚，可以放宽一点去覆盖更多中等
+                        # 幅度、中等持续时长的跳变，让"关闭/开启 f0_smooth"
+                        # 在这类场景下的差异更容易被感知到。
+                        despike_win = min(11, max(3, win // 2))
+                        if despike_win % 2 == 0:
+                            despike_win += 1
+                        if voiced.sum() >= despike_win:
+                            f0_log[voiced] = self._median_filter_1d(f0_log[voiced], despike_win)
+
+                        # ③ 移动平均（log2 域）
+                        padded = np.pad(f0_log, win // 2, mode="edge")
+                        f0_log = np.convolve(padded, np.ones(win) / win, mode="valid")
+
+                        f0_new = np.zeros_like(f0)
+                        f0_new[voiced] = np.exp2(f0_log[voiced])
+                        f0 = f0_new
 
             return {"success": True, "f0": f0, "t": t, "sr": sr, "method": method}
 
@@ -928,6 +964,25 @@ class TsubakiProcessor:
             # 原本就有的 "-" 标签由于不属于 _is_true_silence，会顺利走到这里，被正确保留为 "-" 音符
             note = self._default_svp_note(seg.label, tone, onset, dur)
 
+            # ── 日语去母音化音素写入（ja_devoiced_phoneme）──────────────────
+            # seg.devoiced_phoneme 由 process_full_pipeline() 在 phoneme_mode
+            # 为 merge/hiragana/katakana 且 ja_devoiced_phoneme=True 时，通过
+            # apply_phoneme_mode(..., with_devoiced_phoneme=True) 预先算出，
+            # 仅当该合并音节的元音在原始 LAB 中被标记为去母音化（大写 I/U）
+            # 时才有值，为该音节对应的 VOCALOID4 官方去母音化音素符号
+            # （据 VOCALOID4 Editor manual 附录音素表；见
+            # phoneme_converter.ja_devoiced_onset_to_vocaloid4()）。多数行
+            # 保持辅音本身（す→'s'、つ→'ts'），但き/ひ/ぴ有专属去母音化
+            # 记号（き→"k'"、ひ→"C"、ぴ→"p'"），ふ固定为 "p\\"。有浊音的
+            # 音节（如 ご/go）以及单独元音 / ん・ン・N / っ・ッ / 静音段的
+            # devoiced_phoneme 恒为 None，此时 phonemes 字段保持默认（空），
+            # 交给 SynthesizerV 自带发音引擎处理。
+            # 与 VSQX 的 <p lock="1"> 不同：SVP 没有锁定字段，这里只写入
+            # 音素本身；与英语 word_phoneme_map / 自定义词典路径完全解耦，
+            # 各走各的，互不影响（下面的 elif 才是英语单词映射逻辑）。
+            if getattr(seg, "devoiced_phoneme", None):
+                note["phonemes"] = seg.devoiced_phoneme
+
             # ── 音素写入 phonemes 字段：词典命中 与 word_phoneme_map 开关解耦 ──
             # 条件：label 是 ASCII 形态（非静音/非 CJK 占位符）。
             #
@@ -951,7 +1006,8 @@ class TsubakiProcessor:
             # 守卫只应用于 G2P 兜底（word_to_arpabet），不应用于词典查询。
             _dict_selected = bool(dict_source) and dict_source != "default"
             if (
-                (word_phoneme_map or _dict_selected)
+                not getattr(seg, "devoiced_phoneme", None)
+                and (word_phoneme_map or _dict_selected)
                 and self._is_ascii_word_label(seg.label)
             ):
                 try:
@@ -1934,6 +1990,10 @@ class TsubakiProcessor:
         original_text: str = "",                    # 原始歌词文本（pypinyin 转换前的汉字/韩文原文）
                                                     # 用于预提取真实英语单词集合，防止拼音被误判
         dict_source: str = "default",               # 单词→音素词典来源："default"/"synthesizerv"/"vocaloid"
+        ja_devoiced_phoneme: bool = False,              # 日语辅音起始音素锁定：仅生成工程模式下，
+                                                    # phoneme_mode 为 merge/hiragana/katakana 时，
+                                                    # 将合并音节的辅音起始（如 s / sh / ky）写入
+                                                    # VSQX <p lock="1"> 并锁定；单独元音/ん/っ 不锁定。
     ) -> Dict:
         """完整工程文件生成入口。
 
@@ -2027,12 +2087,33 @@ class TsubakiProcessor:
                     try:
                         from phoneme_converter import apply_phoneme_mode
                         seg_tuples = [(s.start_time, s.end_time, s.label) for s in segments]
-                        converted = apply_phoneme_mode(seg_tuples, phoneme_mode)
-                        segments = [
-                            LabelSegment(start_time=t[0], end_time=t[1], label=t[2])
-                            for t in converted
-                        ]
-                        logger.info(f"音素转换完成 (mode={phoneme_mode}): {len(segments)} 个音节段落")
+                        # ja_devoiced_phoneme 只在"仅生成工程"场景下由前端传入，
+                        # 要求 apply_phoneme_mode 一并返回每个合并音节的辅音
+                        # 起始音素（用于下游 VSQX <p lock="1"> / SVP phonemes 写入）。
+                        # devoiced_target 必须按 output_format 区分：sv/svp 用
+                        # SynthesizerV 罗马字体系（辅音原样保留），其余（vsqx）
+                        # 用 VOCALOID4 官方去母音化专属符号（k'/C/p'/S/tS/p\），
+                        # 否则 SVP 会收到它不认识的 VOCALOID4 专属符号。
+                        _devoiced_target = "synthesizerv" if output_format in ("sv", "svp") else "vocaloid4"
+                        converted = apply_phoneme_mode(
+                            seg_tuples, phoneme_mode,
+                            with_devoiced_phoneme=ja_devoiced_phoneme,
+                            devoiced_target=_devoiced_target,
+                        )
+                        if ja_devoiced_phoneme:
+                            segments = [
+                                LabelSegment(
+                                    start_time=t[0], end_time=t[1], label=t[2],
+                                    devoiced_phoneme=t[3],
+                                )
+                                for t in converted
+                            ]
+                        else:
+                            segments = [
+                                LabelSegment(start_time=t[0], end_time=t[1], label=t[2])
+                                for t in converted
+                            ]
+                        logger.info(f"音素转换完成 (mode={phoneme_mode}, ja_devoiced_phoneme={ja_devoiced_phoneme}): {len(segments)} 个音节段落")
                     except Exception as _pm_err:
                         logger.warning(f"音素转换失败 (mode={phoneme_mode}): {_pm_err}，回退到原始音素")
             else:
@@ -2152,6 +2233,8 @@ class TsubakiProcessor:
         vsqx_singer_id: str = "BNGE7CP7EMTRSNC3",
         vsqx_singer_bs: int = 4,
         phoneme_mode: str = "none",
+        ja_devoiced_phoneme: bool = False,   # 日语辅音起始音素锁定（仅 vsqx 生效，
+                                           # 语义与 process_full_pipeline 一致）
     ) -> Dict:
         """
         对话文本框批量处理功能的工程文件生成入口：不再为每个对话框生成
@@ -2257,6 +2340,7 @@ class TsubakiProcessor:
                 tr_phoneme_mode = tr.get("phoneme_mode", phoneme_mode)
                 if tr_phoneme_mode not in ("none", "merge", "hiragana", "katakana"):
                     tr_phoneme_mode = "none"
+                tr_ja_devoiced_phoneme = bool(tr.get("ja_devoiced_phoneme", ja_devoiced_phoneme))
 
                 if not wav_path or not Path(str(wav_path)).exists():
                     logger.warning("[多音轨] 跳过音轨 %r：WAV 文件不存在 (%s)", tr_title, wav_path)
@@ -2305,11 +2389,34 @@ class TsubakiProcessor:
                         try:
                             from phoneme_converter import apply_phoneme_mode
                             seg_tuples = [(s.start_time, s.end_time, s.label) for s in segments]
-                            converted = apply_phoneme_mode(seg_tuples, tr_phoneme_mode)
-                            segments = [
-                                LabelSegment(start_time=t0, end_time=t1, label=lbl)
-                                for (t0, t1, lbl) in converted
-                            ]
+                            # 去母音化音素写入对 sv（SVP phonemes 字段）和 vsqx
+                            # （<p lock="1">）都有意义；USTX 已在上面被整体排除
+                            # （fmt != "ustx"），故这里只需排除其余尚不支持该
+                            # 写入的格式（如 midi，没有音素字段）。
+                            _want_devoiced = tr_ja_devoiced_phoneme and fmt in ("sv", "vsqx")
+                            # devoiced_target 必须按 fmt 区分：sv/svp 用 SynthesizerV
+                            # 罗马字体系（辅音原样保留），vsqx 用 VOCALOID4 官方
+                            # 去母音化专属符号（k'/C/p'/S/tS/p\）；否则 SVP 会收到
+                            # 它不认识的 VOCALOID4 专属符号导致发音异常。
+                            _devoiced_target = "synthesizerv" if fmt in ("sv", "svp") else "vocaloid4"
+                            converted = apply_phoneme_mode(
+                                seg_tuples, tr_phoneme_mode,
+                                with_devoiced_phoneme=_want_devoiced,
+                                devoiced_target=_devoiced_target,
+                            )
+                            if _want_devoiced:
+                                segments = [
+                                    LabelSegment(
+                                        start_time=t0, end_time=t1, label=lbl,
+                                        devoiced_phoneme=devoiced,
+                                    )
+                                    for (t0, t1, lbl, devoiced) in converted
+                                ]
+                            else:
+                                segments = [
+                                    LabelSegment(start_time=t0, end_time=t1, label=lbl)
+                                    for (t0, t1, lbl) in converted
+                                ]
                         except Exception as _pm_err:
                             logger.warning(
                                 "[多音轨] 音轨 %r 音素转换失败 (mode=%s): %s，回退到原始音素",
@@ -2546,7 +2653,7 @@ class TsubakiProcessor:
         因此只需通过 t_start 整体挪动 vsPart，不需要改动 segments 本身。
         """
         RESOLUTION  = 480        # ticks per quarter note
-        PBS         = 12         # pitch bend sensitivity (semitones)
+        PBS         = 13         # pitch bend sensitivity (semitones)
         if t_start is None:
             t_start = self._VSQX_PART_OFFSET
         VELOCITY    = 64
@@ -2634,7 +2741,28 @@ class TsubakiProcessor:
             # （word_to_arpabet），不应用于词典查询，否则词典里明明存在的
             # 音素会因 label 未通过"真实英语单词"判定而被跳过、不被写入。
             p_tag = '<p></p>'
-            if (
+
+            # ── 日语去母音化音素写入（ja_devoiced_phoneme）：与英语
+            # word_phoneme_map / 自定义词典路径完全解耦，各走各的，互不影响。
+            # seg.devoiced_phoneme 由 process_full_pipeline() 在 phoneme_mode
+            # 为 merge/hiragana/katakana 且 ja_devoiced_phoneme=True 时，通过
+            # apply_phoneme_mode(..., with_devoiced_phoneme=True) 预先算出，
+            # 仅当该合并音节的元音在原始 LAB 中被标记为去母音化（大写 I/U）
+            # 时才有值，为该音节对应的 VOCALOID4 官方去母音化音素符号
+            # （据 VOCALOID4 Editor manual 附录音素表，通过
+            # phoneme_converter.ja_devoiced_onset_to_vocaloid4() 解析）——
+            # 多数行去母音化后辅音符号不变（す→su 去母音化后仍是 's'，
+            # つ→tsu 仍是 'ts'），但き/ひ/ぴ有专属去母音化记号（き→ki 去
+            # 母音化后是 "k'" 而非 'k'；ひ→hi 是 "C"；ぴ→pi 是 "p'"），
+            # ふ固定使用 "p\\"（与是否去母音化无关）。有浊音的音节
+            # （如 ご/go）以及单独元音 / ん・ン・N / っ・ッ / 静音段的
+            # devoiced_phoneme 恒为 None，此时保持 <p></p>，交给 VOCALOID
+            # 自带 G2P 处理。
+            # VSQX 专属：写入后额外加 lock="1" 锁定，防止用户误触发自动重新
+            # 发音；SVP 没有锁定概念，只写入音素本身（见 _build_svp_track_payload）。
+            if getattr(seg, "devoiced_phoneme", None):
+                p_tag = f'<p lock="1"><![CDATA[{seg.devoiced_phoneme}]]></p>'
+            elif (
                 (word_phoneme_map or _dict_selected)
                 and self._is_ascii_word_label(label)
             ):
@@ -2702,13 +2830,12 @@ class TsubakiProcessor:
             # voiced_refs 已按时间顺序
             vr_arr = np.array(voiced_refs, dtype=np.int64) if voiced_refs else None
 
-            # 先收集每一个有声帧的 tick 与"相对当前音符的半音偏移量"，
-            # 同时记录其在原始 f0 数组中的下标（raw_idx），用于之后判断
-            # 哪些帧在时间上是真正连续的有声段（下标连续 = 时间连续），
-            # 平滑只在同一段有声区间内进行，不会跨越静音间隙相互污染。
-            raw_ticks:  List[int]   = []
-            raw_offset: List[float] = []
-            raw_idx:    List[int]   = []
+            # 先收集每个有声帧的绝对 MIDI 音高。必须先平滑绝对音高、再减去
+            # 当前音符 nominal tone；如果直接平滑 PIT offset，音符边界处因
+            # nominal tone 改变而产生的合法阶跃会被误当成噪声，反而制造回弹。
+            raw_ticks:   List[int]   = []
+            raw_pitch:   List[float] = []
+            raw_idx:     List[int]   = []
 
             for i, (ti, f0i) in enumerate(zip(t, f0)):
                 if not np.isfinite(f0i) or f0i <= 0:
@@ -2716,53 +2843,141 @@ class TsubakiProcessor:
                 tick    = sec_to_ticks(float(ti))
                 midi_f0 = 69.0 + 12.0 * np.log2(float(f0i) / 440.0)
 
-                # 二分查找当前 tick 所属音符的 tone
-                nominal = base_tone
+                # 二分查找当前 tick 所属音符的 tone。
+                #
+                # 【修复】此前找不到所属音符时会 fallback 到 base_tone（工程
+                # 默认基准音，如 C4），但这是错的——这些 tick 通常落在两个
+                # 音符之间的静音间隙里（换气/停顿，比如逐字唱的短音符之间
+                # 常见几百 tick 的空隙）。process_audio_f0 里对无声段做过
+                # 线性插值桥接，这段间隙内 f0 数组并不是真正的 0，而是插值
+                # 出来的过渡值，本身就不代表任何真实音高；用 base_tone 当
+                # nominal 算出的 offset 因此毫无意义，还经常是几千 cent 的
+                # 离谱跳变（真实音高 − 固定基准音，而不是 − 附近音符音高）。
+                # 更严重的是，这类"assign 到 base_tone"的帧会被当成一次
+                # nominal 变化，在音符间隙的开头和结尾各触发一次"伪音符边界"，
+                # 把平滑/降采样切成大量细碎小段——这正是"改用按音符边界分段"
+                # 之后锯齿反而更明显、且是规律阶梯状的原因。
+                # 现在改为：找不到所属音符（不在任何 [t_on, t_off] 区间内）
+                # 就直接跳过这一帧，不写入 PIT 曲线——没有音符可弯，也就不
+                # 需要在这里给一个虚假的点。
+                nominal = None
                 if vr_arr is not None and len(vr_arr):
                     idx = int(np.searchsorted(vr_arr[:, 0], tick, side="right")) - 1
                     if 0 <= idx < len(vr_arr) and tick <= vr_arr[idx, 1]:
                         nominal = int(vr_arr[idx, 2])
+                elif t is not None and len(t) > 0:
+                    # 没有音符信息（voiced_refs 为空）时退回旧行为，仍用
+                    # base_tone，保证没有音符结构时功能不受影响。
+                    nominal = base_tone
+
+                if nominal is None:
+                    continue
 
                 raw_ticks.append(tick)
-                raw_offset.append(midi_f0 - nominal)
+                raw_pitch.append(midi_f0)
                 raw_idx.append(i)
 
-            if raw_offset:
-                offsets = np.asarray(raw_offset, dtype=np.float64)
+            if raw_pitch:
+                pitches = np.asarray(raw_pitch, dtype=np.float64)
                 idx_arr = np.asarray(raw_idx, dtype=np.int64)
 
-                # ── PIT 曲线平滑（先中值去毛刺，再移动平均）──────────────────
-                # 只在原始采样下标连续（即真正的连续有声段）的区间内做平滑，
-                # 避免把跨越换气/停顿的两段音高错误地平均到一起。
-                #
-                # 【修复】纯移动平均（均值滤波）对孤立尖峰没有抑制能力：单帧
-                # F0 误判（倍频/半频跳变、浊音起始瞬间的跟踪误差）会被均值
-                # 滤波原样摊薄扩散到相邻几个点上，而不是被消除——表现为
-                # "开了平滑窗口，但在这些尖峰位置完全看不出平滑效果"，只有
-                # 连续渐变的音高噪声才会被移动平均有效削弱。这里在均值滤波
-                # 之前先做一次 3 点中值滤波剔除孤立尖峰（做法与
-                # process_audio_f0 里 f0_smooth 对 f0_log 的去毛刺步骤一致），
-                # 两者结合才能同时应对"渐变噪声"和"孤立尖峰"两种情况。
+                # 只在 F0 采样下标真正不连续时断开。音符边界不再是平滑
+                # 断点，因为这里处理的是绝对音高；连续发声跨音符时应保持
+                # 连续，最后换算 PIT 时再根据每个 tick 的 nominal tone
+                # 产生必要的控制器跳变。
+                if len(idx_arr) >= 2:
+                    breaks_all = np.where(np.diff(idx_arr) > 1)[0] + 1
+                else:
+                    breaks_all = np.array([], dtype=np.int64)
+
+                # ── PIT 曲线 Hann 平滑 ──────────────────────────────────────
+                # 使用 Hann 窗而不是箱式移动平均。输入已经是
+                # MIDI/半音域，因此与人的音高感知及 PIT 的线性单位一致。
                 window = int(getattr(config, "vsqx_pitch_smooth_window", 0) or 0)
-                if window > 1 and len(offsets) >= 2:
-                    smoothed = offsets.copy()
-                    breaks = np.where(np.diff(idx_arr) > 1)[0] + 1
-                    runs = np.split(np.arange(len(idx_arr)), breaks)
-                    kernel = np.ones(window) / window
-                    pad = window // 2
+                if window > 1 and len(pitches) >= 3:
+                    smoothed = pitches.copy()
+                    runs = np.split(np.arange(len(idx_arr)), breaks_all)
                     for run in runs:
-                        if len(run) < 2:
+                        if len(run) < 3:
                             continue
-                        seg = offsets[run]
-                        if len(seg) >= 3:
-                            seg = self._median_filter_1d(seg, 3)
-                        padded = np.pad(seg, (pad, pad), mode="edge")
-                        seg_smoothed = np.convolve(padded, kernel, mode="valid")[: len(seg)]
-                        smoothed[run] = seg_smoothed
-                    offsets = smoothed
+                        smoothed[run] = self._hann_smooth_1d(pitches[run], window)
+                    pitches = smoothed
+
+                # ── 以约 2ms 间隔稠密写入 PIT ──────────────────────────────
+                # VOCALOID4 对相邻 PIT <cc> 事件采用保持值显示；旧实现错误地
+                # 假定编辑器会在线性插值后按 40ms 分桶，结果正是截图中的宽
+                # 台阶/锯齿。参考以 2ms 生成音高点，这里同样在平滑后
+                # 对绝对音高做线性重采样，再写成稠密控制点。
+                point_step_ticks = max(1, sec_to_ticks(0.002))
+                ticks_arr = np.asarray(raw_ticks, dtype=np.int64)
+                runs = np.split(np.arange(len(idx_arr)), breaks_all)
+                dense_ticks: List[int] = []
+                dense_pitches: List[float] = []
+
+                for run in runs:
+                    if len(run) == 0:
+                        continue
+
+                    seg_t = ticks_arr[run]
+                    seg_p = pitches[run]
+
+                    # 秒→tick 后可能有重复 tick；先按 tick 求平均，保证 np.interp
+                    # 的横坐标严格递增。
+                    unique_t, inverse = np.unique(seg_t, return_inverse=True)
+                    if len(unique_t) != len(seg_t):
+                        sums = np.zeros(len(unique_t), dtype=np.float64)
+                        counts = np.zeros(len(unique_t), dtype=np.int64)
+                        np.add.at(sums, inverse, seg_p)
+                        np.add.at(counts, inverse, 1)
+                        unique_p = sums / np.maximum(counts, 1)
+                    else:
+                        unique_p = seg_p
+
+                    if len(unique_t) == 1:
+                        grid = unique_t.copy()
+                    else:
+                        grid = np.arange(
+                            int(unique_t[0]),
+                            int(unique_t[-1]) + 1,
+                            point_step_ticks,
+                            dtype=np.int64,
+                        )
+                        if grid[-1] != unique_t[-1]:
+                            grid = np.append(grid, unique_t[-1])
+
+                        # 必须在每个音符起点精确写一个新 PIT 值，否则上一音符
+                        # 的 PIT 会在新音符开始后继续保持若干毫秒，造成起音跳变。
+                        if vr_arr is not None and len(vr_arr):
+                            note_starts = vr_arr[:, 0]
+                            note_starts = note_starts[
+                                (note_starts >= unique_t[0]) &
+                                (note_starts <= unique_t[-1])
+                            ]
+                            if len(note_starts):
+                                grid = np.unique(np.concatenate((grid, note_starts)))
+
+                    grid_p = np.interp(grid, unique_t, unique_p)
+                    dense_ticks.extend(int(x) for x in grid)
+                    dense_pitches.extend(float(x) for x in grid_p)
 
                 prev_val: Optional[int] = None
-                for tick, offset in zip(raw_ticks, offsets):
+                for tick, midi_pitch in zip(dense_ticks, dense_pitches):
+                    nominal = None
+                    if vr_arr is not None and len(vr_arr):
+                        note_idx = int(np.searchsorted(vr_arr[:, 0], tick, side="right")) - 1
+                        if (
+                            0 <= note_idx < len(vr_arr)
+                            and tick < int(vr_arr[note_idx, 1])
+                        ):
+                            nominal = int(vr_arr[note_idx, 2])
+                    else:
+                        nominal = base_tone
+
+                    # 重采样网格可能穿过两个音符之间的空隙；空隙内不写 PIT。
+                    if nominal is None:
+                        continue
+
+                    offset = midi_pitch - nominal
                     # 偏移量（半音）→ P 控制器值（范围 ±8190）
                     p_val = int(round(float(offset) / PBS * 8190))
                     p_val = max(-8190, min(8190, p_val))
@@ -2928,8 +3143,11 @@ class TsubakiProcessor:
         • note 和 cc（音高曲线）的 <t> 均为相对于 vsPart 起点的偏移
         • 音高曲线（P 控制器）范围 ±8190，对应 ±PBS 个半音
           PBS 默认值 = 12（来自实际 vsqx 文件）
-        • 歌词 <y>：使用 segment label；<p> 音素字段留空，
+        • 歌词 <y>：使用 segment label；<p> 音素字段默认留空，
           由 VOCALOID 自带 G2P 处理（用户可在 VOCALOID Editor 中手动编辑）。
+          若 segment.devoiced_phoneme 有值（日语音素锁定开关 ja_devoiced_phoneme
+          开启、且该音节含辅音起始），则写入 <p lock="1">…</p> 并锁定为
+          该辅音起始（如 's'/'sh'/'ky'），跳过 VOCALOID 自带 G2P。
 
         实际的音符 / 音高曲线 / <vsTrack> XML 构建逻辑已提取到
         _build_vsqx_track_block()，与对话文本框批量处理功能的多音轨生成器

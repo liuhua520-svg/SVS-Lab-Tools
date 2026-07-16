@@ -6,17 +6,19 @@
 设计说明
 ────────
 【HF_HUB_OFFLINE / HF_ENDPOINT】
-这两个环境变量分别由三个各自独立的进程消费：
+这两个环境变量分别由四个各自独立的进程消费：
   - app.py（经由其在模块顶层 import 的 alt_aligners.py）
-  - qwen3_server.py（独立 venv 子服务，端口 5001）
-  - nemo_server.py（独立 venv 子服务，端口 5002）
+  - qwen3_server.py（独立 venv 子服务，端口 5001，Qwen3-ASR / Qwen3-FA）
+  - nemo_server.py（独立 venv 子服务，端口 5002，NeMo-FA）
+  - qwen3tts_server.py（独立 venv 子服务，端口 5003，Qwen3-TTS 跟读语音合成）
 
-三者都会在各自最早的时机（import huggingface_hub / transformers /
-qwen_asr / nemo 之前）调用本模块的 apply_env_from_settings()，从同一份
-JSON 配置文件读取设置并写入 os.environ。这样设置页面只需要写一次文件，
-三个进程各自重启后即可生效——环境变量只在"进程启动时"读取一次，
-所以修改设置后必须重启对应进程（尤其是 Qwen3 / NeMo 两个微服务）才能
-让新配置真正生效，这一点在设置页面的提示文案里需要向用户说清楚。
+四者都会在各自最早的时机（import huggingface_hub / transformers /
+qwen_asr / nemo / qwen_tts 之前）调用本模块的 apply_env_from_settings()，
+从同一份 JSON 配置文件读取设置并写入 os.environ。这样设置页面只需要写
+一次文件，四个进程各自重启后即可生效——环境变量只在"进程启动时"读取
+一次，所以修改设置后必须重启对应进程（尤其是 Qwen3 / NeMo / Qwen3-TTS
+三个微服务）才能让新配置真正生效，这一点在设置页面的提示文案里需要向
+用户说清楚。
 
 【对齐调优参数】
 与上面两个环境变量不同，以下这批参数只被 alt_aligners.py 消费，而
@@ -65,6 +67,20 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     # (launcher.py) 里实现：它在拉起子进程之前读取这两个字段。
     "skip_start_qwen3_server": False,
     "skip_start_nemo_server": False,
+    "skip_start_qwen3tts_server": False,
+
+    # ── Qwen3-TTS（TTS跟读独立引擎，qwen3tts_server.py，端口 5003）────────
+    # 模型规模：1.7B 效果最好但显存需求更高；0.6B 更省显存/更快。
+    # VoiceDesign（仅文本描述）目前只有 1.7B 权重，选择 0.6B 时该模式会
+    # 自动回退到 1.7B（见 qwen3tts_server.py MODEL_IDS 说明）。
+    "qwen3_tts_model_size": "1.7B",
+    # Voice Clone（Base 模型）默认是否启用"仅 x-vector"模式：
+    #   True  → 只提取参考音频的说话人特征（x-vector），不需要参考文本，
+    #           更省事但克隆质量可能下降；
+    #   False → 同时使用参考文本做更精确的克隆（默认，质量更好）。
+    # 前端"语音预设管理"里针对 Voice Clone 的"Use x-vector only"开关，
+    # 新建预设时以此为默认勾选状态。
+    "qwen3_tts_x_vector_only_default": False,
 
     # ── alt_aligners.py 对齐调优参数（默认值与原硬编码常量保持一致）────────
     # Qwen3-ForcedAligner / Qwen3-ASR 全局事后偏移校正（秒）。
@@ -148,6 +164,25 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     # 已知自己的显卡显存有限，也可以在这里直接调低这个值，跳过重试直接
     # 一次成功、减少无谓的重试耗时；反之显存充裕的显卡可以调大以提速。
     "whisperx_batch_size": 16,
+
+    # ── Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner batch_size ──
+    # 三者底层都不像 WhisperX 那样天然支持"多条音频一批推理"（本项目
+    # 每次对齐任务始终只送 1 条音频/1 个分段），因此这个设置的实际含义
+    # 与 whisperx_batch_size 不完全一样，按后端拆成两种用法：
+    #
+    #   - Qwen3-ASR：直接透传给 qwen_asr.Qwen3ASRModel.from_pretrained(...)
+    #     的 max_inference_batch_size（官方参数，限制模型内部单次推理的
+    #     最大批量，-1 为不限制）。qwen3_server.py 目前对 GPU 硬编码为 8，
+    #     这里把它变成可调项；值越小，显存占用峰值越低。
+    #   - Qwen3-ForcedAligner / NeMo Forced Aligner：两者服务端调用本身
+    #     就是单音频单次前向，没有真正的"批"概念可调；这个值改为用作
+    #     "显存不足时自动降级重试"的起始参考批大小——命中 CUDA OOM 时，
+    #     会从这个值开始按腰斩策略重试（间接影响分块/降精度等自愈路径的
+    #     起始激进程度），不会在正常（不 OOM）情况下影响任何行为。
+    #
+    # 默认 8，低显存显卡可调小；三个后端共用同一个设置项，与
+    # whisperx_batch_size 是各自独立的两个调优参数，互不影响。
+    "qwen3_batch_size": 8,
 
     # ── tts_processor.py 逐句合成分段长度（字符数）───────────────────────
     # 详见 tts_processor.py split_sentences() / _split_long_line() 顶部
@@ -250,6 +285,14 @@ def save_settings(new_settings: Dict[str, object]) -> Dict[str, object]:
         current["hide_console_window"] = bool(current.get("hide_console_window"))
         current["skip_start_qwen3_server"] = bool(current.get("skip_start_qwen3_server"))
         current["skip_start_nemo_server"] = bool(current.get("skip_start_nemo_server"))
+        current["skip_start_qwen3tts_server"] = bool(current.get("skip_start_qwen3tts_server"))
+
+        # Qwen3-TTS 模型规模：只允许 "1.7B" / "0.6B"，非法值回退默认值。
+        tts_size = str(current.get("qwen3_tts_model_size") or "").strip()
+        current["qwen3_tts_model_size"] = (
+            tts_size if tts_size in ("1.7B", "0.6B") else DEFAULT_SETTINGS["qwen3_tts_model_size"]
+        )
+        current["qwen3_tts_x_vector_only_default"] = bool(current.get("qwen3_tts_x_vector_only_default"))
 
         # Qwen3-FA「按句子分段对齐」总开关，以及与其构成父子关系的
         # WhisperX 粗测预处理：bool 开关 + 模型档位字符串（非法/空值回退
@@ -276,6 +319,15 @@ def save_settings(new_settings: Dict[str, object]) -> Dict[str, object]:
         except (TypeError, ValueError):
             wx_bs = int(DEFAULT_SETTINGS["whisperx_batch_size"])
         current["whisperx_batch_size"] = min(max(wx_bs, 1), 128)
+
+        # Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner batch_size：
+        # 同样转 int 并钳制到 [1, 128]，非法/缺失值回退为默认值 8，与
+        # whisperx_batch_size 的校验逻辑保持一致。
+        try:
+            q3_bs = int(current.get("qwen3_batch_size", DEFAULT_SETTINGS["qwen3_batch_size"]))
+        except (TypeError, ValueError):
+            q3_bs = int(DEFAULT_SETTINGS["qwen3_batch_size"])
+        current["qwen3_batch_size"] = min(max(q3_bs, 1), 128)
 
         # TTS 逐句合成分段长度（字符数）：转 int 并各自钳制到 [1, 5000]，
         # 非法/缺失值回退为默认值；钳制后若 min > max，交换两者，避免
@@ -560,3 +612,57 @@ def get_tts_split_options() -> Dict[str, object]:
         "disable_newline_split": bool(settings.get("tts_disable_newline_split")),
         "disable_segment_len_split": bool(settings.get("tts_disable_segment_len_split")),
     }
+
+
+def get_qwen3_batch_size() -> int:
+    """
+    供 alt_aligners.py（主进程内的 Qwen3ForcedAligner OOM 自动重试）以及
+    qwen3_server.py / nemo_server.py（各自独立进程）共用：实时读取
+    qwen3_batch_size 设置。
+
+    与 get_alignment_tuning() 使用的 mtime 缓存不同，这里同 whisperx 的
+    _get_whisperx_batch_size() 一样直接读盘——三个消费方里有两个
+    （qwen3_server.py / nemo_server.py）是独立子进程，各自的调用频率远低于
+    主进程的对齐热路径，没有必要为此额外维护一层跨进程都要生效的缓存；
+    直接读盘成本可忽略，且保证"设置页面保存后下一次任务立即生效"
+    （qwen3_server.py / nemo_server.py 每次 /asr 、/align 请求都会重新调用，
+    不需要重启这两个微服务）。
+
+    读取失败或配置值非法时安全回退到默认值 8。
+
+    Returns
+    -------
+    int，>= 1。
+    """
+    try:
+        settings = load_settings()
+        val = int(settings.get("qwen3_batch_size", DEFAULT_SETTINGS["qwen3_batch_size"]))
+        return max(1, val)
+    except Exception:
+        return int(DEFAULT_SETTINGS["qwen3_batch_size"])
+
+
+def get_qwen3_tts_model_size() -> str:
+    """
+    供 qwen3tts_server.py（独立子进程）读取：实时读取用户在设置页选择的
+    Qwen3-TTS 模型规模（"1.7B" / "0.6B"）。与 get_qwen3_batch_size() 一样
+    直接读盘，不做跨进程缓存——qwen3tts_server.py 每次 /load 或懒加载时
+    重新读取一次即可，调用频率远低于对齐热路径。
+
+    读取失败或值非法时安全回退到默认值 "1.7B"。
+    """
+    try:
+        settings = load_settings()
+        val = str(settings.get("qwen3_tts_model_size") or "").strip()
+        return val if val in ("1.7B", "0.6B") else str(DEFAULT_SETTINGS["qwen3_tts_model_size"])
+    except Exception:
+        return str(DEFAULT_SETTINGS["qwen3_tts_model_size"])
+
+
+def get_qwen3_tts_x_vector_only_default() -> bool:
+    """供前端"语音预设管理"新建 Voice Clone 预设时的默认勾选状态使用。"""
+    try:
+        settings = load_settings()
+        return bool(settings.get("qwen3_tts_x_vector_only_default"))
+    except Exception:
+        return bool(DEFAULT_SETTINGS["qwen3_tts_x_vector_only_default"])

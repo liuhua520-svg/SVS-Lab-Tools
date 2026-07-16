@@ -142,6 +142,8 @@ def _parse_box_override(form, index: int) -> Optional[Dict]:
     if phoneme_mode not in ("none", "merge", "hiragana", "katakana"):
         phoneme_mode = "none"
 
+    ja_devoiced_phoneme = form.get(f"override_ja_devoiced_phoneme_{index}", "false").lower() == "true"
+
     dict_source = _normalize_dict_source(form.get(f"override_dict_source_{index}", "default"))
 
     try:
@@ -195,6 +197,7 @@ def _parse_box_override(form, index: int) -> Optional[Dict]:
         "english_word_align": english_word_align,
         "word_phoneme_map": word_phoneme_map,
         "phoneme_mode": phoneme_mode,
+        "ja_devoiced_phoneme": ja_devoiced_phoneme,
         "dict_source": dict_source,
         "base_pitch": base_pitch,
         "auto_note_pitch": auto_note_pitch,
@@ -260,8 +263,12 @@ def get_job(job_id: str):
 # 预览已过期，直接忽略 preview_id，退回"先合成再对齐"的完整流程（对应用户
 # 没有手动点过预览、或者点完预览后又改动过文本/参数的情况）。
 #
-# 缓存容量很小（同一时间基本只有一个用户在用这一个面板），这里只做简单的
-# "超过上限就清掉最旧的" + "被消费后立即删除" 处理，不需要引入过期任务。
+# 可反复复用：只要参数没变，用户可以不重新生成预览、连续多次点击"开始
+# 处理"，每次都复用同一份缓存的分句音频（调用方各自复制副本去对齐，不
+# 触碰缓存原件，见 run_tts_pipeline_job）。缓存条目只有在参数不匹配（视
+# 为过期）时才会被主动清理；否则和其它条目一样，只受下面的
+# "超过上限就清掉最旧的" LRU 策略约束——用户点"重新生成预览"会产生一个
+# 新的 preview_id，旧条目会在缓存满 _TTS_PREVIEW_MAX_ENTRIES 后被自然淘汰。
 _TTS_PREVIEW_CACHE: Dict[str, dict] = {}
 _TTS_PREVIEW_LOCK = Lock()
 _TTS_PREVIEW_MAX_ENTRIES = 8
@@ -295,18 +302,28 @@ def _tts_preview_store(entry: dict) -> str:
 
 def _tts_preview_take(preview_id: str, expected: dict) -> Optional[dict]:
     """
-    取出并从缓存里移除一条预览记录，仅当其合成参数与当前提交的 expected
-    完全一致时才返回；否则返回 None（调用方应退回完整合成+对齐流程）。
-    一旦取出（无论后续对齐成功与否），这条缓存记录都不再保留。
+    读取一条预览记录，仅当其合成参数与当前提交的 expected 完全一致时才
+    返回；否则返回 None（调用方应退回完整合成+对齐流程）。
+
+    注意：匹配成功时**不会**把这条记录从缓存里移除——用户可能会不改动
+    文本/参数、连续多次点击"开始处理"，每次都应该复用同一份预览音频去
+    对齐，而不是第一次点击后就必须重新生成。缓存条目只在两种情况下被
+    清理：① 这里校验参数不匹配（预览已过期，对应的磁盘产物没有继续
+    保留的意义）；② 用户点击"重新生成预览"生成了新的 preview_id，旧
+    条目会在缓存超过 _TTS_PREVIEW_MAX_ENTRIES 时被 _tts_preview_store
+    的 LRU 淘汰清理。调用方每次使用返回的 segments_dir / wav_path 时，
+    必须自行复制副本去操作，不能直接修改或删除这两个路径本身。
     """
     if not preview_id:
         return None
     with _TTS_PREVIEW_LOCK:
-        entry = _TTS_PREVIEW_CACHE.pop(preview_id, None)
+        entry = _TTS_PREVIEW_CACHE.get(preview_id)
     if not entry:
         return None
     for key, value in expected.items():
         if entry.get(key) != value:
+            with _TTS_PREVIEW_LOCK:
+                _TTS_PREVIEW_CACHE.pop(preview_id, None)
             _tts_preview_cleanup_dir(entry)
             return None
     return entry
@@ -881,11 +898,13 @@ def english_extract_g2p():
 # 应用设置：模型自动更新 / 镜像站下载（功能 2）
 # =====================================================================
 
-# Qwen3-ASR / NeMo Forced Aligner 微服务的固定本地地址（与
+# Qwen3-ASR / NeMo Forced Aligner / Qwen3-TTS 微服务的固定本地地址（与
 # alt_aligners.py 里 Qwen3ASRAligner.DEFAULT_ENDPOINT /
-# NeMoForcedAligner.DEFAULT_ENDPOINT 使用的端口保持一致）。
+# NeMoForcedAligner.DEFAULT_ENDPOINT、tts_processor.py 里
+# QWEN3_TTS_BASE_URL 使用的端口保持一致）。
 _QWEN3_BASE_URL = "http://127.0.0.1:5001"
 _NEMO_BASE_URL = "http://127.0.0.1:5002"
+_QWEN3TTS_BASE_URL = "http://127.0.0.1:5003"
 
 
 def _restart_microservice(base_url: str, display_name: str) -> Dict[str, str]:
@@ -951,6 +970,7 @@ def update_settings():
         restart_result = {
             "qwen3": _restart_microservice(_QWEN3_BASE_URL, "Qwen3-ASR"),
             "nemo": _restart_microservice(_NEMO_BASE_URL, "NeMo Forced Aligner"),
+            "qwen3tts": _restart_microservice(_QWEN3TTS_BASE_URL, "Qwen3-TTS"),
         }
 
         return jsonify({
@@ -1062,6 +1082,7 @@ def run_pipeline_job(
     dict_source: str = "default",
     vsqx_pitch_smooth_window: int = 5,
     whisperx_batch_size: int = 16,
+    qwen3_batch_size: int = 8,
     aligner_device: str = "auto",
     align_pitch_shift_semitones: float = 0.0,
 ):
@@ -1108,6 +1129,7 @@ def run_pipeline_job(
             aligner_device=aligner_device,
             whisperx_model=whisperx_model,
             whisperx_batch_size=whisperx_batch_size,
+            qwen3_batch_size=qwen3_batch_size,
             nemo_model=(nemo_model or None),
             english_word_align=english_word_align,
             vsqx_singer=vsqx_singer,
@@ -1207,6 +1229,14 @@ def pipeline_full_process():
         if aligner_backend not in ("mfa", "whisperx", "qwen3_asr", "qwen3_aligner", "nemo_aligner"):
             aligner_backend = "mfa"
 
+        # 【修复】此路由此前从未解析 aligner_device 表单字段，导致提交到
+        # /api/pipeline/full 的任务无论前端"对齐工具运行设备"选择什么，
+        # 实际都会按 run_pipeline_job 的默认值 "auto" 静默运行——与
+        # pipeline.py 里 WhisperX/Qwen3-FA/NeMo-FA 曾经历过的
+        # aligner_device 失效是同一类问题。这里补齐解析，写法与下方
+        # 其它路由（如 process_mfa_only 对应路由）保持一致。
+        aligner_device = request.form.get("aligner_device", "").strip() or "auto"
+
         whisperx_model = request.form.get("whisperx_model", "large-v3")
         if whisperx_model not in ("large-v3", "large-v3-turbo", "large-v2", "medium", "small", "base", "tiny"):
             whisperx_model = "large-v3"
@@ -1219,6 +1249,17 @@ def pipeline_full_process():
         except (TypeError, ValueError):
             whisperx_batch_size = 16
         whisperx_batch_size = max(1, min(whisperx_batch_size, 64))
+
+        # Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner 共用批大小：
+        # 语义与 whisperx_batch_size 不完全相同（Qwen3-ASR 直接对应
+        # max_inference_batch_size；Qwen3-FA / NeMo-FA 只作为显存不足自动
+        # 降级重试的参考值，见 alt_aligners.py / qwen3_server.py /
+        # nemo_server.py 里的说明），但校验规则保持一致。
+        try:
+            qwen3_batch_size = int(request.form.get("qwen3_batch_size", 8))
+        except (TypeError, ValueError):
+            qwen3_batch_size = 8
+        qwen3_batch_size = max(1, min(qwen3_batch_size, 64))
 
         # NeMo Forced Aligner 模型覆盖（可选）：留空则由 NeMoForcedAligner
         # 按语言使用内置默认模型（见 alt_aligners.NeMoForcedAligner.LANGUAGE_MODELS）
@@ -1307,11 +1348,14 @@ def pipeline_full_process():
                 vsqx_pitch_smooth_window,
                 whisperx_batch_size,
             ),
-            # 用关键字参数追加新增字段，避开 run_pipeline_job 尾部
-            # aligner_device 的位置参数陷阱（该路由此前一直没有解析/透传
-            # aligner_device，一直隐性按默认值 "auto" 运行——这是已存在的
-            # 行为，这里不额外修正，只保证新增字段不会因为位置错位而串位）。
-            kwargs=dict(align_pitch_shift_semitones=align_pitch_shift_semitones),
+            # 用关键字参数追加新增字段，避开 run_pipeline_job 尾部的位置
+            # 参数陷阱（位置参数一多，插入新字段很容易因为顺序错位导致
+            # 参数串位；用 kwargs 按名传递可以避免这个问题）。
+            kwargs=dict(
+                align_pitch_shift_semitones=align_pitch_shift_semitones,
+                qwen3_batch_size=qwen3_batch_size,
+                aligner_device=aligner_device,
+            ),
         ).start()
 
         return jsonify(
@@ -1337,6 +1381,7 @@ def run_mfa_only_job(job_id: str, wav_path: str, text: str, language: str,
                      nemo_model: str = "",
                      english_word_align: bool = False,
                      whisperx_batch_size: int = 16,
+                     qwen3_batch_size: int = 8,
                      aligner_device: Optional[str] = None,
                      align_pitch_shift_semitones: float = 0.0):
     try:
@@ -1369,6 +1414,7 @@ def run_mfa_only_job(job_id: str, wav_path: str, text: str, language: str,
                                            aligner_device=aligner_device,
                                            whisperx_model=whisperx_model,
                                            whisperx_batch_size=whisperx_batch_size,
+                                           qwen3_batch_size=qwen3_batch_size,
                                            nemo_model=(nemo_model or None),
                                            english_word_align=english_word_align,
                                            align_pitch_shift_semitones=align_pitch_shift_semitones)
@@ -1429,6 +1475,14 @@ def pipeline_mfa_only():
             whisperx_batch_size = 16
         whisperx_batch_size = max(1, min(whisperx_batch_size, 64))
 
+        # Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner 共用批大小
+        # （语义说明见 pipeline.py _run_alignment() 顶部注释）。
+        try:
+            qwen3_batch_size = int(request.form.get("qwen3_batch_size", 8))
+        except (TypeError, ValueError):
+            qwen3_batch_size = 8
+        qwen3_batch_size = max(1, min(qwen3_batch_size, 64))
+
         # NeMo Forced Aligner 模型覆盖（可选）：留空则由 NeMoForcedAligner
         # 按语言使用内置默认模型
         nemo_model = request.form.get("nemo_model", "").strip()
@@ -1461,12 +1515,30 @@ def pipeline_mfa_only():
         logger.info(f"标注模式启动 (backend={aligner_backend})，投递后台任务: {job_id}")
 
         # 3. 启动后台线程执行耗时任务
+        #
+        # 【修复】此前这里用位置参数调用 run_mfa_only_job，随着函数签名
+        # 后续新增字段（qwen3_batch_size），位置参数的写法很容易在插入新
+        # 字段时因为顺序错位而导致参数串位（例如 aligner_device 被错误
+        # 地填进 qwen3_batch_size 的位置）。改成全部按关键字传递，彻底
+        # 消除这一类风险，后续再新增字段也不会影响到这里。
         Thread(
             target=run_mfa_only_job,
             daemon=True,
-            args=(job_id, str(wav_path), text, language, aligner_backend, f0_device,
-                  whisperx_model, nemo_model, english_word_align, whisperx_batch_size,
-                  aligner_device, align_pitch_shift_semitones),
+            kwargs=dict(
+                job_id=job_id,
+                wav_path=str(wav_path),
+                text=text,
+                language=language,
+                aligner_backend=aligner_backend,
+                f0_device=f0_device,
+                whisperx_model=whisperx_model,
+                nemo_model=nemo_model,
+                english_word_align=english_word_align,
+                whisperx_batch_size=whisperx_batch_size,
+                qwen3_batch_size=qwen3_batch_size,
+                aligner_device=aligner_device,
+                align_pitch_shift_semitones=align_pitch_shift_semitones,
+            ),
         ).start()
 
         # 4. 立即返回 job_id 供前端轮询
@@ -1509,6 +1581,7 @@ def run_project_only_job(
     word_phoneme_map: bool = False,
     dict_source: str = "default",
     vsqx_pitch_smooth_window: int = 5,
+    ja_devoiced_phoneme: bool = False,
 ):
     try:
         set_job(
@@ -1542,6 +1615,7 @@ def run_project_only_job(
             vsqx_singer_bs=vsqx_singer_bs,
             word_phoneme_map=word_phoneme_map,
             dict_source=dict_source,
+            ja_devoiced_phoneme=ja_devoiced_phoneme,
         )
 
         if result.get("success"):
@@ -1611,6 +1685,7 @@ def pipeline_project_only():
         vsqx_singer_id = request.form.get("vsqx_singer_id", vsqx_singer_id)
         vsqx_singer_bs = int(request.form.get("vsqx_singer_bs", vsqx_singer_bs))
         word_phoneme_map = request.form.get("word_phoneme_map", "false").lower() == "true"
+        ja_devoiced_phoneme = request.form.get("ja_devoiced_phoneme", "false").lower() == "true"
 
         dict_source = _normalize_dict_source(request.form.get("dict_source", "default"))
 
@@ -1727,6 +1802,7 @@ def pipeline_project_only():
                 word_phoneme_map,
                 dict_source,
                 vsqx_pitch_smooth_window,
+                ja_devoiced_phoneme,
             ),
         ).start()
 
@@ -1848,20 +1924,30 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                 if tts_info.get("preview_segments_dir") and tts_info.get("preview_sentences") and tts_info.get("preview_wav_path"):
                     # 这一框之前手动点过"生成预览"，分句音频已经在磁盘上——
                     # 只需要对齐，不重新调用 TTS 引擎合成一遍。
+                    #
+                    # 与单文件页面（/api/tts/process）一致：preview_segments_dir /
+                    # preview_wav_path 指向的是这一框预览缓存的原始产物，用户
+                    # 可能不改文本/参数、反复点击共享的"开始处理"（因为批量
+                    # 页面没有单框对齐接口，每次点击都会带上这一框仍然有效的
+                    # tts_preview_id_i 一起提交）。这里同样只复制副本去对齐/
+                    # 使用，不触碰缓存原件，原件的生命周期交给 _tts_preview_take
+                    # 的过期校验或 LRU 淘汰处理。
                     preview_segments_dir = tts_info["preview_segments_dir"]
+                    job_segments_dir = str(WORK_DIR / f"{stem}_segs")
+                    shutil.copytree(preview_segments_dir, job_segments_dir)
                     align_result = tts_processor.align_segments(
-                        segments_dir=preview_segments_dir,
+                        segments_dir=job_segments_dir,
                         sentences=tts_info["preview_sentences"],
                         language=box_language,
                         aligner_device=aligner_device,
                         english_word_align=box_english_word_align,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                     )
-                    shutil.rmtree(preview_segments_dir, ignore_errors=True)
+                    shutil.rmtree(job_segments_dir, ignore_errors=True)
 
                     if align_result.get("success"):
                         final_wav_path = str(WORK_DIR / f"{stem}.wav")
-                        shutil.move(tts_info["preview_wav_path"], final_wav_path)
+                        shutil.copyfile(tts_info["preview_wav_path"], final_wav_path)
                         final_lab_path = str(WORK_DIR / f"{stem}.lab")
                         Path(final_lab_path).write_text(align_result["lab_content"], encoding="utf-8")
                         tts_result = {
@@ -1874,7 +1960,6 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                             "warnings": align_result["warnings"],
                         }
                     else:
-                        Path(tts_info["preview_wav_path"]).unlink(missing_ok=True)
                         tts_result = align_result
                 else:
                     # 没有先手动预览（或预览已过期）：先合成分句音频，再
@@ -1890,6 +1975,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         aligner_device=aligner_device,
                         english_word_align=box_english_word_align,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
+                        qwen3_tts_options=tts_info.get("qwen3_tts_options"),
                     )
 
                 if tts_result.get("success"):
@@ -1977,8 +2063,26 @@ def dialogue_process():
       - audio_{i}       : 第 i 个对话框的音频文件（input_mode=audio 时必需之一；
                           缺失则该对话框跳过；每框限 1 个音频）
       - tts_text_{i}    : 第 i 个对话框的台词文本（input_mode=tts 时必填）
-      - tts_voice_{i}   : 第 i 个对话框使用的 EdgeTTS 音色 ShortName（input_mode=tts 时必填）
-      - tts_rate_{i} / tts_pitch_{i} / tts_volume_{i} : 语速/音调/音量（可选，默认 +0%/+0Hz/+0%）
+      - tts_engine_{i}  : 第 i 个对话框使用的 TTS 引擎（"edge_tts" / "windows_sapi" /
+                          "qwen3_tts"，默认 edge_tts）
+      - tts_voice_{i}   : 第 i 个对话框使用的音色 id（Custom Voice / EdgeTTS /
+                          讲述人时必填；engine="qwen3_tts" 且模式为
+                          voice_design/voice_clone 时不需要）
+      - tts_rate_{i} / tts_pitch_{i} / tts_volume_{i} : 语速/音调/音量（可选，默认 +0%/+0Hz/+0%，
+                          engine="qwen3_tts" 时不使用，会被忽略）
+      - qwen3_tts_options_{i} : 第 i 个对话框的 Qwen3-TTS 专用参数，仅
+                          tts_engine_{i}="qwen3_tts" 时读取，JSON 字符串，
+                          字段见 tts_processor._qwen3_tts_synth_to_file()
+                          顶部说明（mode/instruct/ref_text/x_vector_only/
+                          size/device 等）；voice_clone 模式的参考音频
+                          通过下面的 ref_audio_{i} 文件字段单独上传，不放
+                          进这个 JSON 里（避免 base64 把 form 字段撑得
+                          过大），与 /api/tts/process 的单文件版本一致。
+      - ref_audio_{i}   : 可选文件字段，第 i 个对话框 tts_engine_{i}=
+                          "qwen3_tts" 且 qwen3_tts_options_{i}.mode=
+                          "voice_clone" 时必填（若该框的预设已指定
+                          ref_audio_path 则可不传文件，直接在
+                          qwen3_tts_options_{i} 里带路径）。
       - tts_preview_id_{i} : 该框手动点击"生成预览"（/api/tts/synthesize_preview）
                           后返回的缓存凭证（可选）。若提交的合成参数
                           （text/engine/voice/rate/pitch/volume/language）
@@ -2051,6 +2155,7 @@ def dialogue_process():
         if phoneme_mode not in ("none", "merge", "hiragana", "katakana"):
             logger.warning(f"未知 phoneme_mode '{phoneme_mode}'，回退到 'none'")
             phoneme_mode = "none"
+        ja_devoiced_phoneme = request.form.get("ja_devoiced_phoneme", "false").lower() == "true"
 
         project_title = request.form.get("title", "Dialogue Project")
 
@@ -2085,6 +2190,14 @@ def dialogue_process():
         except (TypeError, ValueError):
             whisperx_batch_size = 16
         whisperx_batch_size = max(1, min(whisperx_batch_size, 64))
+
+        # Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner 共用批大小
+        # （语义说明见 pipeline.py _run_alignment() 顶部注释）。
+        try:
+            qwen3_batch_size = int(request.form.get("qwen3_batch_size", 8))
+        except (TypeError, ValueError):
+            qwen3_batch_size = 8
+        qwen3_batch_size = max(1, min(qwen3_batch_size, 64))
 
         nemo_model = request.form.get("nemo_model", "").strip()
         english_word_align = request.form.get("english_word_align", "false").lower() == "true"
@@ -2156,8 +2269,41 @@ def dialogue_process():
             if input_mode == "tts":
                 tts_text = request.form.get(f"tts_text_{i}", "").strip() or text
                 tts_voice = request.form.get(f"tts_voice_{i}", "").strip()
-                if tts_text and tts_voice:
-                    tts_engine_i = request.form.get(f"tts_engine_{i}", "").strip() or tts_processor.DEFAULT_ENGINE
+                tts_engine_i = request.form.get(f"tts_engine_{i}", "").strip() or tts_processor.DEFAULT_ENGINE
+
+                # Qwen3-TTS 专用参数：与 /api/tts/process 同款解析逻辑。
+                # Voice Design / Voice Clone 两种模式不使用"预设音色"，
+                # 不要求 tts_voice；其余情况（Custom Voice / EdgeTTS /
+                # 讲述人）仍然必须有音色才视为这个框"已配置"。
+                box_qwen3_tts_options = None
+                box_qwen3_voice_required = True
+                if tts_engine_i == "qwen3_tts":
+                    raw_opts = request.form.get(f"qwen3_tts_options_{i}", "").strip()
+                    try:
+                        box_qwen3_tts_options = json.loads(raw_opts) if raw_opts else {}
+                    except Exception:
+                        return jsonify({"error": f"第 {i} 个对话框的 qwen3_tts_options 不是合法的 JSON"}), 400
+                    box_qwen3_mode = (box_qwen3_tts_options.get("mode") or "custom_voice").strip()
+                    box_qwen3_voice_required = box_qwen3_mode not in ("voice_design", "voice_clone")
+
+                    # Voice Clone 模式：参考音频可以随表单上传（ref_audio_{i}
+                    # 文件字段），落盘到 WORK_DIR 下的临时子目录，路径写回
+                    # options 供 tts_processor 使用；如果前端已经给了
+                    # ref_audio_path（复用"语音预设管理"里保存好的预设，
+                    # 参考音频早已落盘），则跳过，不要求重新上传文件。
+                    if box_qwen3_mode == "voice_clone" and not box_qwen3_tts_options.get("ref_audio_path"):
+                        box_ref_audio_file = request.files.get(f"ref_audio_{i}")
+                        if box_ref_audio_file and box_ref_audio_file.filename:
+                            ref_dir = WORK_DIR / "_tts_ref_audio"
+                            ref_dir.mkdir(parents=True, exist_ok=True)
+                            ref_ext = Path(box_ref_audio_file.filename).suffix or ".wav"
+                            ref_path = ref_dir / f"ref_{uuid.uuid4().hex[:10]}{ref_ext}"
+                            box_ref_audio_file.save(str(ref_path))
+                            box_qwen3_tts_options["ref_audio_path"] = str(ref_path)
+                        elif not box_qwen3_tts_options.get("ref_audio_base64"):
+                            return jsonify({"error": f"第 {i} 个对话框（Voice Clone 模式）需要提供参考音频"}), 400
+
+                if tts_text and (tts_voice or (tts_engine_i == "qwen3_tts" and not box_qwen3_voice_required)):
                     tts_rate_i = request.form.get(f"tts_rate_{i}", "+0%")
                     tts_pitch_i = request.form.get(f"tts_pitch_{i}", "+0Hz")
                     tts_volume_i = request.form.get(f"tts_volume_{i}", "+0%")
@@ -2168,6 +2314,7 @@ def dialogue_process():
                         "rate": tts_rate_i,
                         "pitch": tts_pitch_i,
                         "volume": tts_volume_i,
+                        "qwen3_tts_options": box_qwen3_tts_options,
                     }
                     text = tts_text
 
@@ -2181,11 +2328,15 @@ def dialogue_process():
                     # 语言）而不是整批统一的 language 做匹配——若该框单独
                     # 设置了不同的语言，用全局 language 比对会永远不匹配，
                     # 导致预览被误判为"参数已变化"而白白重新合成一遍。
+                    # qwen3_tts_options 同单文件版本一样序列化成 JSON
+                    # 字符串参与比对，确保 Instruct / 参考音频等任一改动
+                    # 都会让旧预览失效。
                     box_preview_id = request.form.get(f"tts_preview_id_{i}", "").strip()
                     box_preview_entry = _tts_preview_take(box_preview_id, {
                         "text": tts_text, "engine": tts_engine_i, "voice": tts_voice,
                         "rate": tts_rate_i, "volume": tts_volume_i, "pitch": tts_pitch_i,
                         "language": box_effective_language,
+                        "qwen3_tts_options_json": json.dumps(box_qwen3_tts_options or {}, sort_keys=True),
                     }) if box_preview_id else None
                     if box_preview_entry:
                         tts_info["preview_segments_dir"] = box_preview_entry["segments_dir"]
@@ -2299,9 +2450,11 @@ def dialogue_process():
                 aligner_device=aligner_device,
                 whisperx_model=whisperx_model,
                 whisperx_batch_size=whisperx_batch_size,
+                qwen3_batch_size=qwen3_batch_size,
                 nemo_model=(nemo_model or None),
                 processing_mode=processing_mode,
                 phoneme_mode=phoneme_mode,
+                ja_devoiced_phoneme=ja_devoiced_phoneme,
                 english_word_align=english_word_align,
                 vsqx_singer=vsqx_singer,
                 vsqx_singer_id=vsqx_singer_id,
@@ -2386,10 +2539,24 @@ def tts_narrators_list():
 
 @app.route("/api/tts/narrators", methods=["POST"])
 def tts_narrators_upsert():
-    """新建 / 更新一个讲述人档案。body: {id?, name, voice, rate, pitch, volume, language}"""
+    """新建 / 更新一个讲述人档案（语音预设）。
+    body: {id?, name, engine?, voice, rate, pitch, volume, language,
+           qwen3_tts_mode?, qwen3_tts_instruct?, qwen3_tts_ref_text?,
+           qwen3_tts_x_vector_only?, qwen3_tts_size?,
+           qwen3_tts_ref_audio_base64?, qwen3_tts_ref_audio_ext?}
+
+    qwen3_tts_ref_audio_base64：仅 Voice Clone 模式（engine="qwen3_tts" 且
+    qwen3_tts_mode="voice_clone"）保存参考音频时使用，落盘持久化到
+    tts_processor.NARRATOR_REF_AUDIO_DIR；编辑已有预设且不重新上传时可
+    省略该字段，沿用旧文件。
+    """
     try:
         payload = request.get_json(force=True, silent=True) or {}
-        record = tts_processor.upsert_narrator(payload)
+        record = tts_processor.upsert_narrator(
+            payload,
+            ref_audio_base64=payload.get("qwen3_tts_ref_audio_base64") or None,
+            ref_audio_ext=payload.get("qwen3_tts_ref_audio_ext") or ".wav",
+        )
         return jsonify({"success": True, "narrator": record}), 200
     except Exception as e:
         logger.error(f"保存讲述人失败: {e}", exc_info=True)
@@ -2414,7 +2581,11 @@ def tts_preview():
     """
     试听预览：只合成一小段音频（不切句、不对齐），直接返回音频字节流，
     前端用 <audio> 播放即可，不落盘到工作目录。
-    body: {text, engine?, voice, rate?, pitch?, volume?}
+    body: {text, engine?, voice, rate?, pitch?, volume?, qwen3_tts_options?}
+
+    qwen3_tts_options：仅 engine="qwen3_tts" 时使用，见
+    tts_processor._qwen3_tts_synth_to_file() 顶部说明，前端"语音预设管理"
+    弹窗按当前选中的 Voice Design / Voice Clone / Custom Voice 模式组装。
     """
     try:
         payload = request.get_json(force=True, silent=True) or {}
@@ -2426,8 +2597,9 @@ def tts_preview():
             rate=payload.get("rate", "+0%"),
             volume=payload.get("volume", "+0%"),
             pitch=payload.get("pitch", "+0Hz"),
+            qwen3_tts_options=payload.get("qwen3_tts_options") or None,
         )
-        mimetype = "audio/wav" if engine == "windows_sapi" else "audio/mpeg"
+        mimetype = "audio/wav" if engine in ("windows_sapi", "qwen3_tts") else "audio/mpeg"
         return Response(audio_bytes, mimetype=mimetype)
     except (ValueError, RuntimeError) as e:
         return jsonify({"success": False, "error": str(e)}), 400
@@ -2454,7 +2626,7 @@ def tts_synthesize_preview():
     合成一遍；如果参数对不上（或用户压根没点过预览），则退回"先合成再
     对齐"的完整流程。
 
-    body(JSON): {text, language?, engine?, voice, rate?, pitch?, volume?}
+    body(JSON): {text, language?, engine?, voice, rate?, pitch?, volume?, qwen3_tts_options?}
     """
     try:
         payload = request.get_json(force=True, silent=True) or {}
@@ -2463,10 +2635,15 @@ def tts_synthesize_preview():
             return jsonify({"success": False, "error": "文本为空"}), 400
 
         voice = (payload.get("voice") or "").strip()
-        if not voice:
+        engine = payload.get("engine", "").strip() or tts_processor.DEFAULT_ENGINE
+        qwen3_tts_options = payload.get("qwen3_tts_options") or None
+        qwen3_mode = (qwen3_tts_options or {}).get("mode") or "custom_voice"
+        # Voice Design / Voice Clone 两种模式不使用"预设音色"，不要求 voice；
+        # 其余情况（Custom Voice / EdgeTTS / 讲述人）仍然必须选择音色。
+        voice_required = not (engine == "qwen3_tts" and qwen3_mode in ("voice_design", "voice_clone"))
+        if voice_required and not voice:
             return jsonify({"success": False, "error": "未选择音色"}), 400
 
-        engine = payload.get("engine", "").strip() or tts_processor.DEFAULT_ENGINE
         language = payload.get("language", "cmn")
         rate = payload.get("rate", "+0%")
         volume = payload.get("volume", "+0%")
@@ -2480,6 +2657,7 @@ def tts_synthesize_preview():
             text=text, language=language, voice=voice, engine=engine,
             work_dir=str(preview_dir), stem=stem,
             rate=rate, volume=volume, pitch=pitch,
+            qwen3_tts_options=qwen3_tts_options,
         )
 
         if not result.get("success"):
@@ -2499,9 +2677,12 @@ def tts_synthesize_preview():
             "wav_path": str(wav_path),
             "created_at": datetime.now().isoformat(),
             # 复用校验用：/api/tts/process 提交的这几项必须与预览时完全
-            # 一致，否则视为预览已过期。
+            # 一致，否则视为预览已过期。qwen3_tts_options 序列化成
+            # JSON 字符串参与比对（dict 直接比较也可以，这里保持与其它
+            # 标量字段一致的简单写法）。
             "text": text, "engine": engine, "voice": voice,
             "rate": rate, "volume": volume, "pitch": pitch, "language": language,
+            "qwen3_tts_options_json": json.dumps(qwen3_tts_options or {}, sort_keys=True),
         })
 
         return jsonify({
@@ -2554,6 +2735,7 @@ def run_tts_pipeline_job(
     preview_segments_dir: Optional[str] = None,
     preview_sentences: Optional[list] = None,
     preview_wav_path: Optional[str] = None,
+    qwen3_tts_options: Optional[Dict] = None,
 ):
     try:
         set_job(job_id, status="running", started_at=datetime.now().isoformat(),
@@ -2568,17 +2750,25 @@ def run_tts_pipeline_job(
             # 用户已经先手动点过"生成预览"，分句音频已经在磁盘上——这里只
             # 需要对齐，不重新调用 TTS 引擎合成一遍（对应"将现有的分割
             # 音频交给 QWEN3-FA 对齐"这条路径）。
+            #
+            # 注意：preview_segments_dir / preview_wav_path 指向的是预览
+            # 缓存里的原始产物，可能会被用户反复点击"开始处理"复用多次
+            # （只要没有点"重新生成预览"或改动文本/参数）。因此这里一律
+            # 先复制一份到本次任务专属的临时路径，对齐/最终产物都只操作
+            # 这份副本，不触碰缓存原件——原件的生命周期完全交给
+            # _tts_preview_take 的 LRU 淘汰或被新预览覆盖时处理。
+            job_segments_dir = str(WORK_DIR / f"{stem}_segs")
+            shutil.copytree(preview_segments_dir, job_segments_dir)
             align_result = tts_processor.align_segments(
-                segments_dir=preview_segments_dir, sentences=preview_sentences,
+                segments_dir=job_segments_dir, sentences=preview_sentences,
                 language=language, aligner_device=aligner_device,
                 english_word_align=english_word_align,
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 progress_cb=_progress_cb,
             )
-            shutil.rmtree(preview_segments_dir, ignore_errors=True)
+            shutil.rmtree(job_segments_dir, ignore_errors=True)
 
             if not align_result.get("success"):
-                Path(preview_wav_path).unlink(missing_ok=True)
                 set_job(
                     job_id, status="failed", finished_at=datetime.now().isoformat(),
                     error=align_result.get("error", "Qwen3-FA 对齐失败"), result=align_result,
@@ -2586,7 +2776,7 @@ def run_tts_pipeline_job(
                 return
 
             final_wav_path = str(WORK_DIR / f"{stem}.wav")
-            shutil.move(preview_wav_path, final_wav_path)
+            shutil.copyfile(preview_wav_path, final_wav_path)
             final_lab_path = str(WORK_DIR / f"{stem}.lab")
             Path(final_lab_path).write_text(align_result["lab_content"], encoding="utf-8")
 
@@ -2609,6 +2799,7 @@ def run_tts_pipeline_job(
                 aligner_device=aligner_device, english_word_align=english_word_align,
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 progress_cb=_progress_cb,
+                qwen3_tts_options=qwen3_tts_options,
             )
 
         if not tts_result.get("success"):
@@ -2679,6 +2870,16 @@ def tts_process():
                             "full"（默认，完整处理：标注 + F0 + 工程文件）
       - 其余参数（format / title / bpm / f0_* / word_phoneme_map / dict_source 等）
         与 /api/pipeline/full 含义一致
+      - qwen3_tts_options : engine="qwen3_tts" 时必填，JSON 字符串，
+                            字段见 tts_processor._qwen3_tts_synth_to_file()
+                            顶部说明（mode/instruct/ref_text/x_vector_only/
+                            size/device 等）；voice_clone 模式的参考音频
+                            通过下面的 ref_audio 文件字段单独上传，不放进
+                            这个 JSON 里（避免 base64 把 form 字段撑得过大）。
+      - ref_audio         : 可选文件字段，engine="qwen3_tts" 且
+                            qwen3_tts_options.mode="voice_clone" 时必填
+                            （若该预设/表单已经指定了 ref_audio_path 则可
+                            不传文件，直接在 qwen3_tts_options 里带路径）。
     """
     try:
         payload = request.form
@@ -2688,10 +2889,36 @@ def tts_process():
             return jsonify({"error": "缺少 text"}), 400
 
         voice = payload.get("voice", "").strip()
-        if not voice:
+        engine = payload.get("engine", "").strip() or tts_processor.DEFAULT_ENGINE
+
+        qwen3_tts_options: Optional[Dict] = None
+        if engine == "qwen3_tts":
+            raw_opts = payload.get("qwen3_tts_options", "").strip()
+            try:
+                qwen3_tts_options = json.loads(raw_opts) if raw_opts else {}
+            except Exception:
+                return jsonify({"error": "qwen3_tts_options 不是合法的 JSON"}), 400
+            qwen3_mode = (qwen3_tts_options.get("mode") or "custom_voice").strip()
+
+            # Voice Clone 模式：参考音频可以随表单上传（ref_audio 文件字段），
+            # 落盘到 WORK_DIR 下的临时子目录，路径写回 options 供
+            # tts_processor 使用；如果前端已经给了 ref_audio_path（例如
+            # 复用"语音预设管理"里保存好的预设，参考音频早已落盘），则跳过。
+            if qwen3_mode == "voice_clone" and not qwen3_tts_options.get("ref_audio_path"):
+                ref_audio_file = request.files.get("ref_audio")
+                if ref_audio_file and ref_audio_file.filename:
+                    ref_dir = WORK_DIR / "_tts_ref_audio"
+                    ref_dir.mkdir(parents=True, exist_ok=True)
+                    ref_ext = Path(ref_audio_file.filename).suffix or ".wav"
+                    ref_path = ref_dir / f"ref_{uuid.uuid4().hex[:10]}{ref_ext}"
+                    ref_audio_file.save(str(ref_path))
+                    qwen3_tts_options["ref_audio_path"] = str(ref_path)
+                elif not qwen3_tts_options.get("ref_audio_base64"):
+                    return jsonify({"error": "Voice Clone 模式需要提供参考音频"}), 400
+
+        if not voice and not (engine == "qwen3_tts" and (qwen3_tts_options or {}).get("mode") in ("voice_design", "voice_clone")):
             return jsonify({"error": "缺少 voice（音色）"}), 400
 
-        engine = payload.get("engine", "").strip() or tts_processor.DEFAULT_ENGINE
         language = payload.get("language", "cmn")
         rate = payload.get("rate", "+0%")
         volume = payload.get("volume", "+0%")
@@ -2750,6 +2977,7 @@ def tts_process():
         preview_entry = _tts_preview_take(preview_id, {
             "text": text, "engine": engine, "voice": voice,
             "rate": rate, "volume": volume, "pitch": pitch, "language": language,
+            "qwen3_tts_options_json": json.dumps(qwen3_tts_options or {}, sort_keys=True),
         }) if preview_id else None
 
         job_id = uuid.uuid4().hex
@@ -2785,6 +3013,7 @@ def tts_process():
                 preview_segments_dir=(preview_entry or {}).get("segments_dir"),
                 preview_sentences=(preview_entry or {}).get("sentences"),
                 preview_wav_path=(preview_entry or {}).get("wav_path"),
+                qwen3_tts_options=qwen3_tts_options,
             ),
         ).start()
 

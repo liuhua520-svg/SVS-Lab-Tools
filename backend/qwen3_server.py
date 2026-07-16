@@ -257,49 +257,143 @@ def _normalize_segments(result: Any) -> List[Dict[str, Any]]:
 
 
 _model_device: str = "auto"   # 记录当前模型加载时所用的 device_override
+_model_batch_size: int = 8    # 记录当前模型加载时所用的 max_inference_batch_size
 
 
-def load_model(device_override: str = "auto"):
-    global _model, _model_device
+def _is_cuda_oom_or_env_error(exc: Exception) -> bool:
+    """
+    与 alt_aligners.py / nemo_server.py 里同名函数用途一致（各进程相互
+    独立，无法直接 import，各自维护一份）：判断异常是否属于"显存不足"
+    或"CUDA 环境本身有问题"，命中时应该整体切换到 CPU 重试，而不是把
+    原始报错直接抛给调用方。
+    """
+    msg = str(exc).lower()
+    _KEYWORDS = (
+        "out of memory",
+        "cuda out of memory",
+        "cublas_status_alloc_failed",
+        "cudnn_status_not_initialized",
+        "cuda error",
+        "no cuda gpus are available",
+        "cuda driver",
+        "cuda toolkit",
+        "cuda-capable device",
+        "cuda initialization",
+        "cuda_error",
+        "device-side assert",
+        "nvrtc",
+        "nvml",
+    )
+    return any(kw in msg for kw in _KEYWORDS)
+
+
+def load_model(device_override: str = "auto", batch_size: int = 8):
+    """
+    惰性加载并缓存 Qwen3-ASR 模型。
+
+    batch_size 透传给 qwen_asr 官方的 max_inference_batch_size 参数
+    （限制模型内部单次推理的最大批量；值越小，显存占用峰值越低，见
+    https://github.com/QwenLM/Qwen3-ASR 的 Python Package Usage 示例）。
+    与 device_override 一样，作为缓存 key 的一部分——batch_size 改变时
+    需要重新加载模型（forced_aligner 的初始化参数与 ASR 主模型绑定在
+    同一次 from_pretrained 调用里，无法只热更新这一个数值）。
+    """
+    global _model, _model_device, _model_batch_size
 
     with _model_lock:
-        # 如果已有模型且设备未变化，直接复用
-        if _model is not None and _model_device == device_override:
+        # 如果已有模型且设备、batch_size 均未变化，直接复用
+        if _model is not None and _model_device == device_override and _model_batch_size == batch_size:
             return _model
 
-        # 设备变化或首次加载
+        # 设备或 batch_size 变化，或首次加载
         if _model is not None:
-            logger.info(f"设备从 '{_model_device}' 切换到 '{device_override}'，重新加载模型...")
+            logger.info(
+                f"配置从 device='{_model_device}' batch_size={_model_batch_size} 变为 "
+                f"device='{device_override}' batch_size={batch_size}，重新加载模型..."
+            )
             _model = None
+            try:
+                import torch as _torch_reload
+                if _torch_reload.cuda.is_available():
+                    _torch_reload.cuda.empty_cache()
+            except Exception:
+                pass
 
         logger.info("正在初始化 Qwen3-ASR 服务...")
         device_map, dtype = _pick_device_and_dtype(device_override)
-        logger.info(f"使用设备: {device_map}, dtype: {dtype}")
+        logger.info(f"使用设备: {device_map}, dtype: {dtype}, batch_size: {batch_size}")
 
-        try:
-            import torch
-            from qwen_asr import Qwen3ASRModel
+        import torch
+        from qwen_asr import Qwen3ASRModel
 
+        def _build(_device_map: str, _dtype, _batch_size: int):
             kwargs = {
-                "dtype": dtype,
-                "device_map": device_map,
-                "max_inference_batch_size": 8 if device_map.startswith("cuda") else 1,
+                "dtype": _dtype,
+                "device_map": _device_map,
+                "max_inference_batch_size": _batch_size if _device_map.startswith("cuda") else 1,
                 "max_new_tokens": 256,
             }
-
             # 统一启用 forced aligner，这样客户端更容易拿到时间戳
             kwargs["forced_aligner"] = FORCED_ALIGNER_ID
             kwargs["forced_aligner_kwargs"] = {
-                "dtype": dtype,
-                "device_map": device_map,
+                "dtype": _dtype,
+                "device_map": _device_map,
             }
+            return Qwen3ASRModel.from_pretrained(MODEL_ID, **kwargs)
 
-            _model = Qwen3ASRModel.from_pretrained(MODEL_ID, **kwargs)
+        try:
+            _model = _build(device_map, dtype, batch_size)
             _model_device = device_override
+            _model_batch_size = batch_size
             logger.info("✅ Qwen3-ASR 模型加载成功！服务已就绪。")
             return _model
-
         except Exception as e:
+            # 【显存不足 / CUDA 环境异常自动降级】加载阶段本身也可能因为
+            # 显存不足或 CUDA Toolkit 缺失/版本不匹配而失败。命中这类错误
+            # 且当前不是已经在 CPU 上尝试时，自动整体切换到 CPU 重新加载，
+            # 不把原始 CUDA 报错直接抛给 /asr 路由。真正因为 batch_size
+            # 过大导致的显存不足，理论上应该先尝试腰斩 batch_size 重试
+            # （更快、不需要换设备），这里补上这一层，与 CPU 兜底分两级：
+            if device_map.startswith("cuda") and _is_cuda_oom_or_env_error(e) and batch_size > 1:
+                half_batch = max(1, batch_size // 2)
+                logger.warning(
+                    f"⚠️  加载 Qwen3-ASR 失败（{e}），尝试腰斩 "
+                    f"max_inference_batch_size: {batch_size} → {half_batch} 重试..."
+                )
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                try:
+                    _model = _build(device_map, dtype, half_batch)
+                    _model_device = device_override
+                    _model_batch_size = half_batch
+                    logger.info(
+                        f"✅ Qwen3-ASR 模型加载成功（batch_size 降级为 {half_batch}）！服务已就绪。"
+                    )
+                    return _model
+                except Exception as e2:
+                    e = e2  # 落入下面的 CPU 兜底分支
+
+            if device_map.startswith("cuda") and _is_cuda_oom_or_env_error(e):
+                logger.warning(f"⚠️  在 GPU 上加载 Qwen3-ASR 失败（{e}），自动切换到 CPU 重新加载...")
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                try:
+                    _model = _build("cpu", torch.float32, 1)
+                    _model_device = "cpu"
+                    _model_batch_size = 1
+                    logger.info("✅ Qwen3-ASR 模型加载成功（已回退到 CPU）！服务已就绪。")
+                    return _model
+                except Exception as e3:
+                    logger.error(f"❌ CPU 兜底加载仍然失败: {e3}", exc_info=True)
+                    _model = None
+                    return None
+
             logger.error(f"❌ 模型加载失败: {e}", exc_info=True)
             _model = None
             return None
@@ -313,6 +407,8 @@ def health():
             "message": "Qwen3-ASR service is running",
             "model_loaded": _model is not None,
             "model_id": MODEL_ID,
+            "device": _model_device if _model is not None else None,
+            "batch_size": _model_batch_size if _model is not None else None,
         }
     )
 
@@ -383,7 +479,15 @@ def asr():
     if device_override not in ("auto", "cpu", "cuda"):
         device_override = "auto"
 
-    model = load_model(device_override)
+    # 客户端可传 "batch_size" 覆盖 max_inference_batch_size（见
+    # load_model() 顶部说明）；非法/缺失值回退为 8，与
+    # app_settings.DEFAULT_SETTINGS["qwen3_batch_size"] 的默认值一致。
+    try:
+        batch_size = max(1, int(data.get("batch_size", 8)))
+    except (TypeError, ValueError):
+        batch_size = 8
+
+    model = load_model(device_override, batch_size)
     if model is None:
         return jsonify({"success": False, "error": "模型未加载"}), 500
 
@@ -401,12 +505,48 @@ def asr():
 
         # qwen_asr 官方接口：transcribe
         # return_time_stamps=True 便于客户端构建 LAB
-        result = model.transcribe(
-            audio=audio_path,
-            language=language,
-            context=context,
-            return_time_stamps=True,
-        )
+        #
+        # 【显存不足自动降级】即使模型加载阶段成功，真正推理时仍可能因为
+        # 单条音频过长/内容复杂而 CUDA OOM（尤其在批大小较大、显存本身
+        # 紧张的显卡上）。命中时按 load_model() 同样的两级降级策略重试：
+        # 先尝试腰斩 max_inference_batch_size 重新加载模型再推理一次，
+        # 仍不行则整体切换到 CPU 重新加载再推理一次。
+        try:
+            result = model.transcribe(
+                audio=audio_path,
+                language=language,
+                context=context,
+                return_time_stamps=True,
+            )
+        except Exception as e:
+            if not _is_cuda_oom_or_env_error(e):
+                raise
+            logger.warning(f"[Qwen3-ASR] 推理失败（{e}），尝试自动降级重试...")
+            try:
+                import torch as _torch_oom
+                if _torch_oom.cuda.is_available():
+                    _torch_oom.cuda.empty_cache()
+            except Exception:
+                pass
+
+            retried = False
+            if _model_device != "cpu" and batch_size > 1:
+                half_batch = max(1, batch_size // 2)
+                model = load_model(device_override, half_batch)
+                if model is not None:
+                    retried = True
+            if not retried or model is None:
+                model = load_model("cpu", 1)
+
+            if model is None:
+                return jsonify({"success": False, "error": "显存不足自动降级后模型仍加载失败"}), 500
+
+            result = model.transcribe(
+                audio=audio_path,
+                language=language,
+                context=context,
+                return_time_stamps=True,
+            )
 
         segments = _normalize_segments(result)
         raw_text = "".join([seg.get("text", "") for seg in segments]).strip()

@@ -183,6 +183,128 @@ JA_AMBIGUOUS_NASALS: frozenset[str] = frozenset({"n", "m", "ng", "ny"})
 
 
 # ══════════════════════════════════════════════════════════════
+# Japanese devoiced (無声化) mora → target-engine phonetic symbol
+# ══════════════════════════════════════════════════════════════
+# 依据：VOCALOID4 Editor User Manual, Appendix "Phonetic Symbol Table
+# (Japanese)"（見出し記号 / Sample / Comments 三列表）。
+#
+# 该表里少数辅音在"/i/ が後ろに続く"（后接 /i/）等特定条件下，另有
+# 一个专属的"清化/去母音化"记号，与该行辅音在浊音节（如 き→ki）中
+# 使用的普通记号不同：
+#
+#   假名   普通(浊)记号   VOCALOID4去母音化记号   触发条件（据官方表 Comments 列）
+#   き     k             k'                     /i/ が後ろに続く（后接元音 i）
+#   ひ     h              C                     /i/ が後ろに続く（后接元音 i）
+#   ぴ     p              p'                     /i/ が後ろに続く（后接元音 i）
+#   ふ     h\\            p\\                    ふ行本身固定用 p\\（唇齿/双唇擦音），
+#                                                 与后接元音无关（词中形式）
+#
+# く・す・つ・ぷ 这四行在官方表中并没有区别于浊音节的独立"去母音化"
+# 记号——它们的辅音本来就已经是 k / s / ts / p，去母音化只是元音 u
+# 被删去，辅音记号不变，因此不在下表中单独列出（保持恒等映射）。
+#
+# し(sh)/ち(ch) 需要特别注意：VOCALOID4 官方音素表里，这一行的记号
+# 本身就是专属符号 S / tS（而不是罗马字 sh/ch），无论是否去母音化都
+# 不变；但这只对 VOCALOID4/VSQX 成立——SynthesizerV(SVP) 用的是自己
+# 的罗马字体系，认的是 "sh"/"ch"，不认识 "S"/"tS"。因此本模块按
+# target（"vocaloid4" vs "synthesizerv"）分别解析，两边各自保留正确
+# 的记号，不再共用同一份映射：
+#
+#   假名   SVP(罗马字)记号   VOCALOID4记号
+#   し     sh                S
+#   ち     ch                tS
+#
+# 本表的 key 是 build_ja_merged_lab() 里已经产出的"辅音起始"记号
+# （即 pending[2]，例如 'k' / 'sh' / 'ch' / 'h' / 'f' / 'p'），而不是
+# 假名本身；因为 build_ja_merged_lab 在合并 C+V 时只保留辅音部分，
+# 判断去母音化与否靠的是元音是否为大写 I/U（MFA 无声化标记），具体
+# 该用哪个符号则由本表按"这一行辅音 + 后接元音 + 目标引擎"决定。
+JA_DEVOICED_ONSET_TO_VOCALOID4_I: dict[str, str] = {
+    # 后接 /i/ 时使用的 VOCALOID4 去母音化记号（き/ひ/ぴ/し行）
+    "k": "k'",
+    "h": "C",
+    "p": "p'",
+    "sh": "S",
+}
+
+JA_DEVOICED_ONSET_TO_VOCALOID4_U: dict[str, str] = {
+    # 后接 /u/ 时的 VOCALOID4 去母音化记号；ふ行固定用 p\\（与元音无关），
+    # く/す/つ 保持恒等（不在表中，回退到原始 pending[2]）。
+    "f": "p\\",
+}
+
+# ち(ch) 的去母音化记号与后接元音无关（ち行只有 chi，没有 chu），
+# 无论 build_ja_merged_lab 传入的元音是什么，VOCALOID4 都固定用 tS。
+JA_DEVOICED_ONSET_TO_VOCALOID4_ANY: dict[str, str] = {
+    "ch": "tS",
+}
+
+# SynthesizerV(SVP) 路径：去母音化只删元音，辅音记号本身保持
+# SynthesizerV 自己的罗马字体系不变（sh 仍是 sh、ch 仍是 ch），
+# 因此没有独立映射表——所有辅音一律回退到原始 consonant_onset。
+# 显式列出仅作为文档说明，函数里按 target 分支直接 passthrough。
+
+
+def ja_devoiced_onset_to_vocaloid4(
+    consonant_onset: str,
+    vowel: str,
+    target: str = "vocaloid4",
+) -> str:
+    """
+    把"辅音起始 romaji 记号 + 该音节的（去母音化）元音"转换为目标引擎
+    对应的去母音化符号。
+
+    Parameters
+    ----------
+    consonant_onset : str
+        build_ja_merged_lab() 里 pending[2] 保存的辅音起始 romaji 记号，
+        如 'k' (き/く)、'sh' (し)、'ch' (ち)、'h' (ひ)、'f' (ふ)、
+        'p' (ぴ/ぷ) 等。
+    vowel : str
+        该音节的元音（已转小写，如 'i' / 'u'），用于区分き/く、ぴ/ぷ
+        这类同辅音不同元音、去母音化记号不同的情况。
+    target : str
+        'vocaloid4'    （默认）→ 按 VOCALOID4 Editor 官方音素表返回，
+                          き/ひ/ぴ/し/ち 使用专属符号（k'/C/p'/S/tS），
+                          写入 VSQX 的 <p lock="1"> 时必须使用本形式，
+                          否则 VOCALOID 引擎无法正确发去母音化音。
+        'synthesizerv' → SynthesizerV 自己的罗马字体系，去母音化只是
+                          删掉元音、辅音记号原样保留（sh 仍是 sh、
+                          ch 仍是 ch，没有 S/tS 这种专属符号），用于
+                          写入 SVP 的 phonemes 字段。
+
+    Returns
+    -------
+    str
+        目标引擎对应的去母音化符号；若该辅音在对应表中没有独立记号，
+        原样返回 consonant_onset，不做改动。
+    """
+    if target == "synthesizerv":
+        # SVP 仅对用户指定的 き/ひ/ぴ、く/ふ/ぷ 保留元音；
+        # し/す/ち/つ 继续使用纯辅音去母音化结果。
+        if (vowel == "i" and consonant_onset in {"k", "h", "p"}) or (
+            vowel == "u" and consonant_onset in {"k", "f", "p"}
+        ):
+            return f"{consonant_onset} {vowel}"
+        return consonant_onset
+
+    # target == "vocaloid4"（默认，覆盖旧调用方不传 target 的情况）
+    if consonant_onset in JA_DEVOICED_ONSET_TO_VOCALOID4_ANY:
+        return JA_DEVOICED_ONSET_TO_VOCALOID4_ANY[consonant_onset]
+    if vowel == "i":
+        mapped = JA_DEVOICED_ONSET_TO_VOCALOID4_I.get(consonant_onset, consonant_onset)
+        if consonant_onset in {"k", "h", "p"}:
+            return f"{mapped} i"
+        return mapped
+    if vowel == "u":
+        mapped = JA_DEVOICED_ONSET_TO_VOCALOID4_U.get(consonant_onset, consonant_onset)
+        if consonant_onset in {"k", "f", "p"}:
+            return f"{mapped} M"
+        return mapped
+    return consonant_onset
+
+
+# ══════════════════════════════════════════════════════════════
 # English  MFA IPA / ARPAbet  →  ARPAbet (lowercase)
 # ══════════════════════════════════════════════════════════════
 
@@ -1327,7 +1449,9 @@ def katakana_to_romaji_moras(katakana: str) -> list[tuple[str, str]]:
 def build_ja_merged_lab(
     entries: list[tuple[int, int, str]],
     output: str = "romaji",
-) -> list[tuple[int, int, str]]:
+    with_devoiced_phoneme: bool = False,
+    devoiced_target: str = "vocaloid4",
+) -> list[tuple[int, int, str]] | list[tuple[int, int, str, Optional[str]]]:
     """
     Merge consecutive consonant-onset + vowel segments into a single entry
     whose time span covers *both* the consonant and the vowel.
@@ -1340,33 +1464,78 @@ def build_ja_merged_lab(
     ----------
     entries : list of (start_100ns, end_100ns, romaji_phoneme)
               Input must already be in romaji (IPA → romaji conversion should
-              be done beforehand via convert_phoneme(ph, 'ja')).
+              be done beforehand via convert_phoneme(ph, 'ja')). Devoiced
+              vowels must arrive as uppercase 'I' / 'U' (MFA japanese_mfa
+              convention); voiced vowels are lowercase 'a'/'i'/'u'/'e'/'o'.
     output  :
         'romaji'   → keep as merged romaji string  (e.g. 'sa', 'N', 'pu', 'ru')
         'hiragana' → convert to hiragana            (e.g. 'さ', 'ん', 'ぷ', 'る')
         'katakana' → convert to katakana            (e.g. 'サ', 'ン', 'プ', 'ル')
+    with_devoiced_phoneme :
+        False (default) → return list of (start_100ns, end_100ns, label),
+                           exactly as before (backward compatible).
+        True  → return list of (start_100ns, end_100ns, label, devoiced_phoneme),
+                 where devoiced_phoneme is the **target-engine devoiced
+                 phonetic symbol** for this syllable (resolved via
+                 ja_devoiced_onset_to_vocaloid4(), see devoiced_target
+                 below) — populated
+                 ONLY when the vowel in this syllable was actually devoiced
+                 (i.e. arrived as uppercase 'I'/'U'). For voiced syllables
+                 (e.g. ご/go), standalone vowels, mora nasal (ん/ン/N), and
+                 geminate (っ/ッ), devoiced_phoneme is None — nothing was
+                 devoiced, so nothing should override the normal pronunciation.
+    devoiced_target :
+        'vocaloid4'    （默认）→ devoiced_phoneme 使用 VOCALOID4 Editor
+                          官方音素表符号：多数行保持辅音本身
+                          （す→su devoiced → 's'、つ→tsu devoiced →
+                          'ts'），但 き/ひ/ぴ/し/ち 有专属去母音化记号
+                          （き→"k'"、ひ→"C"、ぴ→"p'"、し→"S"、ち→"tS"），
+                          ふ固定为 "p\\"。写入 VSQX 的 <p lock="1"> 时
+                          必须用这个 target，否则 VOCALOID 引擎无法
+                          正确发去母音化音。
+        'synthesizerv' → devoiced_phoneme 使用 SynthesizerV 自己的罗马字
+                          体系：所有行的辅音记号原样保留（す→'s'、
+                          し→'sh'、ち→'ch'……都不变，没有 k'/C/p'/S/tS
+                          这类专属符号），只是元音被删去。写入 SVP 的
+                          phonemes 字段时应使用这个 target。
 
     Returns
     -------
-    list of (start_100ns, end_100ns, label)
+    list of (start_100ns, end_100ns, label)                           [default]
+    list of (start_100ns, end_100ns, label, devoiced_phoneme)          [with_devoiced_phoneme=True]
 
     Examples
     --------
-    Input (romaji):
+    Input (romaji, U is devoiced):
         (50000,  1450000, 's')
-        (1450000, 2200000, 'a')
+        (1450000, 2200000, 'U')
         (2200000, 3050000, 'N')
-        (3050000, 3800000, 'p')
-        (3800000, 4750000, 'u')
-        (4750000, 5250000, 'r')
-        (5250000, 7000000, 'u')
+        (3050000, 3800000, 'g')
+        (3800000, 4750000, 'o')
 
-    output='romaji'   → [(50000,2200000,'sa'), (2200000,3050000,'N'),
-                          (3050000,4750000,'pu'), (4750000,7000000,'ru')]
-    output='hiragana' → [(50000,2200000,'さ'), (2200000,3050000,'ん'),
-                          (3050000,4750000,'ぷ'), (4750000,7000000,'る')]
-    output='katakana' → [(50000,2200000,'サ'), (2200000,3050000,'ン'),
-                          (3050000,4750000,'プ'), (4750000,7000000,'ル')]
+    output='romaji'   → [(50000,2200000,'su'), (2200000,3050000,'N'),
+                          (3050000,4750000,'go')]
+    output='hiragana' → [(50000,2200000,'す'), (2200000,3050000,'ん'),
+                          (3050000,4750000,'ご')]
+
+    with_devoiced_phoneme=True, output='hiragana' →
+        [(50000,2200000,'す','s'), (2200000,3050000,'ん',None),
+         (3050000,4750000,'ご',None)]
+        (su is devoiced, and す has no distinct VOCALOID4 devoiced symbol
+         → falls back to plain 's'; ん has no onset → None; go is voiced → None)
+
+    A き (ki) example, where VOCALOID4 *does* have a distinct devoiced
+    symbol, contrasts with the す case above:
+        Input: [('k', ..), ('I', ..)]  (I = devoiced i)
+        with_devoiced_phoneme=True, output='hiragana' →
+            [(.., .., 'き', "k'")]   ← NOT 'k' — VOCALOID4's official
+                                        devoiced symbol for き is "k'"
+
+    A し (shi) example, showing devoiced_target divergence between the
+    two engines:
+        Input: [('sh', ..), ('I', ..)]  (I = devoiced i)
+        devoiced_target='vocaloid4'    → [(.., .., 'し', "S")]
+        devoiced_target='synthesizerv' → [(.., .., 'し', "sh")]
     """
 
     def _mora_label() -> str:
@@ -1387,7 +1556,12 @@ def build_ja_merged_lab(
             return hiragana_to_katakana(hira) if output == "katakana" else hira
         return cv  # romaji passthrough
 
-    result: list[tuple[int, int, str]] = []
+    def _emit(start: int, end: int, label: str, devoiced: Optional[str]) -> tuple:
+        if with_devoiced_phoneme:
+            return (start, end, label, devoiced)
+        return (start, end, label)
+
+    result: list[tuple] = []
     n = len(entries)
     # pending = (start_100ns, end_100ns, romaji_consonant) awaiting a vowel
     pending: tuple[int, int, str] | None = None
@@ -1398,14 +1572,29 @@ def build_ja_merged_lab(
 
         # ── Vowel ────────────────────────────────────────────
         if ph.lower() in JA_VOWELS:
-            ph_v = ph.lower()   # normalize devoiced I → i, U → u
+            is_devoiced = ph != ph.lower()   # True only for uppercase I/U (MFA devoicing marker)
+            ph_v = ph.lower()                # normalize devoiced I → i, U → u for the label itself
             if pending is not None:
                 cv = pending[2] + ph_v
-                # Merged entry: consonant_start → vowel_end
-                result.append((pending[0], end, _cv_label(cv)))
+                # Merged entry: consonant_start → vowel_end.
+                # devoiced_phoneme = VOCALOID4 official devoiced phonetic
+                # symbol for this consonant onset + vowel (e.g. き→k',
+                # ひ→C, ぴ→p', ふ→p\; く/す/つ/ぷ fall back to their plain
+                # onset since VOCALOID4 has no distinct devoiced symbol for
+                # them — see ja_devoiced_onset_to_vocaloid4()), but ONLY
+                # when this vowel was actually devoiced — a voiced syllable
+                # (e.g. 'go') keeps its normal pronunciation and gets None
+                # here, since nothing should be overridden for it.
+                result.append(_emit(
+                    pending[0], end, _cv_label(cv),
+                    ja_devoiced_onset_to_vocaloid4(
+                        pending[2], ph_v, target=devoiced_target
+                    ) if is_devoiced else None,
+                ))
                 pending = None
             else:
-                result.append((start, end, _cv_label(ph_v)))
+                # Standalone vowel: no consonant onset → never devoiced-onset.
+                result.append(_emit(start, end, _cv_label(ph_v), None))
             i += 1
             continue
 
@@ -1413,9 +1602,10 @@ def build_ja_merged_lab(
         if ph in JA_MORA_NASAL_PHONEMES:
             if pending is not None:
                 # Flush pending consonant without a vowel → '-'
-                result.append((pending[0], pending[1], "-"))
+                result.append(_emit(pending[0], pending[1], "-", None))
                 pending = None
-            result.append((start, end, _mora_label()))
+            # ん/ン/N has no consonant onset → devoiced_phoneme is always None.
+            result.append(_emit(start, end, _mora_label(), None))
             i += 1
             continue
 
@@ -1425,13 +1615,13 @@ def build_ja_merged_lab(
             is_mora = (next_ph is None) or (next_ph.lower() not in JA_VOWELS)
             if is_mora:
                 if pending is not None:
-                    result.append((pending[0], pending[1], "-"))
+                    result.append(_emit(pending[0], pending[1], "-", None))
                     pending = None
-                result.append((start, end, _mora_label()))
+                result.append(_emit(start, end, _mora_label(), None))
             else:
                 # Treat as consonant onset (will combine with next vowel)
                 if pending is not None:
-                    result.append((pending[0], pending[1], "-"))
+                    result.append(_emit(pending[0], pending[1], "-", None))
                 pending = (start, end, ph)
             i += 1
             continue
@@ -1442,22 +1632,23 @@ def build_ja_merged_lab(
         # 而非与后续元音合并（避免输出错误的音节，如 "cchi" 等）。
         if ph == "cl":
             if pending is not None:
-                result.append((pending[0], pending[1], "-"))
+                result.append(_emit(pending[0], pending[1], "-", None))
                 pending = None
             cl_char = "ッ" if output == "katakana" else "っ"
-            result.append((start, end, cl_char))
+            # っ/ッ has no consonant onset → devoiced_phoneme is always None.
+            result.append(_emit(start, end, cl_char, None))
             i += 1
             continue
 
         # ── Other consonant ────────────────────────────────────────────
         if pending is not None:
-            result.append((pending[0], pending[1], "-"))
+            result.append(_emit(pending[0], pending[1], "-", None))
         pending = (start, end, ph)
         i += 1
 
     # Trailing consonant with no following vowel → '-'
     if pending is not None:
-        result.append((pending[0], pending[1], "-"))
+        result.append(_emit(pending[0], pending[1], "-", None))
 
     return result
 
@@ -1475,7 +1666,9 @@ _MERGE_SILENCE: frozenset[str] = frozenset(
 def apply_phoneme_mode(
     segments: list[tuple[int, int, str]],
     mode: str,
-) -> list[tuple[int, int, str]]:
+    with_devoiced_phoneme: bool = False,
+    devoiced_target: str = "vocaloid4",
+) -> list[tuple[int, int, str]] | list[tuple[int, int, str, Optional[str]]]:
     """
     Apply a phoneme-mode transformation to a flat list of LAB segments.
 
@@ -1489,10 +1682,26 @@ def apply_phoneme_mode(
         'merge'    → merge C+V pairs into romaji syllables (s+a → sa)
         'hiragana' → merge C+V and convert to hiragana     (s+a → さ)
         'katakana' → merge C+V and convert to katakana     (s+a → サ)
+    with_devoiced_phoneme :
+        False (default) → return list of (start_100ns, end_100ns, label),
+                           exactly as before (backward compatible).
+        True  → return list of (start_100ns, end_100ns, label, devoiced_phoneme).
+                 devoiced_phoneme is the devoicing-reduced consonant onset
+                 (e.g. 's', 'sh', 'ky') for syllables whose vowel was actually
+                 devoiced in the source LAB (uppercase 'I'/'U'), and None for
+                 everything else — voiced syllables, silence segments,
+                 standalone vowels, ん/ン/N, and っ/ッ. None means "don't
+                 override the normal pronunciation" (e.g. leave VSQX <p>
+                 unlocked / leave SVP phonemes empty).
+                 Ignored when mode == 'none' (nothing was merged).
+    devoiced_target :
+        'vocaloid4' 或 'synthesizerv'。决定去母音化覆盖音素使用
+        VSQX 记号还是 SVP 记号。
 
     Returns
     -------
     Transformed list of (start_100ns, end_100ns, label), sorted by start time.
+    With with_devoiced_phoneme=True: (start_100ns, end_100ns, label, devoiced_phoneme).
 
     Notes
     -----
@@ -1504,18 +1713,25 @@ def apply_phoneme_mode(
       results; use mode='none' for Chinese / English / Korean LAB files.
     """
     if mode == "none":
+        if with_devoiced_phoneme:
+            return [(s, e, lbl, None) for (s, e, lbl) in segments]
         return list(segments)
 
     phoneme_output = "romaji" if mode == "merge" else mode
 
     # Split on silence boundaries, process each phoneme run with
     # build_ja_merged_lab(), then reassemble with silence in place.
-    result: list[tuple[int, int, str]] = []
+    result: list[tuple] = []
     phoneme_buf: list[tuple[int, int, str]] = []
 
     def _flush() -> None:
         if phoneme_buf:
-            merged = build_ja_merged_lab(phoneme_buf, output=phoneme_output)
+            merged = build_ja_merged_lab(
+                phoneme_buf,
+                output=phoneme_output,
+                with_devoiced_phoneme=with_devoiced_phoneme,
+                devoiced_target=devoiced_target,
+            )
             result.extend(merged)
             phoneme_buf.clear()
 
@@ -1523,7 +1739,7 @@ def apply_phoneme_mode(
         label = seg[2]
         if label.strip().lower() in _MERGE_SILENCE:
             _flush()
-            result.append(seg)
+            result.append((seg[0], seg[1], seg[2], None) if with_devoiced_phoneme else seg)
         else:
             phoneme_buf.append(seg)
 

@@ -5,11 +5,20 @@ TTS 文本转语音模块（"讲述人" / "TTS跟读" 功能后端）
 设计说明
 ────────
 本模块独立于 MFA / WhisperX / Qwen3-ASR / NeMo-FA 等既有对齐后端，只负责：
-  1. 讲述人档案（名字 + 引擎 + 音色 + 语速/音调/音量）的增删改查（JSON 落盘）；
-  2. 一个可扩展的 TTS 引擎注册表（_ENGINES），当前内置两个引擎：
+  1. 讲述人档案（名字 + 引擎 + 音色 + 语速/音调/音量，Qwen3-TTS 还额外带
+     模式/风格指令/参考音频等字段）的增删改查（JSON 落盘）；
+  2. 一个可扩展的 TTS 引擎注册表（_ENGINES），当前内置三个引擎：
        - "edge_tts"     ：微软 EdgeTTS 在线合成（原有实现）；
        - "windows_sapi" ：调用 Windows 系统自带的语音合成功能（即"讲述人"，
                           通过 SAPI5 / pywin32 驱动，纯本地、不需要联网）；
+       - "qwen3_tts"    ：Qwen3-TTS 独立服务（qwen3tts_server.py，端口
+                          5003），本进程通过 HTTP 调用，不在本进程内加载
+                          模型（依赖较重且与 qwen3_server.py 的
+                          qwen_asr/transformers 版本不完全兼容，见
+                          requirements-qwen3tts.txt 顶部说明）。支持官方
+                          三种模式：CustomVoice（预设音色+可选风格指令）/
+                          VoiceDesign（仅文本描述音色）/ VoiceClone（Base
+                          模型，导入参考音频克隆）。
      后续新增引擎只需要在 _ENGINES 里注册一个新的适配条目即可，不需要改动
      synthesize_and_align() / synthesize_preview() 等上层流程。
   3. 把整段输入文本切分成句子（分段规则见 split_sentences() 顶部说明：优先
@@ -35,6 +44,7 @@ TTS 文本转语音模块（"讲述人" / "TTS跟读" 功能后端）
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -52,6 +62,9 @@ logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parent
 NARRATORS_PATH = PROJECT_DIR / "settings" / "tts_narrators.json"
+# Voice Clone 预设保存时携带的参考音频，落盘到这里长期保留（与工作目录
+# work_dir 的临时文件不同，语音预设需要跨会话持久存在）。
+NARRATOR_REF_AUDIO_DIR = PROJECT_DIR / "settings" / "tts_narrator_ref_audio"
 _narrator_lock = threading.RLock()
 
 IS_WINDOWS = sys.platform.startswith("win")
@@ -141,6 +154,23 @@ def _windows_sapi_check_available() -> Tuple[bool, str]:
         return False, f"未安装 pywin32，无法使用讲述人: pip install pywin32 ({e})"
 
 
+# Qwen3-TTS 独立服务固定本地地址（与 app.py 里 _QWEN3TTS_BASE_URL 保持
+# 一致；qwen3_server.py 用 5001，nemo_server.py 用 5002，本服务用 5003）。
+QWEN3_TTS_BASE_URL = "http://127.0.0.1:5003"
+
+
+def _qwen3_tts_check_available() -> Tuple[bool, str]:
+    try:
+        import requests
+    except ImportError as e:
+        return False, f"未安装 requests: pip install requests ({e})"
+    try:
+        requests.get(QWEN3_TTS_BASE_URL + "/", timeout=2)
+        return True, "Qwen3-TTS 独立服务已可访问"
+    except Exception as e:
+        return False, f"Qwen3-TTS 独立服务不可访问（请先启动 qwen3tts_server.py）: {e}"
+
+
 # 引擎注册表。label_zh 供前端"选择 TTS"下拉框直接展示，不需要再单独维护
 # i18n key——新增引擎只需要在这里追加一行即可在前端出现。
 _ENGINES: Dict[str, Dict] = {
@@ -155,6 +185,12 @@ _ENGINES: Dict[str, Dict] = {
         "label": "EdgeTTS",
         "label_zh": "EdgeTTS",
         "check_available": _edge_tts_check_available,
+    },
+    "qwen3_tts": {
+        "id": "qwen3_tts",
+        "label": "Qwen3-TTS",
+        "label_zh": "Qwen3-TTS",
+        "check_available": _qwen3_tts_check_available,
     },
     # 后续新增引擎（如某个本地 TTS 模型）在此追加一行即可，前端"选择 TTS"
     # 下拉框会自动出现新选项，不需要改动 Vue 组件。
@@ -225,23 +261,51 @@ def list_narrators() -> List[Dict]:
     return sorted(items, key=lambda x: (x.get("name") or ""))
 
 
-def upsert_narrator(profile: Dict) -> Dict:
+def upsert_narrator(profile: Dict, ref_audio_base64: Optional[str] = None,
+                     ref_audio_ext: str = ".wav") -> Dict:
     """
     新建或更新一个讲述人档案（语音预设）。
 
-    profile: {id?, name, engine?, voice, rate, pitch, volume, language}
+    profile: {id?, name, engine?, voice, rate, pitch, volume, language,
+              qwen3_tts_mode?, qwen3_tts_instruct?, qwen3_tts_ref_text?,
+              qwen3_tts_x_vector_only?, qwen3_tts_size?}
       id 为空 / 未提供 → 新建（生成随机 id）；
       id 命中已有档案 → 覆盖更新；否则忽略传入的 id，视为新建。
       engine 未提供时默认为 DEFAULT_ENGINE（向后兼容旧前端/旧数据）。
+
+    ref_audio_base64：仅 engine="qwen3_tts" 且 qwen3_tts_mode="voice_clone"
+      时使用——Voice Clone 预设需要长期持有一份参考音频，与 work_dir 下
+      随对齐任务清理的临时文件不同，这里落盘到 NARRATOR_REF_AUDIO_DIR
+      长期保留。未传入且该预设此前已有参考音频时，沿用旧文件（"编辑预设
+      但不重新上传参考音频"的场景）；传入新音频时覆盖旧文件。
     """
     items = _load_narrators()
     narrator_id = (profile.get("id") or "").strip()
-    if not narrator_id or not any(it.get("id") == narrator_id for it in items):
+    is_existing = bool(narrator_id) and any(it.get("id") == narrator_id for it in items)
+    if not is_existing:
         narrator_id = uuid.uuid4().hex[:12]
 
     engine = (profile.get("engine") or "").strip() or DEFAULT_ENGINE
     if engine not in _ENGINES:
         engine = DEFAULT_ENGINE
+
+    qwen3_tts_mode = (profile.get("qwen3_tts_mode") or "custom_voice").strip()
+    if qwen3_tts_mode not in ("custom_voice", "voice_design", "voice_clone"):
+        qwen3_tts_mode = "custom_voice"
+
+    # 参考音频落盘：优先使用本次传入的新音频；否则（编辑场景）沿用旧档案
+    # 里已经保存过的路径，避免"不重新上传参考音频就把预设的克隆音色弄丢"。
+    ref_audio_path = ""
+    if engine == "qwen3_tts" and qwen3_tts_mode == "voice_clone":
+        if ref_audio_base64:
+            NARRATOR_REF_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+            ext = ref_audio_ext if ref_audio_ext.startswith(".") else f".{ref_audio_ext}"
+            ref_audio_path = str(NARRATOR_REF_AUDIO_DIR / f"{narrator_id}{ext}")
+            Path(ref_audio_path).write_bytes(base64.b64decode(ref_audio_base64))
+        elif is_existing:
+            old = next((it for it in items if it.get("id") == narrator_id), None)
+            if old:
+                ref_audio_path = old.get("qwen3_tts_ref_audio_path", "")
 
     record = {
         "id": narrator_id,
@@ -252,6 +316,15 @@ def upsert_narrator(profile: Dict) -> Dict:
         "pitch": _normalize_pitch(profile.get("pitch")),
         "volume": _normalize_percent(profile.get("volume")),
         "language": (profile.get("language") or "").strip(),
+        # ── Qwen3-TTS 专用字段，其它引擎的预设这些字段留空即可 ──
+        "qwen3_tts_mode": qwen3_tts_mode,
+        "qwen3_tts_size": (profile.get("qwen3_tts_size") or "1.7B").strip() or "1.7B",
+        # custom_voice：可选风格指令；voice_design：必填的音色描述文本。
+        "qwen3_tts_instruct": (profile.get("qwen3_tts_instruct") or "").strip(),
+        # voice_clone：参考音频转录内容 + 是否仅用 x-vector + 参考音频路径。
+        "qwen3_tts_ref_text": (profile.get("qwen3_tts_ref_text") or "").strip(),
+        "qwen3_tts_x_vector_only": bool(profile.get("qwen3_tts_x_vector_only", False)),
+        "qwen3_tts_ref_audio_path": ref_audio_path,
     }
 
     replaced = False
@@ -269,10 +342,19 @@ def upsert_narrator(profile: Dict) -> Dict:
 
 def delete_narrator(narrator_id: str) -> bool:
     items = _load_narrators()
+    target = next((it for it in items if it.get("id") == narrator_id), None)
     new_items = [it for it in items if it.get("id") != narrator_id]
     changed = len(new_items) != len(items)
     if changed:
         _save_narrators(new_items)
+        # 顺带清理该预设持久化的 Voice Clone 参考音频文件，避免孤儿文件
+        # 长期堆积在 NARRATOR_REF_AUDIO_DIR 里。
+        ref_path = (target or {}).get("qwen3_tts_ref_audio_path")
+        if ref_path:
+            try:
+                Path(ref_path).unlink(missing_ok=True)
+            except Exception:
+                pass
     return changed
 
 
@@ -343,7 +425,36 @@ def list_voices(engine: Optional[str] = None, language: Optional[str] = None) ->
     engine = engine or DEFAULT_ENGINE
     if engine == "windows_sapi":
         return _sapi_list_voices(language)
+    if engine == "qwen3_tts":
+        return _qwen3_tts_list_speakers()
     return _edge_tts_list_voices(language)
+
+
+def _qwen3_tts_list_speakers() -> List[Dict]:
+    """CustomVoice 模式的预设音色列表，从独立服务 /speakers 拉取，与
+    qwen3tts_server.py 里的 CUSTOM_VOICE_SPEAKERS 保持单一数据源。
+    VoiceDesign / VoiceClone 两种模式不使用"预设音色"概念，不出现在这个
+    列表里——前端只在 qwen3TtsMode === 'custom_voice' 时才请求这份列表。"""
+    import requests
+    ok, msg = _qwen3_tts_check_available()
+    if not ok:
+        raise RuntimeError(msg)
+    resp = requests.get(QWEN3_TTS_BASE_URL + "/speakers", timeout=5)
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success"):
+        raise RuntimeError(data.get("error", "获取 Qwen3-TTS 预设音色列表失败"))
+    speakers = data.get("speakers", [])
+    return [
+        {
+            "id": s.get("id"),
+            "name": s.get("name") or s.get("id"),
+            "gender": s.get("gender"),
+            "locale": s.get("locale"),
+            "desc": s.get("desc", ""),
+        }
+        for s in speakers
+    ]
 
 
 def _edge_tts_list_voices(language: Optional[str] = None) -> List[Dict]:
@@ -705,34 +816,113 @@ def _edge_tts_synth_to_file(text: str, voice: str, rate: str, volume: str,
     asyncio.run(_edge_tts_synth_to_file_async(text, voice, rate, volume, pitch, out_path))
 
 
+# Qwen3-TTS 单句合成（通过 HTTP 调用 qwen3tts_server.py 独立服务）。
+# 与 EdgeTTS / 讲述人不同，Qwen3-TTS 没有"语速/音调/音量"这类通用数值
+# 参数（表现力由 instruct 自然语言指令驱动），因此走单独的
+# qwen3_tts_options 字典而不是复用 rate/volume/pitch 三个参数位。
+#
+# options 字段（按 mode 分别使用，与 qwen3tts_server.py 的三个
+# /generate/* 路由一一对应）：
+#   "mode"     : "custom_voice" | "voice_design" | "voice_clone"
+#   "language" : 内部语言短代码或 Qwen 语种全称，缺省服务端按 "Auto" 处理
+#   "size"     : "1.7B" | "0.6B"，缺省 "1.7B"
+#   "device"   : "auto" | "cpu" | "cuda"，缺省 "auto"
+#   custom_voice 专用："instruct"（可选风格指令）
+#   voice_design 专用："instruct"（必填，音色描述文本）
+#   voice_clone  专用："ref_audio_path" / "ref_audio_base64"+"ref_audio_ext"
+#                      （二选一）、"ref_text"、"x_vector_only"(bool)
+#
+# voice 参数：mode="custom_voice" 时作为 speaker（预设音色 id）传给服务
+# 端；其余两种模式不使用"音色"概念，voice 会被忽略。
+def _qwen3_tts_synth_to_file(text: str, voice: str, out_path: str, options: Dict) -> None:
+    import requests
+
+    ok, msg = _qwen3_tts_check_available()
+    if not ok:
+        raise RuntimeError(msg)
+
+    mode = (options.get("mode") or "custom_voice").strip()
+    size = options.get("size") or "1.7B"
+    device = options.get("device") or "auto"
+    language = options.get("language") or ""
+
+    common = {"text": text, "size": size, "device": device, "language": language}
+
+    if mode == "voice_design":
+        instruct = (options.get("instruct") or "").strip()
+        if not instruct:
+            raise ValueError("Voice Design 模式需要填写声音描述（instruct）")
+        payload = {**common, "instruct": instruct}
+        url = QWEN3_TTS_BASE_URL + "/generate/voice_design"
+    elif mode == "voice_clone":
+        payload = {
+            **common,
+            "ref_text": options.get("ref_text", ""),
+            "x_vector_only": bool(options.get("x_vector_only", False)),
+        }
+        if options.get("ref_audio_path"):
+            payload["ref_audio_path"] = options["ref_audio_path"]
+        elif options.get("ref_audio_base64"):
+            payload["ref_audio_base64"] = options["ref_audio_base64"]
+            payload["ref_audio_ext"] = options.get("ref_audio_ext", ".wav")
+        else:
+            raise ValueError("Voice Clone 模式需要提供参考音频")
+        url = QWEN3_TTS_BASE_URL + "/generate/voice_clone"
+    else:  # custom_voice（默认）
+        if not voice:
+            raise ValueError("Custom Voice 模式需要选择预设音色")
+        payload = {**common, "speaker": voice, "instruct": (options.get("instruct") or "").strip() or None}
+        url = QWEN3_TTS_BASE_URL + "/generate/custom_voice"
+
+    # Qwen3-TTS 模型推理（尤其 CPU 上，或首次调用触发模型下载）耗时可能
+    # 明显长于 Qwen3-ASR 的单次转写，超时时间给得更宽松一些。
+    resp = requests.post(url, json=payload, timeout=600)
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success"):
+        raise RuntimeError(data.get("error", "Qwen3-TTS 服务返回失败"))
+
+    audio_bytes = base64.b64decode(data["audio_base64"])
+    Path(out_path).write_bytes(audio_bytes)
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # 单句合成分发器 + 试听预览（按引擎选择实现，向上层完全屏蔽差异）
 # ═════════════════════════════════════════════════════════════════════════
 
 def segment_file_suffix(engine: str) -> str:
-    """该引擎单句合成产物的原生文件后缀（EdgeTTS 输出 mp3，讲述人直接输出 wav）。"""
-    return ".wav" if engine == "windows_sapi" else ".mp3"
+    """该引擎单句合成产物的原生文件后缀（EdgeTTS 输出 mp3，讲述人 / Qwen3-TTS 直接输出 wav）。"""
+    return ".wav" if engine in ("windows_sapi", "qwen3_tts") else ".mp3"
 
 
 def synthesize_segment_to_file(text: str, voice: str, rate: str, volume: str,
                                 pitch: str, out_path: str,
-                                engine: str = DEFAULT_ENGINE) -> None:
-    """同步合成一段文本到 out_path（文件后缀需与 engine 匹配，参见 segment_file_suffix）。"""
+                                engine: str = DEFAULT_ENGINE,
+                                qwen3_tts_options: Optional[Dict] = None) -> None:
+    """同步合成一段文本到 out_path（文件后缀需与 engine 匹配，参见
+    segment_file_suffix）。qwen3_tts_options 仅 engine="qwen3_tts" 时使用，
+    见 _qwen3_tts_synth_to_file() 顶部说明；其余引擎忽略该参数（EdgeTTS /
+    讲述人的 rate/pitch/volume 语速调节对 Qwen3-TTS 没有意义——它的表现力
+    由 instruct 自然语言指令控制，不是数值滑块）。"""
     if engine == "windows_sapi":
         _sapi_synth_to_file(text, voice, rate, volume, pitch, out_path)
+    elif engine == "qwen3_tts":
+        _qwen3_tts_synth_to_file(text, voice, out_path, qwen3_tts_options or {})
     else:
         _edge_tts_synth_to_file(text, voice, rate, volume, pitch, out_path)
 
 
 def synthesize_preview(text: str, voice: str, rate: str = "+0%",
                         volume: str = "+0%", pitch: str = "+0Hz",
-                        engine: str = DEFAULT_ENGINE) -> bytes:
-    """
-    快速试听：只做一次单句合成（不切句、不对齐），返回音频字节数据（EdgeTTS
-    为 mp3，讲述人为 wav），供前端 <audio> 直接播放。预览文本过长时截断到
-    前 200 字——预览的目的是试听音色/语速/音调，不需要整段文本，避免不必要
-    的等待。
-    """
+                        engine: str = DEFAULT_ENGINE,
+                        qwen3_tts_options: Optional[Dict] = None) -> bytes:
+    """快速试听：只做一次单句合成（不切句、不对齐），返回音频字节数据
+    （EdgeTTS 为 mp3，讲述人 / Qwen3-TTS 为 wav），供前端 <audio> 直接
+    播放。预览文本过长时截断到前 200 字。
+
+    qwen3_tts_options 见 _qwen3_tts_synth_to_file() 顶部说明；voice 在
+    engine="qwen3_tts" 且 mode 为 voice_design/voice_clone 时不是必填项
+    （分别改由 instruct / 参考音频驱动）。"""
     ok, msg = check_available(engine)
     if not ok:
         raise RuntimeError(msg)
@@ -740,7 +930,10 @@ def synthesize_preview(text: str, voice: str, rate: str = "+0%",
     text = (text or "").strip()
     if not text:
         raise ValueError("预览文本为空")
-    if not voice:
+
+    qwen3_mode = (qwen3_tts_options or {}).get("mode") or "custom_voice"
+    voice_required = not (engine == "qwen3_tts" and qwen3_mode in ("voice_design", "voice_clone"))
+    if voice_required and not voice:
         raise ValueError("未指定音色")
 
     preview_text = text[:200]
@@ -750,7 +943,7 @@ def synthesize_preview(text: str, voice: str, rate: str = "+0%",
         synthesize_segment_to_file(
             preview_text, voice,
             _normalize_percent(rate), _normalize_percent(volume), _normalize_pitch(pitch),
-            str(tmp_path), engine=engine,
+            str(tmp_path), engine=engine, qwen3_tts_options=qwen3_tts_options,
         )
         return tmp_path.read_bytes()
     finally:
@@ -835,6 +1028,7 @@ def synthesize_segments_only(
     sentence_gap_sec: float = DEFAULT_SENTENCE_GAP_SEC,
     sentences: Optional[List[str]] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    qwen3_tts_options: Optional[Dict] = None,
 ) -> Dict:
     """
     仅执行"逐句 TTS 合成"这一半流程，不做 Qwen3-FA 对齐：
@@ -875,7 +1069,10 @@ def synthesize_segments_only(
     text = (text or "").strip()
     if not text:
         return {"success": False, "error": "文本为空，无法生成语音"}
-    if not voice:
+
+    qwen3_mode = (qwen3_tts_options or {}).get("mode") or "custom_voice"
+    voice_required = not (engine == "qwen3_tts" and qwen3_mode in ("voice_design", "voice_clone"))
+    if voice_required and not voice:
         return {"success": False, "error": "未指定音色"}
 
     # 数字 → 读法文字转换：必须在切句 / 合成之前统一做一次，且切句与后续
@@ -918,7 +1115,8 @@ def synthesize_segments_only(
             seg_raw = segments_dir / f"_raw_{i:04d}{seg_suffix}"
             try:
                 synthesize_segment_to_file(sentence, voice, rate, volume, pitch,
-                                            str(seg_raw), engine=engine)
+                                            str(seg_raw), engine=engine,
+                                            qwen3_tts_options=qwen3_tts_options)
             except Exception as e:
                 logger.error(f"[TTS] 第 {i + 1}/{total} 句合成失败: {e}", exc_info=True)
                 warnings.append(f"第 {i + 1} 句合成失败已跳过：{e}")
@@ -1126,6 +1324,7 @@ def synthesize_and_align(
     sentences: Optional[List[str]] = None,
     align_pitch_shift_semitones: float = 0.0,
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    qwen3_tts_options: Optional[Dict] = None,
 ) -> Dict:
     """
     TTS 跟读主流程（合成 + 对齐一次性做完）：依次调用
@@ -1153,6 +1352,7 @@ def synthesize_and_align(
         text=text, language=language, voice=voice, work_dir=work_dir, stem=stem,
         engine=engine, rate=rate, volume=volume, pitch=pitch,
         sentence_gap_sec=sentence_gap_sec, sentences=sentences, progress_cb=progress_cb,
+        qwen3_tts_options=qwen3_tts_options,
     )
     if not seg_result.get("success"):
         return seg_result

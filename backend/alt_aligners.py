@@ -92,6 +92,45 @@ def _torch_cuda_usable() -> bool:
         return False
 
 
+def _is_cuda_oom_or_env_error(exc: Exception) -> bool:
+    """
+    判断一个异常是否属于"显存不足"或"CUDA 环境本身有问题"（例如未正确
+    安装 CUDA Toolkit / 驱动版本不匹配 / PyTorch 是 CPU-only 版本却被
+    传入 cuda 设备等）——这两类问题的共同点是：重新在 CPU 上加载模型
+    并重试，通常能让任务继续跑完，而不是让用户面对一条难懂的 CUDA
+    报错、手动去改设置重新提交。
+
+    与 WhisperXAligner._transcribe_with_oom_retry() 只判断"out of
+    memory"字样不同，这里额外覆盖几类同样应该触发"整体切到 CPU"的
+    环境类报错关键词（CUDA driver/toolkit 缺失或不匹配、无法初始化
+    CUDA context 等），因为 Qwen3-ForcedAligner / NeMo Forced Aligner
+    没有 batch_size 可降，这些错误单纯重试 GPU 大概率还是失败，不如
+    直接判定为"需要切 CPU"。
+
+    只匹配运行时错误信息里的关键词，不依赖具体异常类型（不同版本的
+    torch / transformers / nemo_toolkit 在这些场景下抛出的异常类型不
+    完全一致，关键词匹配是更稳妥的兼容方式）。
+    """
+    msg = str(exc).lower()
+    _KEYWORDS = (
+        "out of memory",
+        "cuda out of memory",
+        "cublas_status_alloc_failed",
+        "cudnn_status_not_initialized",
+        "cuda error",
+        "no cuda gpus are available",
+        "cuda driver",
+        "cuda toolkit",
+        "cuda-capable device",
+        "cuda initialization",
+        "cuda_error",
+        "device-side assert",
+        "nvrtc",
+        "nvml",
+    )
+    return any(kw in msg for kw in _KEYWORDS)
+
+
 def _safe_device(requested: str) -> str:
     """
     将 'auto' / 'cuda' 解析为真正可用的设备字符串。
@@ -686,6 +725,29 @@ def _get_whisperx_batch_size() -> int:
         return max(1, val)
     except Exception:
         return 16
+
+
+def _get_qwen3_batch_size() -> int:
+    """
+    读取 Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner 共用的
+    batch_size 调优设置（默认 8）。
+
+    与 _get_whisperx_batch_size() 同样的"实时读取、无需重启"约定，见
+    app_settings.get_qwen3_batch_size() 顶部说明。三个后端的具体用法：
+      - Qwen3-ASR：通过 HTTP 请求体的 "batch_size" 字段透传给
+        qwen3_server.py，服务端据此设置 max_inference_batch_size。
+      - Qwen3-ForcedAligner：作为 _align_single_chunk() 显存不足时自动
+        降级重试的起始批大小参考值（见该方法内 OOM 重试逻辑）。
+      - NeMo Forced Aligner：通过 HTTP 请求体的 "batch_size" 字段透传给
+        nemo_server.py，服务端据此决定 OOM 重试的起始降级参考值。
+
+    读取失败或配置值非法时安全回退到 8。
+    """
+    try:
+        import app_settings
+        return app_settings.get_qwen3_batch_size()
+    except Exception:
+        return 8
 
 # ─────────────────────────────────────────────────────────────────────────
 # SudachiPy 惰性单例；
@@ -2421,12 +2483,18 @@ class Qwen3ASRAligner(AltAlignerBase):
         model_id: str = DEFAULT_MODEL,
         device: str = "auto",
         endpoint: str = DEFAULT_ENDPOINT,
+        batch_size: int = 8,
     ):
         super().__init__()
         self.model_id = model_id
         self._device = device
         self.endpoint = endpoint.rstrip("/")
         self._session = None
+        # 透传给 qwen3_server.py /asr 请求体里的 "batch_size" 字段，服务端
+        # 据此设置 qwen_asr 官方的 max_inference_batch_size（见
+        # qwen3_server.py load_model() 顶部说明）。默认 8，与
+        # app_settings.DEFAULT_SETTINGS["qwen3_batch_size"] 一致。
+        self.batch_size = max(1, int(batch_size))
 
     @staticmethod
     def check_available() -> Tuple[bool, str]:
@@ -2456,6 +2524,15 @@ class Qwen3ASRAligner(AltAlignerBase):
             "audio": audio_path,
             "language": language,
             "context": context,
+            # 【修复】此前这里从未发送 "device" 字段，qwen3_server.py 的
+            # /asr 路由因此永远按其内部默认值 "auto" 解析设备，导致用户在
+            # "对齐工具运行设备"里选择 CPU 完全不会对 Qwen3-ASR 生效（与
+            # pipeline.py 里 WhisperX/Qwen3-FA/NeMo-FA 曾经历过的
+            # aligner_device 失效是同一类问题）。这里用 _safe_device() 在
+            # 客户端（主进程）先做一次 CUDA 可用性 smoke-test 再传给独立
+            # 服务进程，与 WhisperXAligner 的设备解析方式保持一致。
+            "device": _safe_device(getattr(self, "_device", "auto")),
+            "batch_size": self.batch_size,
         }
 
         resp = self._session.post(self.endpoint, json=payload, timeout=1800)
@@ -3729,11 +3806,27 @@ def _split_text_by_duration_quota(
 class Qwen3ForcedAligner(AltAlignerBase):
     DEFAULT_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
 
-    def __init__(self, *args, device="cpu", **kwargs):
+    def __init__(self, *args, device="cpu", batch_size: int = 8, **kwargs):
         super().__init__(*args, **kwargs)
 
         self._device = device
         self._model = None
+        # Qwen3-ForcedAligner 官方接口没有真正意义上可调的批大小（每次
+        # align() 调用都是单条音频单次前向），这里保留该参数纯粹是为了
+        # 与 Qwen3ASRAligner / NeMoForcedAligner 构造签名一致、以及在 OOM
+        # 自动降级重试时的日志里作为参考值展示，不影响任何实际推理行为，
+        # 详见 _align_single_chunk() 里的说明。
+        self.batch_size = max(1, int(batch_size))
+        # 记录当前 self._model 实际加载在哪个设备上（"cuda" / "cpu"），
+        # 与用户请求的 self._device 分开记录——命中显存不足或 CUDA 不可用
+        # 时会把这个值改成 "cpu"，但不会改动 self._device 本身（用户下次
+        # 新建任务时的初始尝试仍然遵循原始设置，不永久性地"记仇"）。
+        self._loaded_device: Optional[str] = None
+        # 本实例（单例，跨任务复用）是否已经因为显存不足/CUDA 不可用而
+        # 永久性回退到 CPU——一旦发生，同一批 get_aligner() 缓存生命周期
+        # 内后续所有分段/任务直接跳过 GPU 尝试，避免每次都重新触发一次
+        # 必然失败的 OOM 再重试，浪费时间。
+        self._cpu_fallback_sticky: bool = False
 
         # ✅ 补上这一行（关键修复）
         self.model_id = kwargs.get("model_id", self.DEFAULT_MODEL)
@@ -3746,24 +3839,75 @@ class Qwen3ForcedAligner(AltAlignerBase):
         except ImportError as e:
             return False, f"未安装 qwen-asr: pip install -U qwen-asr ({e})"
 
-    def _load_model(self):
-        if self._model is not None:
+    def _load_model(self, force_cpu: bool = False):
+        """
+        懒加载 Qwen3-ForcedAligner 模型。
+
+        force_cpu=True 用于显存不足 / CUDA 不可用时的自动降级路径
+        （见 _align_single_chunk 里的 OOM 重试逻辑）：无论 self._device
+        原始请求的是什么，都强制在 CPU 上重新加载一份模型，并把结果记入
+        self._cpu_fallback_sticky，避免同一实例在后续调用里反复尝试 GPU
+        再失败。已经加载好、且加载时的设备与本次请求一致时直接复用，
+        不重复加载。
+        """
+        target_device = "cpu" if (force_cpu or self._cpu_fallback_sticky) else _safe_device(
+            getattr(self, "_device", "cpu")
+        )
+
+        if self._model is not None and self._loaded_device == target_device:
             return
 
         import torch
         from qwen_asr import Qwen3ForcedAligner as Qwen3FA
 
-        # _safe_device() 做 smoke-test，防止 CPU-only PyTorch 传入 'cuda'/'auto'
-        # 时由 transformers device_map 自动选 CUDA 而触发 AssertionError
-        device = _safe_device(getattr(self, "_device", "cpu"))
-        dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
+        dtype = torch.bfloat16 if target_device.startswith("cuda") else torch.float32
 
-        logger.info(f"[Qwen3-FA] 加载模型 device={device} dtype={dtype}")
-        self._model = Qwen3FA.from_pretrained(
-            self.model_id,
-            dtype=dtype,
-            device_map=device,
-        )
+        if self._model is not None and self._loaded_device != target_device:
+            logger.info(
+                f"[Qwen3-FA] 运行设备变化: {self._loaded_device} → {target_device}，重新加载模型..."
+            )
+            self._model = None
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+        logger.info(f"[Qwen3-FA] 加载模型 device={target_device} dtype={dtype}")
+        try:
+            self._model = Qwen3FA.from_pretrained(
+                self.model_id,
+                dtype=dtype,
+                device_map=target_device,
+            )
+        except Exception as e:
+            # 模型加载阶段本身就可能因为显存不足 / CUDA Toolkit 缺失或
+            # 版本不匹配而失败（不是所有 CUDA 环境问题都要等到真正推理
+            # 那一刻才暴露）——这里同样识别到就直接改在 CPU 上重新加载，
+            # 而不是把这类环境报错原样抛给用户。target_device 已经是
+            # "cpu" 时说明 CPU 本身都加载失败，属于更严重的问题（例如
+            # 模型文件损坏/依赖缺失），不再重试，原样抛出。
+            if target_device == "cpu" or not _is_cuda_oom_or_env_error(e):
+                raise
+            logger.warning(
+                f"[Qwen3-FA] 在 {target_device} 上加载模型失败（{e}），"
+                "自动切换到 CPU 重新加载..."
+            )
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            target_device = "cpu"
+            dtype = torch.float32
+            self._model = Qwen3FA.from_pretrained(
+                self.model_id,
+                dtype=dtype,
+                device_map=target_device,
+            )
+        self._loaded_device = target_device
+        if force_cpu or target_device == "cpu":
+            self._cpu_fallback_sticky = True
 
     def align(self, audio_path: str, text: Optional[str], language: str,
               english_word_align: bool = False) -> Dict:
@@ -4138,12 +4282,51 @@ class Qwen3ForcedAligner(AltAlignerBase):
         int_lang 用于退化区间自愈修复（_repair_degenerate_spans）里判断
         "按字符切分还是按空格切分"；不传时退化为不做自愈（保持旧行为），
         调用方应尽量把已有的 int_lang 传进来。
+
+        显存不足 / CUDA 环境异常自动降级：调用 self._model.align() 时如果
+        命中 CUDA OOM（或底层抛出的错误信息表明是 CUDA Toolkit 未正确
+        安装等环境问题），会调用 _load_model(force_cpu=True) 把模型整个
+        重新加载到 CPU 上再重试一次；成功后 self._cpu_fallback_sticky
+        会保持为 True，同一实例后续所有调用直接走 CPU，不再重复尝试 GPU。
+        与 WhisperXAligner._transcribe_with_oom_retry() 的"腰斩 batch_size
+        重试"不同——Qwen3-ForcedAligner 官方 API 本身没有 batch_size 这个
+        参数可调（每次都是单条音频单次前向），能做的唯一有效降级就是
+        整体换到 CPU；_get_qwen3_batch_size() 读到的设置值目前只作为
+        日志里展示的参考值，不传给 self._model.align()。
         """
-        results = self._model.align(
-            audio=audio_path,
-            text=text,
-            language=lang_name,
-        )
+        self._load_model()
+        try:
+            results = self._model.align(
+                audio=audio_path,
+                text=text,
+                language=lang_name,
+            )
+        except Exception as e:
+            # 用关键词判断而不是只捕获 RuntimeError：不同 torch/transformers
+            # 版本在显存不足或 CUDA 环境异常时抛出的异常类型不完全一致
+            # （RuntimeError 最常见，但也可能是 AssertionError 等），
+            # _is_cuda_oom_or_env_error() 内部只看错误信息关键词，能覆盖
+            # 更多实际场景；非此类错误（如文本/音频本身有问题）原样抛出。
+            if not _is_cuda_oom_or_env_error(e):
+                raise
+            logger.warning(
+                f"[Qwen3-FA] GPU 推理失败（{e}），自动切换到 CPU 重新加载模型并重试"
+                f"（参考批大小设置 qwen3_batch_size={_get_qwen3_batch_size()}，"
+                "但 Qwen3-ForcedAligner 官方接口本身不支持按批降级，"
+                "此处直接整体切换运行设备）..."
+            )
+            try:
+                import torch as _torch_oom
+                if _torch_oom.cuda.is_available():
+                    _torch_oom.cuda.empty_cache()
+            except Exception:
+                pass
+            self._load_model(force_cpu=True)
+            results = self._model.align(
+                audio=audio_path,
+                text=text,
+                language=lang_name,
+            )
 
         # 官方示例里 results[0][0].text / start_time / end_time
         entries: List[Tuple[float, float, str]] = []
@@ -4644,12 +4827,19 @@ class NeMoForcedAligner(AltAlignerBase):
         device: str = "auto",
         nemo_model: Optional[str] = None,
         endpoint: str = DEFAULT_ENDPOINT,
+        batch_size: int = 8,
     ):
         super().__init__()
         self._device = device
         self._model_override = nemo_model
         self.endpoint = endpoint.rstrip("/")
         self._session = None
+        # 透传给 nemo_server.py /align 请求体里的 "batch_size" 字段（见该
+        # 服务端文件顶部说明：NeMo Forced Aligner 单次前向没有真正意义
+        # 上可调的批大小，这个值仅在显存不足自动降级重试时写入日志作为
+        # 参考）。默认 8，与 app_settings.DEFAULT_SETTINGS["qwen3_batch_size"]
+        # 一致。
+        self.batch_size = max(1, int(batch_size))
 
     @staticmethod
     def check_available() -> Tuple[bool, str]:
@@ -4677,6 +4867,7 @@ class NeMoForcedAligner(AltAlignerBase):
             "text": text,
             "language": language,
             "device": self._device if self._device in ("auto", "cpu", "cuda") else "auto",
+            "batch_size": self.batch_size,
         }
         if self._model_override:
             payload["model"] = self._model_override
@@ -4804,22 +4995,31 @@ def get_aligner(backend: str, device: str = "auto", **kwargs) -> AltAlignerBase:
 
     if backend == "nemo_aligner":
         nemo_model = kwargs.pop("nemo_model", None)
-        cache_key = f"nemo_aligner:{nemo_model or 'default'}:{resolved_device}"
+        # batch_size 变化也要重新建实例——虽然对 NeMo-FA 而言它只是显存
+        # 不足自动降级时写日志用的参考值，不影响推理结果，但缓存 key 里
+        # 带上它可以让"设置页面刚保存的新 batch_size"立即在下一次任务里
+        # 反映到日志中，不需要等到设备也变化才会重新实例化。
+        batch_size = kwargs.get("batch_size", 8)
+        cache_key = f"nemo_aligner:{nemo_model or 'default'}:{resolved_device}:{batch_size}"
         if cache_key not in _SINGLETON:
             _SINGLETON[cache_key] = NeMoForcedAligner(
                 device=device, nemo_model=nemo_model, **kwargs
             )
         return _SINGLETON[cache_key]
 
-    cache_key = f"{backend}:{resolved_device}"
-    if cache_key not in _SINGLETON:
-        if backend == "qwen3_asr":
-            _SINGLETON[cache_key] = Qwen3ASRAligner(device=device, **kwargs)
-        elif backend == "qwen3_aligner":
-            _SINGLETON[cache_key] = Qwen3ForcedAligner(device=device, **kwargs)
-        else:
-            raise ValueError(f"未知对齐后端: {backend}")
-    return _SINGLETON[cache_key]
+    if backend in ("qwen3_asr", "qwen3_aligner"):
+        # 同上：batch_size 纳入缓存 key，确保设置变更后下一次任务立即用
+        # 新值重新实例化，不需要等设备也一起变化。
+        batch_size = kwargs.get("batch_size", 8)
+        cache_key = f"{backend}:{resolved_device}:{batch_size}"
+        if cache_key not in _SINGLETON:
+            if backend == "qwen3_asr":
+                _SINGLETON[cache_key] = Qwen3ASRAligner(device=device, **kwargs)
+            else:
+                _SINGLETON[cache_key] = Qwen3ForcedAligner(device=device, **kwargs)
+        return _SINGLETON[cache_key]
+
+    raise ValueError(f"未知对齐后端: {backend}")
 
 
 def clear_aligner_cache(backend: Optional[str] = None) -> int:
