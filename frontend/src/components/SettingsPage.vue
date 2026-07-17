@@ -240,16 +240,6 @@
                 <p class="help-text">{{ t('settings.whisperxBatchSizeHint') }}</p>
               </el-form-item>
             </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="t('settings.qwen3BatchSize')">
-                <el-input-number
-                  v-model="form.qwen3_batch_size"
-                  :min="1" :max="128" :step="1" :precision="0"
-                  controls-position="right" style="width: 100%; max-width: 240px"
-                />
-                <p class="help-text">{{ t('settings.qwen3BatchSizeHint') }}</p>
-              </el-form-item>
-            </el-col>
           </el-row>
 
           <el-divider />
@@ -449,12 +439,6 @@ interface AppSettings {
   qwen3_fa_whisperx_prepass_model: string
   // WhisperX 转录 batch_size，独立对齐后端与上面的粗测预处理共用同一个值。
   whisperx_batch_size: number
-  // Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner 共用 batch_size。
-  // Qwen3-ASR：直接对应官方 max_inference_batch_size；Qwen3-ForcedAligner /
-  // NeMo Forced Aligner：两者都没有原生批处理概念（每次对齐任务始终只送
-  // 1 条音频），这个值仅作为显存不足自动降级重试时的参考值写入日志，
-  // 不影响正常（未 OOM）情况下的对齐结果。
-  qwen3_batch_size: number
   // ── tts_processor.py 逐句合成分段长度（字符数，同样"实时生效，无需
   // 重启"）── 单行文本超过 tts_max_segment_len 才会二次切割，切割点落在
   // [tts_min_segment_len, tts_max_segment_len] 区间内。
@@ -511,12 +495,6 @@ const WHISPERX_DEFAULTS = {
   whisperx_batch_size: 16,
 } as const
 
-// Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner 共用 batch_size
-// 默认值：与 app_settings.py 的 DEFAULT_SETTINGS["qwen3_batch_size"] 保持一致。
-const QWEN3_BATCH_DEFAULTS = {
-  qwen3_batch_size: 8,
-} as const
-
 // Qwen3-TTS 默认值：与 app_settings.py 的 DEFAULT_SETTINGS 保持一致。
 const QWEN3_TTS_DEFAULTS = {
   qwen3_tts_model_size: '1.7B',
@@ -571,7 +549,6 @@ const form = ref<AppSettings>({
   ...TUNING_DEFAULTS,
   ...SENTENCE_CHUNKING_DEFAULTS,
   ...WHISPERX_DEFAULTS,
-  ...QWEN3_BATCH_DEFAULTS,
   ...QWEN3_TTS_DEFAULTS,
   ...TTS_SEGMENT_LEN_DEFAULTS,
   ...TTS_SPLIT_OPTION_DEFAULTS,
@@ -641,9 +618,6 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
   }
   // whisperx_batch_size 走独立的整数校验（1-128），与后端 save_settings() 的钳制范围一致
   const batchSize = Number(settings?.whisperx_batch_size)
-  // qwen3_batch_size 同样走 [1, 128] 整数校验，与后端 save_settings() 的
-  // 钳制范围一致（见 app_settings.py qwen3_batch_size 校验逻辑）。
-  const qwen3BatchSize = Number(settings?.qwen3_batch_size)
   const prepassModel = String(settings?.qwen3_fa_whisperx_prepass_model || '').trim()
   // tts_min_segment_len / tts_max_segment_len：整数校验 + 钳制到 [1, 5000]，
   // 与后端 save_settings() 的钳制范围一致；若钳制后 min > max 则交换两者，
@@ -708,9 +682,6 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     whisperx_batch_size: Number.isFinite(batchSize)
       ? Math.min(Math.max(Math.round(batchSize), 1), 128)
       : WHISPERX_DEFAULTS.whisperx_batch_size,
-    qwen3_batch_size: Number.isFinite(qwen3BatchSize)
-      ? Math.min(Math.max(Math.round(qwen3BatchSize), 1), 128)
-      : QWEN3_BATCH_DEFAULTS.qwen3_batch_size,
     tts_min_segment_len: ttsMinLen,
     tts_max_segment_len: ttsMaxLen,
     tts_newline_split_every_n: newlineEveryN,

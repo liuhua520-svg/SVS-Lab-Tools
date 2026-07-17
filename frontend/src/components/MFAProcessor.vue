@@ -1281,7 +1281,7 @@
                 <el-form-item :label="t('processor.f0Floor')">
                   <el-input-number
                     v-model="advancedConfig.f0_floor"
-                    :min="40"
+                    :min="0"
                     :max="200"
                     :step="5"
                     controls-position="right"
@@ -1294,7 +1294,7 @@
                   <el-input-number
                     v-model="advancedConfig.f0_ceil"
                     :min="300"
-                    :max="1000"
+                    :max="3000"
                     :step="50"
                     controls-position="right"
                   />
@@ -1579,6 +1579,15 @@
                 >
                   RMVPE: {{ systemStatus.audio_processing?.f0_backends?.rmvpe?.available ? '✓' : '✗' }}
                 </el-tag>
+                <el-button
+                  v-if="!systemStatus.audio_processing?.f0_backends?.rmvpe?.available && systemStatus.audio_processing?.f0_backends?.crepe?.available"
+                  link
+                  size="small"
+                  @click="downloadRmvpe"
+                  :loading="downloadingRmvpe"
+                >
+                  {{ t('processor.download') }}
+                </el-button>
               </div>
             </div>
           </el-col>
@@ -2502,8 +2511,8 @@ const advancedConfig = ref<AdvancedConfig>({
   f0_smooth: true,
   f0_smooth_window: 5,
   vsqx_pitch_smooth_window: 5,
-  f0_floor: 71,
-  f0_ceil: 800
+  f0_floor: 0,
+  f0_ceil: 1200
 })
 
 const processing = ref(false)
@@ -2512,6 +2521,7 @@ const result = ref<any>(null)
 const error = ref('')
 const checkingStatus = ref(false)
 const downloadingLangs = ref<string[]>([])
+const downloadingRmvpe = ref<boolean>(false)
 const downloadingProject = ref(false)
 
 const systemStatus = ref<SystemStatus>({
@@ -3578,6 +3588,24 @@ const downloadModel = async (lang: string) => {
     ElMessage.error(t('processor.modelDownloadError', { error: String(e) }))
   } finally {
     downloadingLangs.value = downloadingLangs.value.filter(l => l !== lang)
+  }
+}
+
+const downloadRmvpe = async () => {
+  downloadingRmvpe.value = true
+  try {
+    const res = await fetch('/api/f0/download-rmvpe', { method: 'POST' })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success(t('processor.modelDownloaded', { lang: 'RMVPE' }))
+      await checkSystemStatus()
+    } else {
+      ElMessage.error(t('processor.modelDownloadFailed', { error: data.error }))
+    }
+  } catch (e) {
+    ElMessage.error(t('processor.modelDownloadError', { error: String(e) }))
+  } finally {
+    downloadingRmvpe.value = false
   }
 }
 

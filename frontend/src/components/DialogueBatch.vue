@@ -351,12 +351,12 @@
             <el-row :gutter="20">
               <el-col :xs="24" :sm="12">
                 <el-form-item :label="t('processor.f0Floor')">
-                  <el-input-number v-model="advanced.f0_floor" :min="40" :max="200" :step="5" controls-position="right" :disabled="processing" />
+                  <el-input-number v-model="advanced.f0_floor" :min="0" :max="200" :step="5" controls-position="right" :disabled="processing" />
                 </el-form-item>
               </el-col>
               <el-col :xs="24" :sm="12">
                 <el-form-item :label="t('processor.f0Ceil')">
-                  <el-input-number v-model="advanced.f0_ceil" :min="300" :max="1000" :step="50" controls-position="right" :disabled="processing" />
+                  <el-input-number v-model="advanced.f0_ceil" :min="300" :max="3000" :step="50" controls-position="right" :disabled="processing" />
                 </el-form-item>
               </el-col>
             </el-row>
@@ -1476,12 +1476,12 @@
                 <el-row :gutter="20">
                   <el-col :xs="24" :sm="12">
                     <el-form-item :label="t('processor.f0Floor')">
-                      <el-input-number v-model="boxSettings.draft.advanced.f0_floor" :min="40" :max="200" :step="5" controls-position="right" />
+                      <el-input-number v-model="boxSettings.draft.advanced.f0_floor" :min="0" :max="200" :step="5" controls-position="right" />
                     </el-form-item>
                   </el-col>
                   <el-col :xs="24" :sm="12">
                     <el-form-item :label="t('processor.f0Ceil')">
-                      <el-input-number v-model="boxSettings.draft.advanced.f0_ceil" :min="300" :max="1000" :step="50" controls-position="right" />
+                      <el-input-number v-model="boxSettings.draft.advanced.f0_ceil" :min="300" :max="3000" :step="50" controls-position="right" />
                     </el-form-item>
                   </el-col>
                 </el-row>
@@ -1521,6 +1521,115 @@
         </template>
       </el-dialog>
     </el-card>
+
+    <div v-if="systemStatus" class="status-box">
+      <el-card shadow="hover">
+        <template #header>
+          <span>🔧 {{ t('app.systemStatus') }}</span>
+        </template>
+
+        <el-row :gutter="20">
+          <el-col :xs="24" :sm="12">
+            <div class="status-item">
+              <span class="label">{{ t('processor.mfaStatus') }}:</span>
+              <el-tag :type="systemStatus.mfa?.installed ? 'success' : 'danger'" size="large">
+                {{ systemStatus.mfa?.installed ? `✓ ${t('processor.available')}` : `✗ ${t('processor.notInstalled')}` }}
+              </el-tag>
+            </div>
+            <div v-if="systemStatus.mfa?.installed" class="status-item">
+              <span class="label">{{ t('processor.version') }}:</span>
+              <span>{{ systemStatus.mfa?.version }}</span>
+            </div>
+          </el-col>
+
+          <el-col :xs="24" :sm="12">
+            <div class="label">{{ t('processor.modelStatus') }}:</div>
+            <div class="model-list">
+              <div v-for="(downloaded, lang) in normalizedModels" :key="lang" class="model-item">
+                <el-tag :type="downloaded ? 'success' : 'warning'" size="small">
+                  {{ lang.toUpperCase() }}: {{ downloaded ? '✓' : '✗' }}
+                </el-tag>
+                <el-button
+                  v-if="!downloaded"
+                  link
+                  size="small"
+                  @click="downloadModel(lang)"
+                  :loading="downloadingLangs.includes(lang)"
+                >
+                  {{ t('processor.download') }}
+                </el-button>
+              </div>
+            </div>
+          </el-col>
+
+          <el-col :xs="24">
+            <div class="label">{{ t('processor.processingModules') }}:</div>
+            <div class="model-list">
+              <div class="model-item">
+                <el-tag
+                  :type="systemStatus.audio_processing?.pyworld_available ? 'success' : 'warning'"
+                  size="small"
+                >
+                  PyWORLD (DIO/Harvest): {{ systemStatus.audio_processing?.pyworld_available ? '✓' : '✗' }}
+                </el-tag>
+              </div>
+              <div class="model-item">
+                <el-tag
+                  :type="systemStatus.audio_processing?.f0_backends?.crepe?.available ? 'success' : 'info'"
+                  size="small"
+                >
+                  CREPE: {{ systemStatus.audio_processing?.f0_backends?.crepe?.available ? '✓' : '✗' }}
+                </el-tag>
+              </div>
+              <div class="model-item">
+                <el-tag
+                  :type="systemStatus.audio_processing?.f0_backends?.rmvpe?.available ? 'success' : 'info'"
+                  size="small"
+                >
+                  RMVPE: {{ systemStatus.audio_processing?.f0_backends?.rmvpe?.available ? '✓' : '✗' }}
+                </el-tag>
+                <el-button
+                  v-if="!systemStatus.audio_processing?.f0_backends?.rmvpe?.available && systemStatus.audio_processing?.f0_backends?.crepe?.available"
+                  link
+                  size="small"
+                  @click="downloadRmvpe"
+                  :loading="downloadingRmvpe"
+                >
+                  {{ t('processor.download') }}
+                </el-button>
+              </div>
+            </div>
+          </el-col>
+
+          <el-col :xs="24">
+            <div class="label">{{ t('processor.altBackends') }}:</div>
+            <div class="model-list">
+              <div v-for="(info, key) in altBackends" :key="key" class="model-item">
+                <el-tag :type="info.available ? 'success' : 'info'" size="small">
+                  {{ key === 'whisperx' ? t('processor.backendWhisperx')
+                     : key === 'qwen3_asr' ? 'Qwen3-ASR-1.7B'
+                     : key === 'qwen3_aligner' ? 'Qwen3-FA-0.6B'
+                     : key === 'nemo_aligner' ? t('processor.backendNemoAligner')
+                     : key }}:
+                  {{ info.available ? `✓ ${t('processor.available')}` : `✗ ${t('processor.notInstalled')}` }}
+                </el-tag>
+                <span v-if="!info.available" class="help-text" style="font-size:11px;margin-left:6px">
+                  {{ key === 'whisperx' ? t('processor.packageHintWhisperx')
+                     : key === 'nemo_aligner' ? t('processor.packageHintNemo')
+                     : key === 'qwen3_aligner' ? t('processor.packageHintQwen3Aligner')
+                     : key === 'qwen3_asr' ? t('processor.packageHintQwen3Asr')
+                     : t('processor.packageHintTransformers') }}
+                </span>
+              </div>
+            </div>
+            <div v-if="alignerStatus.models_dir" style="margin-top:6px;font-size:12px;color:#909399">
+              📁 {{ t('processor.modelsLocation') }}：<code style="color:#67c23a">{{ alignerStatus.models_dir }}</code>
+              <span style="margin-left:6px">{{ t('processor.modelsLocationHint') }}</span>
+            </div>
+          </el-col>
+        </el-row>
+      </el-card>
+    </div>
   </div>
 </template>
 
@@ -1648,6 +1757,46 @@ interface BoxOverride {
 const alignerBackend = ref<string>('mfa')
 const alignerStatus = ref<Record<string, any>>({})
 const checkingStatus = ref(false)
+
+// 🔧 系统状态面板（与 MFAProcessor.vue 语义一致）
+interface F0BackendStatus {
+  available: boolean
+  torch?: boolean
+  torchcrepe?: boolean
+  cuda?: boolean
+  model_path?: string
+  model_found?: boolean
+}
+interface SystemStatus {
+  mfa?: {
+    installed: boolean
+    version: string
+    models?: Record<string, boolean>
+  }
+  audio_processing?: {
+    pyworld_available: boolean
+    supported_formats: string[]
+    f0_backends?: {
+      dio?: F0BackendStatus
+      harvest?: F0BackendStatus
+      crepe?: F0BackendStatus
+      rmvpe?: F0BackendStatus
+    }
+  }
+  alt_aligners?: Record<string, { available: boolean; message: string; requires_text?: boolean }>
+}
+const systemStatus = ref<SystemStatus>({
+  audio_processing: {
+    pyworld_available: false,
+    supported_formats: [],
+    f0_backends: {
+      crepe: { available: false },
+      rmvpe: { available: false }
+    }
+  }
+})
+const downloadingLangs = ref<string[]>([])
+const downloadingRmvpe = ref<boolean>(false)
 
 // 输入模式：TTS跟读（讲述人 + EdgeTTS，每个对话框不再上传音频，而是选择
 // 音色由 EdgeTTS 合成）/ 音频跟读（原有的每框上传音频对齐流程）。
@@ -2083,8 +2232,8 @@ const advanced = ref<AdvancedConfig>({
   f0_smooth: true,
   f0_smooth_window: 5,
   vsqx_pitch_smooth_window: 5,
-  f0_floor: 71,
-  f0_ceil: 800,
+  f0_floor: 0,
+  f0_ceil: 1200,
 })
 
 // 与 MFAProcessor.vue 保持一致：显示条件与"英语单词级对齐"开关挂钩。
@@ -2101,6 +2250,20 @@ const advanced = ref<AdvancedConfig>({
 //   重置为 false（仅靠 v-if 隐藏开关不会重置其底层状态，之前这里错误地
 //   假设"隐藏 = 恒为 false"，导致语种切到日语后本开关未同步隐藏——已
 //   改为显式 watch 重置，而不是依赖 v-if）。
+// 🔧 系统状态面板用：规范化 MFA 模型下载状态 / 去掉 models_dir 的替代后端列表
+const normalizedModels = computed(() => {
+  const defaultModels = { cmn: false, eng: false, jpn: false, kor: false, yue: false }
+  if (!systemStatus.value.mfa?.models || typeof systemStatus.value.mfa.models !== 'object') {
+    return defaultModels
+  }
+  return { ...defaultModels, ...systemStatus.value.mfa.models }
+})
+
+const altBackends = computed(() => {
+  const { models_dir: _md, ...backends } = alignerStatus.value as any
+  return backends as Record<string, any>
+})
+
 const showWordPhonemeMap = computed(() => {
   const isSupportedFormat = outputFormat.value === 'sv' || outputFormat.value === 'vsqx'
   const hasAlignableBox = boxes.value.length === 0 || boxes.value.some((b) => !b.labFile && !b.midiFile)
@@ -2715,8 +2878,8 @@ const createBoxAdvancedOverride = (): BoxAdvancedOverride => ({
   f0_smooth: true,
   f0_smooth_window: 5,
   vsqx_pitch_smooth_window: 5,
-  f0_floor: 71,
-  f0_ceil: 800,
+  f0_floor: 0,
+  f0_ceil: 1200,
 })
 
 const createBoxOverride = (): BoxOverride => ({
@@ -3213,15 +3376,60 @@ const getFileName = (path: string): string => (path || '').split(/[\\/]/).pop() 
 const refreshStatus = async () => {
   checkingStatus.value = true
   try {
-    const res = await fetch('/api/aligner/status')
-    const data = await res.json()
+    const [alignerRes, pipelineRes] = await Promise.all([
+      fetch('/api/aligner/status'),
+      fetch('/api/pipeline/status'),
+    ])
+    const data = await alignerRes.json()
     if (data.success && data.backends) {
       alignerStatus.value = data.backends
+    }
+    const pipelineData = await pipelineRes.json()
+    if (pipelineData.success && pipelineData.status) {
+      systemStatus.value = pipelineData.status
     }
   } catch {
     ElMessage.warning(t('processor.backendConnectionFailed'))
   } finally {
     checkingStatus.value = false
+  }
+}
+
+const checkSystemStatus = refreshStatus
+
+const downloadModel = async (lang: string) => {
+  downloadingLangs.value.push(lang)
+  try {
+    const res = await fetch(`/api/mfa/download-model/${lang}`, { method: 'POST' })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success(t('processor.modelDownloaded', { lang: lang.toUpperCase() }))
+      await refreshStatus()
+    } else {
+      ElMessage.error(t('processor.modelDownloadFailed', { error: data.error }))
+    }
+  } catch (e) {
+    ElMessage.error(t('processor.modelDownloadError', { error: String(e) }))
+  } finally {
+    downloadingLangs.value = downloadingLangs.value.filter(l => l !== lang)
+  }
+}
+
+const downloadRmvpe = async () => {
+  downloadingRmvpe.value = true
+  try {
+    const res = await fetch('/api/f0/download-rmvpe', { method: 'POST' })
+    const data = await res.json()
+    if (data.success) {
+      ElMessage.success(t('processor.modelDownloaded', { lang: 'RMVPE' }))
+      await refreshStatus()
+    } else {
+      ElMessage.error(t('processor.modelDownloadFailed', { error: data.error }))
+    }
+  } catch (e) {
+    ElMessage.error(t('processor.modelDownloadError', { error: String(e) }))
+  } finally {
+    downloadingRmvpe.value = false
   }
 }
 
@@ -3824,6 +4032,40 @@ onMounted(() => {
 
 .error-section {
   margin-top: 20px;
+}
+
+.status-box {
+  background: white;
+  border-radius: 8px;
+  padding: 20px;
+  margin-top: 20px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+}
+
+.status-item {
+  margin-bottom: 15px;
+}
+
+.status-item .label {
+  display: block;
+  color: #606266;
+  font-weight: bold;
+  margin-bottom: 5px;
+}
+
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  background: #f5f5f5;
+  border-radius: 4px;
 }
 
 @media (max-width: 768px) {

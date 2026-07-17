@@ -165,6 +165,7 @@ const ackGroups: AckGroup[] = [
       { name: 'accelerate', version: '>=0.27.0', link: 'https://github.com/huggingface/accelerate' },
       { name: 'g2p_en', version: '>=0.3.1', link: 'https://github.com/Kyubyong/g2p' },
       { name: 'qwen-asr', version: '>=1.0.0', link: 'https://github.com/QwenLM/Qwen3-ASR' },
+	  { name: 'qwen-tts', version: '-', link: 'https://github.com/QwenLM/Qwen3-TTS' },
       { name: 'nltk', version: '>=1.0.0', link: 'https://github.com/nltk/nltk' },
       { name: 'requests', version: '-', link: 'https://github.com/psf/requests' },
       { name: 'transformers', version: '>=4.40.0', link: 'https://github.com/huggingface/transformers' },

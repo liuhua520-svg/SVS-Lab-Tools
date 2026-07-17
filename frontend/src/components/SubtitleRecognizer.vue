@@ -104,6 +104,13 @@
             </el-radio-group>
           </el-form-item>
 
+          <el-form-item :label="t('subtitle.batchSize')">
+            <el-input-number v-model="recognizeSettings.batchSize" :min="1" :max="64" :step="1" />
+            <el-tooltip :content="t('subtitle.batchSizeHint')" placement="top">
+              <span class="option-hint-icon">❓</span>
+            </el-tooltip>
+          </el-form-item>
+
           <el-form-item :label="t('subtitle.maxChars')">
             <el-input-number v-model="recognizeSettings.maxChars" :min="8" :max="500" :step="2" />
             <el-tooltip :content="t('subtitle.maxCharsHint')" placement="top">
@@ -111,7 +118,14 @@
             </el-tooltip>
           </el-form-item>
 
-          <el-form-item :label="t('subtitle.allowCommaSplit')">
+          <el-form-item :label="t('subtitle.splitAtSentenceEnd')">
+            <el-switch v-model="recognizeSettings.splitAtSentenceEnd" />
+            <el-tooltip :content="t('subtitle.splitAtSentenceEndHint')" placement="top">
+              <span class="option-hint-icon">❓</span>
+            </el-tooltip>
+          </el-form-item>
+
+          <el-form-item v-if="recognizeSettings.splitAtSentenceEnd" :label="t('subtitle.allowCommaSplit')">
             <el-switch v-model="recognizeSettings.allowCommaSplit" />
             <el-tooltip :content="t('subtitle.allowCommaSplitHint')" placement="top">
               <span class="option-hint-icon">❓</span>
@@ -271,7 +285,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { useAppLocale } from '../i18n'
@@ -417,12 +431,26 @@ const resetMedia = async () => {
 const recognizeSettings = reactive({
   language: 'auto',
   device: 'auto',
+  batchSize: 8,
   maxChars: 250,
+  splitAtSentenceEnd: false,
   allowCommaSplit: false,
   removePunctuation: false,
   closeVadGaps: false,
   vadGapThresholdSec: 0.1,
 })
+
+// "允许按句末切分"关闭时，"允许逗号切分"没有意义（逗号切分是在句末切分
+// 基础上的进一步细分），跟随强制关闭，避免出现"句末切分已关闭，但
+// 逗号切分仍勾选"这种界面上看不到、但仍会生效的矛盾状态。
+watch(
+  () => recognizeSettings.splitAtSentenceEnd,
+  (enabled) => {
+    if (!enabled && recognizeSettings.allowCommaSplit) {
+      recognizeSettings.allowCommaSplit = false
+    }
+  },
+)
 
 const recognizing = ref(false)
 const recognizeError = ref('')
@@ -472,7 +500,9 @@ const startRecognize = async () => {
         media_id: mediaInfo.value.media_id,
         language: recognizeSettings.language,
         device: recognizeSettings.device,
+        batch_size: recognizeSettings.batchSize,
         max_chars: recognizeSettings.maxChars,
+        split_at_sentence_end: recognizeSettings.splitAtSentenceEnd,
         allow_comma_split: recognizeSettings.allowCommaSplit,
         remove_punctuation: recognizeSettings.removePunctuation,
         close_vad_gaps: recognizeSettings.closeVadGaps,
