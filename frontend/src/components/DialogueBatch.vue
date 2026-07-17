@@ -2260,7 +2260,7 @@ const normalizedModels = computed(() => {
 })
 
 const altBackends = computed(() => {
-  const { models_dir: _md, ...backends } = alignerStatus.value as any
+  const { models_dir: _md, mfa: _mfa, ...backends } = alignerStatus.value as any
   return backends as Record<string, any>
 })
 
