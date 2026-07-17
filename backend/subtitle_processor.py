@@ -384,8 +384,8 @@ def _find_split_index(text: str, allow_comma_split: bool = False) -> Optional[in
     的内容归入前半句，含标点本身）。只找"一刀"，不是"每个标点都切"——
     用于两个场景：① _split_by_length 在某一段仍超过 max_chars 时找最靠
     近中点的标点位置下刀；② split_entry_manually 用户手动拆一条字幕成
-    两条。"遇到逗号就切成下一条字幕"的场景请用 _split_at_every_clause_punct，
-    不经过这个函数。
+    两条。"无条件在每个标点处都切开一条新字幕"的场景请用
+    _split_at_every_punct，不经过这个函数。
 
     allow_comma_split=False（默认）时只认句末标点（。！？；等），找不到
     就直接返回 None，交给调用方按字数硬切。
@@ -413,23 +413,24 @@ def _find_split_index(text: str, allow_comma_split: bool = False) -> Optional[in
     return None
 
 
-def _split_at_every_clause_punct(text: str) -> List[str]:
+def _split_at_every_punct(text: str, punct_set: str) -> List[str]:
     """
-    把 text 在每一个逗号/顿号/句末标点处都切开（不只是找离中点最近的
-    那一个），标点本身归入它前面的那一段。用于"遇到逗号就切成下一条
-    字幕"这种场景——例如"大家好，你好。" 会被切成 ["大家好，", "你好。"]。
+    把 text 在每一个属于 punct_set 的标点处都切开（不只是找离中点最近的
+    那一个），标点本身归入它前面的那一段。例如 punct_set=_SENTENCE_PUNCT
+    时，"大家好，你好。真棒！" 会被切成 ["大家好，你好。", "真棒！"]；
+    punct_set=_SENTENCE_PUNCT + _CLAUSE_PUNCT 时会连逗号/顿号也切开，
+    变成 ["大家好，", "你好。", "真棒！"]。
 
     连续标点（如"……""，。"）不会产生空段；文本结尾的标点不会切出一个
     空的尾段。
     """
     if not text:
         return []
-    cut_punct = _SENTENCE_PUNCT + _CLAUSE_PUNCT
     pieces: List[str] = []
     start = 0
     n = len(text)
     for i, ch in enumerate(text):
-        if ch in cut_punct:
+        if ch in punct_set:
             piece = text[start:i + 1]
             if piece:
                 pieces.append(piece)
@@ -444,27 +445,31 @@ def _split_long_entry(
     char_times: List[Tuple[str, float, float]],
     max_chars: int,
     allow_comma_split: bool = False,
+    split_at_sentence_end: bool = False,
 ) -> List[Tuple[str, float, float]]:
     """
     把一条字幕拆成多条，每条形如 (text, start_sec, end_sec)。
     char_times 与 text 等长，逐字符对应时间。
 
-    allow_comma_split=True 时，行为不再是"只有超过 max_chars 才尝试在
-    标点处切"——而是无条件在每一个逗号/顿号/句末标点处都切开一条新
-    字幕（"大家好，你好。" → "大家好，" / "你好。"），标点和长度无关，
-    这是用户主动要的"遇到逗号就换一条字幕"效果。切开之后，如果某一段
-    仍然超过 max_chars（比如两个逗号之间的内容本身就很长），再对这一段
+    split_at_sentence_end=True 时，行为不再是"只有超过 max_chars 才
+    尝试在标点处切"——而是无条件在每一个句末标点（。！？；等）处都切开
+    一条新字幕，与长度无关，这是用户主动要的"遇到句号就换一条字幕"
+    效果。此时 allow_comma_split 才有意义：为 True 则连逗号/顿号也
+    一并当作切分点（"大家好，你好。" → "大家好，" / "你好。"）；为
+    False（默认）则只在句末标点处切，逗号不参与。切开之后，如果某一段
+    仍然超过 max_chars（比如两个标点之间的内容本身就很长），再对这一段
     递归地按字数在中点附近硬切，保证单条字幕不会失控地长。
 
-    allow_comma_split=False（默认）时保留原来的行为：只有整段超过
-    max_chars 才二次拆分，只在句末标点（。！？；等）处切，找不到就按
-    字数硬切；逗号完全不参与。
+    split_at_sentence_end=False（默认）时保留原来的行为：只有整段超过
+    max_chars 才二次拆分，只在句末标点处切，找不到就按字数硬切；
+    allow_comma_split 在这一分支下被忽略（逗号完全不参与）。
     """
     if not text or not char_times:
         return []
 
-    if allow_comma_split:
-        pieces = _split_at_every_clause_punct(text)
+    if split_at_sentence_end:
+        punct_set = _SENTENCE_PUNCT + _CLAUSE_PUNCT if allow_comma_split else _SENTENCE_PUNCT
+        pieces = _split_at_every_punct(text, punct_set)
         if len(pieces) <= 1:
             # 没有任何标点可切：退化为按长度硬切（沿用原逻辑）
             return _split_by_length(text, char_times, max_chars)
@@ -575,21 +580,28 @@ def transcribe_to_subtitles(
     tmp_dir: Optional[str] = None,
     progress_cb=None,
     allow_comma_split: bool = False,
+    split_at_sentence_end: bool = False,
     remove_punctuation: bool = False,
     close_vad_gaps: bool = False,
     vad_gap_threshold_sec: float = 0.6,
+    batch_size: int = 8,
 ) -> List[SubtitleEntry]:
     """
     对完整 WAV 做 VAD 切句 → 逐块 ASR 识别 → 长句二次拆分，返回按时间
     排序的字幕条目列表。
 
     progress_cb(done, total) 可选，用于上报进度给调用方（Flask job）。
+    split_at_sentence_end：是否允许按句末切分（默认 False）。开启后不是
+        "超过 max_chars 才尝试"，而是无条件遇到句末标点（。！？；等）
+        就切成下一条字幕，与长度无关。关闭时只有整段超过 max_chars 才
+        会在句末标点处二次拆分，找不到就按字数硬切。
     allow_comma_split：是否把逗号/顿号也当作切分点（默认 False，只在
-        句末标点处切）。开启后不是"超过 max_chars 才尝试"，而是无条件
-        遇到逗号/顿号/句末标点就切成下一条字幕——例如"大家好，你好。"
-        会变成两条："大家好，" 和 "你好。"。切开后若某一段本身仍然超过
-        max_chars，再对这一段按字数在中点附近继续硬切。切分用的是这一
-        段音频块内逐字 ASR 时间戳，精确到字。
+        句末标点处切）。仅在 split_at_sentence_end=True 时才有意义——
+        开启后连逗号/顿号也会切成下一条字幕，例如"大家好，你好。"会
+        变成两条："大家好，" 和 "你好。"；split_at_sentence_end=False
+        时本参数被忽略。切开后若某一段本身仍然超过 max_chars，再对
+        这一段按字数在中点附近继续硬切。切分用的是这一段音频块内逐字
+        ASR 时间戳，精确到字。
     remove_punctuation：是否在识别结果落地前去掉标点符号（默认 False）。
         开启后编辑区显示的文本和后续导出的 SRT/LRC/TXT 都不含标点，
         原标点位置会保留一个空格。
@@ -602,6 +614,10 @@ def transcribe_to_subtitles(
     vad_gap_threshold_sec：触发这一处理的间隔下限（秒），默认 0.6。
         间隔小于等于该值时视为已经足够紧凑，保持原样不动；大于该值
         才会被对半分配到中点。
+    batch_size：透传给 qwen3_server.py /asr 请求体里的 "batch_size"
+        字段，服务端据此设置 qwen_asr 官方的 max_inference_batch_size
+        （默认 8，与该接口自身默认值一致）。显存不足时可调小；显存
+        充裕时调大可以提速。
     """
     import requests
 
@@ -627,6 +643,7 @@ def transcribe_to_subtitles(
                 "language": asr_lang,
                 "context": "",
                 "device": device,
+                "batch_size": batch_size,
             }
             resp = session.post(endpoint, json=payload, timeout=600)
             resp.raise_for_status()
@@ -654,8 +671,11 @@ def transcribe_to_subtitles(
             if not char_times:
                 char_times = [(block_text, seg_start, seg_end)]  # 极端兜底
 
-            split_entries = _split_long_entry(block_text, char_times, max_chars, allow_comma_split) \
-                if len(char_times) == len(block_text) else [(block_text, seg_start, seg_end)]
+            split_entries = _split_long_entry(
+                block_text, char_times, max_chars,
+                allow_comma_split=allow_comma_split,
+                split_at_sentence_end=split_at_sentence_end,
+            ) if len(char_times) == len(block_text) else [(block_text, seg_start, seg_end)]
 
             for text, s, e in split_entries:
                 cleaned = text.strip()

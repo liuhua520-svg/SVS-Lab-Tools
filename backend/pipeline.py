@@ -166,6 +166,7 @@ def _run_alignment(
     f0_device: str = "auto",
     whisperx_model: str = "large-v3",
     whisperx_batch_size: int = 16,      # 新增
+    qwen3_batch_size: int = 8,          # 新增：Qwen3-ASR / Qwen3-FA / NeMo-FA 共用
     english_word_align: bool = False,
     nemo_model: Optional[str] = None,
     aligner_device: Optional[str] = None,   # 新增：对齐工具（WhisperX/Qwen3/NeMo）运行设备，
@@ -254,8 +255,12 @@ def _run_alignment(
         if backend == "whisperx":
             extra["whisper_model"] = whisperx_model
             extra["batch_size"] = whisperx_batch_size   # 新增
-        elif backend == "nemo_aligner" and nemo_model:
-            extra["nemo_model"] = nemo_model
+        elif backend == "nemo_aligner":
+            if nemo_model:
+                extra["nemo_model"] = nemo_model
+            extra["batch_size"] = qwen3_batch_size   # 新增（仅作为 OOM 自动降级日志参考值）
+        elif backend in ("qwen3_asr", "qwen3_aligner"):
+            extra["batch_size"] = qwen3_batch_size   # 新增
         aligner = get_aligner(backend, device=resolved_aligner_device, **extra)
         try:
             return aligner.align(align_target_path, text or None, language,
@@ -312,6 +317,7 @@ class AudioProcessingPipeline:
         aligner_device: Optional[str] = None,    # ← 对齐工具运行设备（与 f0_device 解耦，None 时回退到 f0_device）
         whisperx_model: str = "large-v3",       # ← WhisperX 模型大小
         whisperx_batch_size: int = 16,           # ← WhisperX 推理批大小（仅 device=cuda 时有意义）
+        qwen3_batch_size: int = 8,                # ← Qwen3-ASR/Qwen3-FA/NeMo-FA 共用批大小设置
         nemo_model: Optional[str] = None,        # ← NeMo Forced Aligner 模型覆盖（可选）
         english_word_align: bool = False,        # ← 英语单词级对齐
         vsqx_singer: str = "MIKU_V4_Chinese",           # ← VSQX 声库名（由 app.py 按语种注入）
@@ -360,6 +366,7 @@ class AudioProcessingPipeline:
             align_result = _run_alignment(audio_file, text, language, aligner_backend,
                                            f0_device, whisperx_model,
                                            whisperx_batch_size=whisperx_batch_size,
+                                           qwen3_batch_size=qwen3_batch_size,
                                            english_word_align=english_word_align,
                                            nemo_model=nemo_model,
                                            aligner_device=aligner_device,
@@ -463,6 +470,7 @@ class AudioProcessingPipeline:
         aligner_device: Optional[str] = None,    # ← 对齐工具运行设备（与 f0_device 解耦，None 时回退到 f0_device）
         whisperx_model: str = "large-v3",       # ← WhisperX 模型大小
         whisperx_batch_size: int = 16,           # ← WhisperX 推理批大小（仅 device=cuda 时有意义）
+        qwen3_batch_size: int = 8,                # ← Qwen3-ASR/Qwen3-FA/NeMo-FA 共用批大小设置
         nemo_model: Optional[str] = None,        # ← NeMo Forced Aligner 模型覆盖（可选）
         english_word_align: bool = False,        # ← 英语单词级对齐
         align_pitch_shift_semitones: float = 0.0,   # ← 对齐辅助移调（半音），不影响 LAB 时间戳换算
@@ -477,6 +485,7 @@ class AudioProcessingPipeline:
             result = _run_alignment(audio_file, text, language, aligner_backend,
                                     f0_device, whisperx_model,
                                     whisperx_batch_size=whisperx_batch_size,
+                                    qwen3_batch_size=qwen3_batch_size,
                                     english_word_align=english_word_align,
                                     nemo_model=nemo_model,
                                     aligner_device=aligner_device,
@@ -540,6 +549,7 @@ class AudioProcessingPipeline:
         language: str = "",                               # ← 语种，传给构建器防误判
         original_text: str = "",                          # ← 原始歌词文本（汉字/韩文），用于预提取英语单词
         dict_source: str = "default",                      # ← 单词→音素词典来源
+        ja_devoiced_phoneme: bool = False,                      # ← 日语辅音起始音素锁定（<p lock="1">）
     ) -> Dict:
         """仅执行工程文件生成（已有 WAV 以及 LAB/MIDI 之一）"""
         import time
@@ -608,6 +618,7 @@ class AudioProcessingPipeline:
                 language=language,
                 original_text=original_text,   # ← 透传原始文本（仅生成工程模式下可选提供）
                 dict_source=dict_source,
+                ja_devoiced_phoneme=ja_devoiced_phoneme,
             )
 
             result["processing_time"] = int((time.time() - start_time) * 1000)
@@ -647,6 +658,7 @@ class AudioProcessingPipeline:
         aligner_device: Optional[str] = None,    # ← 对齐工具运行设备（与 f0_device 解耦，None 时回退到 f0_device）
         whisperx_model: str = "large-v3",
         whisperx_batch_size: int = 16,           # ← WhisperX 推理批大小（仅 device=cuda 时有意义）
+        qwen3_batch_size: int = 8,                # ← Qwen3-ASR/Qwen3-FA/NeMo-FA 共用批大小设置
         nemo_model: Optional[str] = None,
         english_word_align: bool = False,
         vsqx_singer: str = "MIKU_V4_Chinese",
@@ -656,6 +668,8 @@ class AudioProcessingPipeline:
         dict_source: str = "default",
         processing_mode: str = "full",
         phoneme_mode: str = "none",
+        ja_devoiced_phoneme: bool = False,   # ← 日语辅音起始音素锁定（<p lock="1">），透传给
+                                          #   build_multitrack_project；仅 vsqx 输出生效
         align_pitch_shift_semitones: float = 0.0,   # ← 兼容旧调用方的全局默认值；现推荐通过每个
                                                      #   box 自带的 "align_pitch_shift_semitones"
                                                      #   字段传入，per-box 优先，此参数仅在该字段
@@ -774,6 +788,7 @@ class AudioProcessingPipeline:
             box_word_phoneme_map     = box_override.get("word_phoneme_map", word_phoneme_map)
             box_phoneme_mode         = box_override.get("phoneme_mode", phoneme_mode)
             box_dict_source          = box_override.get("dict_source", dict_source)
+            box_ja_devoiced_phoneme      = bool(box_override.get("ja_devoiced_phoneme", ja_devoiced_phoneme))
 
             # 该对话框自己的 F0/音高相关配置：只替换 override 里显式提供的
             # 字段，bpm 恒定沿用全局 config（见函数 docstring 里 BPM 的说明），
@@ -863,6 +878,7 @@ class AudioProcessingPipeline:
                         audio_adapter, text, box_language, box_aligner_backend,
                         f0_device, whisperx_model,
                         whisperx_batch_size=whisperx_batch_size,
+                        qwen3_batch_size=qwen3_batch_size,
                         english_word_align=box_english_word_align,
                         nemo_model=nemo_model,
                         aligner_device=aligner_device,
@@ -899,6 +915,7 @@ class AudioProcessingPipeline:
                     "word_phoneme_map": box_word_phoneme_map,
                     "dict_source": box_dict_source,
                     "phoneme_mode": box_phoneme_mode,
+                    "ja_devoiced_phoneme": box_ja_devoiced_phoneme,
                 })
 
                 box_result.update(
@@ -942,6 +959,7 @@ class AudioProcessingPipeline:
             vsqx_singer_id=vsqx_singer_id,
             vsqx_singer_bs=vsqx_singer_bs,
             phoneme_mode=phoneme_mode,
+            ja_devoiced_phoneme=ja_devoiced_phoneme,
         )
 
         processing_time = int((time.time() - start_time) * 1000)

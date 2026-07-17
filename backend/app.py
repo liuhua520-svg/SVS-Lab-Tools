@@ -3043,6 +3043,57 @@ def download_mfa_model(language: str):
         return jsonify({"error": f"下载失败: {str(e)}"}), 500
 
 
+@app.route("/api/f0/download-rmvpe", methods=["POST"])
+def download_rmvpe_model():
+    """下载 RMVPE 模型权重 (rmvpe.pt) 到 <项目根>/backend/models/rmvpe/rmvpe.pt"""
+    try:
+        from f0_extractors import rmvpe_model_path, rmvpe_available
+
+        if rmvpe_available():
+            return jsonify({"success": True, "message": "RMVPE 模型已存在，无需重复下载"}), 200
+
+        target_path = rmvpe_model_path()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        url = "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.pt"
+        tmp_path = target_path.with_suffix(".pt.downloading")
+
+        logger.info(f"开始下载 RMVPE 模型: {url} -> {target_path}")
+        try:
+            with requests.get(url, stream=True, timeout=30) as resp:
+                resp.raise_for_status()
+                with open(tmp_path, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+            tmp_path.replace(target_path)
+        except Exception as e:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            logger.error(f"RMVPE 下载失败: {e}", exc_info=True)
+            return jsonify({
+                "success": False,
+                "error": f"下载失败: {str(e)}，请手动从 {url} 下载 rmvpe.pt 并放置到 {target_path}",
+            }), 500
+
+        if not target_path.exists():
+            return jsonify({"success": False, "error": "下载完成但未找到目标文件"}), 500
+
+        logger.info(f"RMVPE 模型下载完成: {target_path}")
+        return jsonify({
+            "success": True,
+            "message": "RMVPE 模型下载完成",
+            "model_path": str(target_path),
+        }), 200
+
+    except Exception as e:
+        logger.error("下载 RMVPE 模型错误: %s", e, exc_info=True)
+        return jsonify({"success": False, "error": f"下载失败: {str(e)}"}), 500
+
+
 @app.route("/api/work-dir/files", methods=["GET"])
 def list_work_dir_files():
     """列出工作目录中的文件"""
@@ -3316,9 +3367,14 @@ def subtitle_recognize():
                               对应 Qwen3-ASR 自动语言检测）
       - device             : "auto"|"cpu"|"cuda"，转发给 qwen3_server.py（默认 "auto"）
       - max_chars          : 单条字幕最大字符数，超过则按标点二次拆分（默认 34）
+      - split_at_sentence_end : 是否允许按句末切分（默认 False）。开启后
+                              无条件遇到句末标点（。！？；等）就切成下
+                              一条字幕，与长度无关；关闭时只有整段超过
+                              max_chars 才会在句末标点处二次拆分
       - allow_comma_split  : 是否把逗号/顿号也当作切分点（默认 False，
-                              只在句末标点处切）。开启后遇到逗号就切成
-                              下一条字幕，与长度无关
+                              只在句末标点处切）。仅在
+                              split_at_sentence_end=True 时才生效；
+                              开启后连逗号也会切成下一条字幕，与长度无关
       - remove_punctuation : 是否在识别结果中移除标点符号（默认 False）
       - close_vad_gaps     : 是否开启"VAD 合并间隔"（默认 False）。开启后
                               相邻两条字幕间只要静音间隙大于
@@ -3328,6 +3384,9 @@ def subtitle_recognize():
                               文本、不减少条目数
       - vad_gap_threshold_sec : 触发这一处理的间隔下限（秒，默认 0.6）；
                               间隔小于等于该值时保持原样不动
+      - batch_size         : Qwen3-ASR 推理批大小（默认 8），透传给
+                              qwen3_server.py /asr 的 max_inference_batch_size；
+                              显存不足调小，显存充裕可调大提速
 
     与 /api/pipeline/job/<job_id> 使用同一套"轮询进度"前端交互模式，但
     走独立的 job 存储（/api/subtitle/job/<job_id>），避免和对齐任务混在
@@ -3355,6 +3414,7 @@ def subtitle_recognize():
         except (TypeError, ValueError):
             max_chars = subtitle_processor.MAX_SUBTITLE_CHARS
         max_chars = max(8, min(max_chars, 120))
+        split_at_sentence_end = bool(data.get("split_at_sentence_end", False))
         allow_comma_split = bool(data.get("allow_comma_split", False))
         remove_punctuation = bool(data.get("remove_punctuation", False))
         close_vad_gaps = bool(data.get("close_vad_gaps", False))
@@ -3363,6 +3423,11 @@ def subtitle_recognize():
         except (TypeError, ValueError):
             vad_gap_threshold_sec = 0.6
         vad_gap_threshold_sec = max(0.05, min(vad_gap_threshold_sec, 5.0))
+        try:
+            batch_size = int(data.get("batch_size", 8))
+        except (TypeError, ValueError):
+            batch_size = 8
+        batch_size = max(1, min(batch_size, 64))
 
         ffmpeg_ok, ffmpeg_msg = subtitle_processor.check_ffmpeg_available()
         if not ffmpeg_ok:
@@ -3398,9 +3463,11 @@ def subtitle_recognize():
                     max_chars=max_chars,
                     progress_cb=_progress,
                     allow_comma_split=allow_comma_split,
+                    split_at_sentence_end=split_at_sentence_end,
                     remove_punctuation=remove_punctuation,
                     close_vad_gaps=close_vad_gaps,
                     vad_gap_threshold_sec=vad_gap_threshold_sec,
+                    batch_size=batch_size,
                 )
 
                 _set_subtitle_job(
