@@ -61,6 +61,7 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 | accelerate         | >=0.27.0      | [GitHub](https://github.com/huggingface/accelerate) |
 | g2p_en                     | >=0.3.1       | [GitHub](https://github.com/Kyubyong/g2p) |
 | qwen-asr         | >=1.0.0      | [GitHub](https://github.com/QwenLM/Qwen3-ASR) |
+| qwen-tts         | -      | [GitHub](https://github.com/QwenLM/Qwen3-TTS) |
 | nltk         | >=1.0.0      | [GitHub](https://github.com/nltk/nltk) |
 | requests     | -             | [GitHub](https://github.com/psf/requests) |
 | qwen-asr>　　 | =1.0.0  　　　 | [GitHub](https://github.com/QwenLM/Qwen3-ASR) |
