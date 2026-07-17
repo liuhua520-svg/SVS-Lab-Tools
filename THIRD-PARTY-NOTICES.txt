@@ -167,6 +167,15 @@ Based on backend/requirements.txt
 
   Link: https://github.com/rany2/edge-tts
 
+- qwen-tts
+  Copyright (c) Alibaba Qwen Team
+  License: Apache-2.0
+  Link: https://github.com/QwenLM/Qwen3-TTS
+
+  Note:
+  Qwen3-TTS model weights
+  are distributed under separate model license terms.
+
 === Windows 支持 ===
 
 - pywin32>=306; sys_platform == "win32"
