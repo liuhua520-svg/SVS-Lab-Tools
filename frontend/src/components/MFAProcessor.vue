@@ -313,7 +313,9 @@
                 </el-button>
                 <audio v-if="segmentPreview.audioUrl" :src="segmentPreview.audioUrl" controls style="height: 32px; vertical-align: middle" />
                 <span v-if="segmentPreview.loading" style="color: var(--el-text-color-secondary); font-size: 13px">
-                  {{ t('processor.ttsSegmentPreviewGenerating') }}
+                  {{ segmentPreview.progress && segmentPreview.progress.total
+                    ? t('processor.ttsSegmentPreviewGeneratingProgress', { done: segmentPreview.progress.done, total: segmentPreview.progress.total })
+                    : t('processor.ttsSegmentPreviewGenerating') }}
                 </span>
                 <span v-else-if="!segmentPreview.audioUrl && !segmentPreview.error" style="color: var(--el-text-color-secondary); font-size: 13px">
                   {{ t('processor.ttsSegmentPreviewIdle') }}
@@ -2393,6 +2395,7 @@ const segmentPreview = ref<{
   sentenceCount: number
   warnings: string[]
   error: string
+  progress: { done: number; total: number } | null
 }>({
   loading: false,
   audioUrl: '',
@@ -2400,8 +2403,59 @@ const segmentPreview = ref<{
   sentenceCount: 0,
   warnings: [],
   error: '',
+  progress: null,
 })
 let segmentPreviewRequestSeq = 0
+// 分段预览专用的轮询定时器：与"开始处理"用的 jobPollTimer/currentJobId
+// 是各自独立的一套状态，避免用户先点"生成预览"、还没轮询完又点"开始
+// 处理"（或反过来）时两边互相清掉对方的定时器/job 归属。
+let previewJobPollTimer: number | null = null
+
+const clearPreviewJobPolling = () => {
+  if (previewJobPollTimer !== null) {
+    window.clearTimeout(previewJobPollTimer)
+    previewJobPollTimer = null
+  }
+}
+
+// 分段预览任务轮询：与 waitForJobFinished 用同一个 /api/pipeline/job/<id>
+// 状态接口（后端 run_tts_preview_job 与 run_tts_pipeline_job 共用
+// JOBS/set_job 基础设施），单独维护定时器，避免和"开始处理"轮询互相打断。
+const waitForPreviewJobFinished = (jobId: string): Promise<any> => {
+  clearPreviewJobPolling()
+
+  return new Promise((resolve, reject) => {
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/pipeline/job/${jobId}`)
+        const data = await res.json()
+
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || t('processor.jobStatusFailed'))
+        }
+
+        const job = data.job || {}
+
+        if (job.status === 'done') {
+          resolve(job.result || job)
+          return
+        } else if (job.status === 'failed') {
+          throw new Error(job.error || t('processor.jobFailed'))
+        }
+        // queued / running: 继续轮询，顺带把最新的 done/total 句数同步给
+        // "正在生成分段预览…" 提示，让用户能看到实时进度而不是干等。
+        if (job.progress) {
+          segmentPreview.value.progress = { done: job.progress.done || 0, total: job.progress.total || 0 }
+        }
+
+        previewJobPollTimer = window.setTimeout(tick, 1500)
+      } catch (e) {
+        reject(e)
+      }
+    }
+    tick()
+  })
+}
 
 const narratorManagerVisible = ref(false)
 const narratorForm = ref<TtsNarrator>({ id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%' })
@@ -2848,6 +2902,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalUndoRedoKeydown)
+  clearPreviewJobPolling()
 })
 
 // ── TTS跟读辅助函数 ──────────────────────────────────────────────────
@@ -3057,8 +3112,9 @@ const runSegmentPreview = async () => {
   if (inputMode.value !== 'tts') return
   const text = (formData.value.text || '').trim()
   if (!text || !qwen3TtsModeReady.value) {
+    clearPreviewJobPolling()
     segmentPreview.value = {
-      loading: false, audioUrl: '', previewId: '', sentenceCount: 0, warnings: [], error: '',
+      loading: false, audioUrl: '', previewId: '', sentenceCount: 0, warnings: [], error: '', progress: null,
     }
     return
   }
@@ -3066,6 +3122,7 @@ const runSegmentPreview = async () => {
   const mySeq = ++segmentPreviewRequestSeq
   segmentPreview.value.loading = true
   segmentPreview.value.error = ''
+  segmentPreview.value.progress = null
   try {
     const qwen3_tts_options = await buildQwen3TtsOptionsForPreview()
     const res = await fetch('/api/tts/synthesize_preview', {
@@ -3087,30 +3144,48 @@ const runSegmentPreview = async () => {
     // 回来时应该被忽略，避免界面倒退回旧结果。
     if (mySeq !== segmentPreviewRequestSeq) return
 
-    if (!data.success) {
+    if (!data.success || !data.job_id) {
       segmentPreview.value = {
         loading: false, audioUrl: '', previewId: '', sentenceCount: 0,
-        warnings: [], error: data.error || t('processor.ttsSegmentPreviewFailed'),
+        warnings: [], error: data.error || t('processor.ttsSegmentPreviewFailed'), progress: null,
+      }
+      return
+    }
+
+    // 启动任务已成功拿到 job_id：接下来轮询 /api/pipeline/job/<job_id>
+    // 直到 done/failed，不再靠一次性阻塞的 fetch 干等（合成慢的引擎/长
+    // 文本此前会导致连接长时间挂起、界面一直停在"正在生成分段预览…"
+    // 却拿不到任何进度或结果）。
+    const result = await waitForPreviewJobFinished(data.job_id)
+    if (mySeq !== segmentPreviewRequestSeq) return
+
+    if (!result || !result.success) {
+      segmentPreview.value = {
+        loading: false, audioUrl: '', previewId: '', sentenceCount: 0,
+        warnings: [], error: (result && result.error) || t('processor.ttsSegmentPreviewFailed'), progress: null,
       }
       return
     }
 
     if (segmentPreview.value.audioUrl) URL.revokeObjectURL(segmentPreview.value.audioUrl)
-    const blob = await (await fetch(`data:audio/wav;base64,${data.audio_base64}`)).blob()
+    const blob = await (await fetch(`data:audio/wav;base64,${result.audio_base64}`)).blob()
     segmentPreview.value = {
       loading: false,
       audioUrl: URL.createObjectURL(blob),
-      previewId: data.preview_id || '',
-      sentenceCount: data.sentence_count || 0,
-      warnings: data.warnings || [],
+      previewId: result.preview_id || '',
+      sentenceCount: result.sentence_count || 0,
+      warnings: result.warnings || [],
       error: '',
+      progress: null,
     }
   } catch (e: any) {
     if (mySeq !== segmentPreviewRequestSeq) return
     segmentPreview.value = {
       loading: false, audioUrl: '', previewId: '', sentenceCount: 0,
-      warnings: [], error: e?.message || String(e),
+      warnings: [], error: e?.message || String(e), progress: null,
     }
+  } finally {
+    clearPreviewJobPolling()
   }
 }
 

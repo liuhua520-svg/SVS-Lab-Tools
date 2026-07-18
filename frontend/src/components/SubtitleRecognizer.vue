@@ -278,6 +278,19 @@
           <el-button @click="exportSubtitle('srt')">📥 {{ t('subtitle.exportSrt') }}</el-button>
           <el-button @click="exportSubtitle('lrc')">📥 {{ t('subtitle.exportLrc') }}</el-button>
           <el-button @click="exportSubtitle('txt')">📥 {{ t('subtitle.exportTxt') }}</el-button>
+          <el-tooltip v-if="mediaInfo && !mediaInfo.is_video" :content="t('subtitle.embedAudioHint')" placement="top">
+            <el-button type="primary" :loading="embedding === 'soft'" @click="embedSubtitleIntoMedia('soft')">
+              🎵 {{ t('subtitle.embedIntoAudio') }}
+            </el-button>
+          </el-tooltip>
+          <el-button v-else type="primary" :loading="embedding === 'soft'" @click="embedSubtitleIntoMedia('soft')">
+            🎬 {{ t('subtitle.embedIntoVideo') }}
+          </el-button>
+          <el-tooltip v-if="mediaInfo && !mediaInfo.is_video" :content="t('subtitle.embedVideoHint')" placement="top">
+            <el-button type="success" :loading="embedding === 'burn'" @click="embedSubtitleIntoMedia('burn')">
+              🔥 {{ t('subtitle.embedBurnVideo') }}
+            </el-button>
+          </el-tooltip>
         </div>
       </div>
     </el-card>
@@ -785,6 +798,83 @@ const exportSubtitle = async (format: 'srt' | 'lrc' | 'txt') => {
     ElMessage.success(`✅ ${t('subtitle.exportSuccess')}`)
   } catch (e: any) {
     ElMessage.error(`❌ ${e?.message || String(e)}`)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 字幕嵌入：把当前编辑区字幕用 ffmpeg 封装进原始视频/音频，生成新文件
+// 后触发浏览器下载。与 exportSubtitle 共用同一份 entries，但落盘/耗时
+// 更长，走独立的异步 job 轮询（不复用 pollRecognizeJob，避免和识别
+// 进度条的状态绑在一起）。两种模式：
+//   - 'soft' : 软字幕封装（/api/subtitle/embed）。视频走原容器格式，
+//              音频因容器限制统一封装成 .mka——多数播放器没问题，但
+//              VLC 等在"纯音频文件"上不一定渲染字幕轨（没有画面可
+//              叠加），仅推荐给熟悉播放器字幕轨切换的用户。
+//   - 'burn' : 硬字幕烧录（/api/subtitle/embed-video），仅音频文件可
+//              用。生成一个纯色背景 + 烧录字幕的 mp4，字幕不可关闭，
+//              但保证任何播放器打开都能直接看到。
+// ─────────────────────────────────────────────────────────────────
+const embedding = ref<'soft' | 'burn' | false>(false)
+
+const embedSubtitleIntoMedia = async (mode: 'soft' | 'burn') => {
+  if (!mediaInfo.value) {
+    ElMessage.warning(t('subtitle.needUploadFirst'))
+    return
+  }
+  if (!entries.value.length) {
+    ElMessage.warning(t('subtitle.exportEmpty'))
+    return
+  }
+
+  embedding.value = mode
+  try {
+    const endpoint = mode === 'burn' ? '/api/subtitle/embed-video' : '/api/subtitle/embed'
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        media_id: mediaInfo.value.media_id,
+        entries: entries.value.map((e) => ({ start: e.start, end: e.end, text: e.text })),
+      }),
+    })
+    const data = await res.json()
+    if (!res.ok || !data.success) throw new Error(data.error || t('subtitle.embedFailed'))
+
+    const downloadUrl = await new Promise<string>((resolve, reject) => {
+      const tick = async () => {
+        try {
+          const jobRes = await fetch(`/api/subtitle/job/${data.job_id}`)
+          const jobData = await jobRes.json()
+          if (!jobRes.ok || !jobData.success) throw new Error(jobData.error || t('subtitle.embedFailed'))
+
+          const job = jobData.job || {}
+          if (job.status === 'done') {
+            resolve(job.result?.download_url)
+            return
+          }
+          if (job.status === 'failed') {
+            reject(new Error(job.error || t('subtitle.embedFailed')))
+            return
+          }
+          window.setTimeout(tick, 1200)
+        } catch (e) {
+          reject(e)
+        }
+      }
+      tick()
+    })
+
+    // 直接用 <a download> 触发浏览器另存为；文件已经在服务端生成好，
+    // 不需要像 exportSubtitle 那样先取文本再拼 Blob。
+    const link = document.createElement('a')
+    link.href = downloadUrl
+    link.click()
+
+    ElMessage.success(`✅ ${t('subtitle.embedSuccess')}`)
+  } catch (e: any) {
+    ElMessage.error(`❌ ${e?.message || String(e)}`)
+  } finally {
+    embedding.value = false
   }
 }
 
