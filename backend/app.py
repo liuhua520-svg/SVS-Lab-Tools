@@ -2608,6 +2608,89 @@ def tts_preview():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+def run_tts_preview_job(
+    job_id: str,
+    text: str,
+    language: str,
+    voice: str,
+    engine: str,
+    rate: str,
+    volume: str,
+    pitch: str,
+    qwen3_tts_options: Optional[Dict],
+):
+    """
+    手动分段预览的后台任务体：与 run_tts_pipeline_job 共用同一套
+    JOBS/set_job 轮询基础设施（/api/pipeline/job/<job_id>），只是这里只做
+    "逐句 TTS 合成 + 拼接"，不做 Qwen3-FA 对齐。
+
+    合成较慢的引擎（尤其 Qwen3-TTS 本地模型、长文本多句）此前是在请求
+    线程里同步跑完才返回响应，连接慢或合成耗时较长时前端会一直卡在
+    "正在生成分段预览…" 且没有任何进度或超时反馈；改成后台线程 + 轮询后，
+    前端可以持续拿到 done 句数 / 总句数，且不再受单次 HTTP 请求超时限制。
+    """
+    try:
+        set_job(job_id, status="running", started_at=datetime.now().isoformat(),
+                progress={"done": 0, "total": 0})
+
+        def _progress_cb(done, total):
+            set_job(job_id, status="running", progress={"done": done, "total": total})
+
+        preview_dir = WORK_DIR / "_tts_preview"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"preview_{uuid.uuid4().hex[:10]}"
+
+        result = tts_processor.synthesize_segments_only(
+            text=text, language=language, voice=voice, engine=engine,
+            work_dir=str(preview_dir), stem=stem,
+            rate=rate, volume=volume, pitch=pitch,
+            qwen3_tts_options=qwen3_tts_options,
+            progress_cb=_progress_cb,
+        )
+
+        if not result.get("success"):
+            set_job(
+                job_id, status="failed", finished_at=datetime.now().isoformat(),
+                error=result.get("error", "预览生成失败"),
+            )
+            return
+
+        wav_path = Path(result["wav_path"])
+        try:
+            audio_b64 = base64.b64encode(wav_path.read_bytes()).decode("ascii")
+        except Exception:
+            shutil.rmtree(result["segments_dir"], ignore_errors=True)
+            wav_path.unlink(missing_ok=True)
+            raise
+
+        preview_id = _tts_preview_store({
+            "segments_dir": result["segments_dir"],
+            "sentences": result["sentences"],
+            "wav_path": str(wav_path),
+            "created_at": datetime.now().isoformat(),
+            # 复用校验用：/api/tts/process 提交的这几项必须与预览时完全
+            # 一致，否则视为预览已过期。qwen3_tts_options 序列化成
+            # JSON 字符串参与比对（dict 直接比较也可以，这里保持与其它
+            # 标量字段一致的简单写法）。
+            "text": text, "engine": engine, "voice": voice,
+            "rate": rate, "volume": volume, "pitch": pitch, "language": language,
+            "qwen3_tts_options_json": json.dumps(qwen3_tts_options or {}, sort_keys=True),
+        })
+
+        set_job(job_id, status="done", finished_at=datetime.now().isoformat(), result={
+            "success": True,
+            "preview_id": preview_id,
+            "audio_base64": audio_b64,
+            "sentence_count": result.get("sentence_count", 0),
+            "audio_duration": result.get("audio_duration", 0),
+            "warnings": result.get("warnings", []),
+        })
+
+    except Exception as e:
+        logger.exception("TTS 分段预览后台任务异常")
+        set_job(job_id, status="failed", finished_at=datetime.now().isoformat(), error=str(e))
+
+
 @app.route("/api/tts/synthesize_preview", methods=["POST"])
 def tts_synthesize_preview():
     """
@@ -2619,6 +2702,11 @@ def tts_synthesize_preview():
     /api/tts/process），避免"只是想听听音色/语速"也要跑一次对齐。
 
     不再有句子数量上限：预览会合成完整输入文本（不再只取前 N 句）。
+
+    异步后台任务版：与 /api/tts/process 共用 /api/pipeline/job/<job_id>
+    轮询进度（合成耗时长/引擎较慢时不再卡在一次同步请求里得不到任何
+    反馈）。本接口立即返回 job_id，前端轮询到 status="done" 后从
+    job.result 里取 audio_base64 / preview_id 等字段。
 
     合成产物（分句音频 + 拼接后的完整音频）会保留在磁盘上并按 preview_id
     缓存，如果用户紧接着点击"开始处理"且没有改动文本/引擎/音色/语速/
@@ -2649,53 +2737,25 @@ def tts_synthesize_preview():
         volume = payload.get("volume", "+0%")
         pitch = payload.get("pitch", "+0Hz")
 
-        preview_dir = WORK_DIR / "_tts_preview"
-        preview_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"preview_{uuid.uuid4().hex[:10]}"
+        job_id = uuid.uuid4().hex
+        set_job(job_id, status="queued", created_at=datetime.now().isoformat())
 
-        result = tts_processor.synthesize_segments_only(
-            text=text, language=language, voice=voice, engine=engine,
-            work_dir=str(preview_dir), stem=stem,
-            rate=rate, volume=volume, pitch=pitch,
-            qwen3_tts_options=qwen3_tts_options,
-        )
+        logger.info(f"TTS 分段预览启动 (engine={engine})，投递后台任务: {job_id}")
 
-        if not result.get("success"):
-            return jsonify({"success": False, "error": result.get("error", "预览生成失败")}), 400
+        Thread(
+            target=run_tts_preview_job,
+            daemon=True,
+            kwargs=dict(
+                job_id=job_id, text=text, language=language, voice=voice,
+                engine=engine, rate=rate, volume=volume, pitch=pitch,
+                qwen3_tts_options=qwen3_tts_options,
+            ),
+        ).start()
 
-        wav_path = Path(result["wav_path"])
-        try:
-            audio_b64 = base64.b64encode(wav_path.read_bytes()).decode("ascii")
-        except Exception:
-            shutil.rmtree(result["segments_dir"], ignore_errors=True)
-            wav_path.unlink(missing_ok=True)
-            raise
-
-        preview_id = _tts_preview_store({
-            "segments_dir": result["segments_dir"],
-            "sentences": result["sentences"],
-            "wav_path": str(wav_path),
-            "created_at": datetime.now().isoformat(),
-            # 复用校验用：/api/tts/process 提交的这几项必须与预览时完全
-            # 一致，否则视为预览已过期。qwen3_tts_options 序列化成
-            # JSON 字符串参与比对（dict 直接比较也可以，这里保持与其它
-            # 标量字段一致的简单写法）。
-            "text": text, "engine": engine, "voice": voice,
-            "rate": rate, "volume": volume, "pitch": pitch, "language": language,
-            "qwen3_tts_options_json": json.dumps(qwen3_tts_options or {}, sort_keys=True),
-        })
-
-        return jsonify({
-            "success": True,
-            "preview_id": preview_id,
-            "audio_base64": audio_b64,
-            "sentence_count": result.get("sentence_count", 0),
-            "audio_duration": result.get("audio_duration", 0),
-            "warnings": result.get("warnings", []),
-        }), 200
+        return jsonify({"success": True, "job_id": job_id, "status": "queued"}), 202
 
     except Exception as e:
-        logger.error(f"TTS 分段预览失败: {e}", exc_info=True)
+        logger.error(f"TTS 分段预览启动失败: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
