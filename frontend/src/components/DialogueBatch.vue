@@ -778,6 +778,9 @@
                     🔄 {{ box.ttsSegmentPreviewUrl ? t('processor.ttsRegeneratePreview') : t('processor.ttsGeneratePreview') }}
                   </el-button>
                   <audio v-if="box.ttsSegmentPreviewUrl" :src="box.ttsSegmentPreviewUrl" controls style="height: 28px; margin-left: 8px; vertical-align: middle" />
+                  <span v-if="box.ttsSegmentPreviewLoading && box.ttsSegmentPreviewProgress && box.ttsSegmentPreviewProgress.total" style="margin-left: 8px; color: var(--el-text-color-secondary); font-size: 13px">
+                    {{ t('processor.ttsSegmentPreviewGeneratingProgress', { done: box.ttsSegmentPreviewProgress.done, total: box.ttsSegmentPreviewProgress.total }) }}
+                  </span>
                   <div v-if="box.ttsSegmentPreviewSentenceCount && !box.ttsSegmentPreviewError" style="margin-top: 4px">
                     <el-text type="info" size="small">
                       {{ t('processor.ttsSegmentPreviewCount', { count: box.ttsSegmentPreviewSentenceCount }) }}
@@ -1692,6 +1695,7 @@ interface DialogueBox {
   ttsSegmentPreviewSentenceCount: number
   ttsSegmentPreviewWarnings: string[]
   ttsSegmentPreviewError: string
+  ttsSegmentPreviewProgress: { done: number; total: number } | null
   // 该对话框的"单独设置"（对齐后端 / 语言 / 英语单词级对齐 / 词典 /
   // 音素转换 / 高级设置），默认不开启，跟随页面顶部全局设置提交。
   override: BoxOverride
@@ -2594,7 +2598,59 @@ const previewBoxTts = async (box: DialogueBox) => {
 // 生成成功后拿到的 ttsSegmentPreviewId 会在点击共享的"开始处理"按钮时
 // 一并提交；只要该框的文本/引擎/音色/语速/音调/音量之后没有变化，后端
 // 会直接复用这份分句音频去对齐，不会重新合成一遍。
+//
+// /api/tts/synthesize_preview 是异步任务接口（立即返回 job_id，实际合成
+// 在后台线程跑），需要轮询 /api/pipeline/job/<job_id> 直到 done/failed
+// ——不再是一次性阻塞到合成完毕才返回的同步请求。多个对话框可能同时
+// 点"生成预览"，各自轮询互不干扰，因此按 box.id 维护独立的定时器。
 let boxSegmentPreviewSeq = 0
+const boxSegmentPreviewPollTimers = new Map<number, number>()
+
+const clearBoxSegmentPreviewPolling = (boxId: number) => {
+  const timer = boxSegmentPreviewPollTimers.get(boxId)
+  if (timer !== undefined) {
+    window.clearTimeout(timer)
+    boxSegmentPreviewPollTimers.delete(boxId)
+  }
+}
+
+const waitForBoxPreviewJobFinished = (boxId: number, jobId: string): Promise<any> => {
+  clearBoxSegmentPreviewPolling(boxId)
+
+  return new Promise((resolve, reject) => {
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/pipeline/job/${jobId}`)
+        const data = await res.json()
+
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || t('processor.jobStatusFailed'))
+        }
+
+        const job = data.job || {}
+
+        if (job.status === 'done') {
+          resolve(job.result || job)
+          return
+        } else if (job.status === 'failed') {
+          throw new Error(job.error || t('processor.jobFailed'))
+        }
+
+        const box = boxes.value.find((b) => b.id === boxId)
+        if (box && job.progress) {
+          box.ttsSegmentPreviewProgress = { done: job.progress.done || 0, total: job.progress.total || 0 }
+        }
+
+        const timer = window.setTimeout(tick, 1500)
+        boxSegmentPreviewPollTimers.set(boxId, timer)
+      } catch (e) {
+        reject(e)
+      }
+    }
+    tick()
+  })
+}
+
 const runBoxSegmentPreview = async (box: DialogueBox) => {
   const text = (box.text || '').trim()
   if (!text || !boxQwen3TtsModeReady(box)) return
@@ -2602,6 +2658,7 @@ const runBoxSegmentPreview = async (box: DialogueBox) => {
   const mySeq = ++boxSegmentPreviewSeq
   box.ttsSegmentPreviewLoading = true
   box.ttsSegmentPreviewError = ''
+  box.ttsSegmentPreviewProgress = null
   try {
     const qwen3_tts_options = await buildBoxQwen3TtsOptionsForPreview(box)
     const res = await fetch('/api/tts/synthesize_preview', {
@@ -2628,31 +2685,52 @@ const runBoxSegmentPreview = async (box: DialogueBox) => {
     // 足够避免同一个框内的乱序覆盖（不同框之间互不影响各自的状态字段）。
     if (mySeq !== boxSegmentPreviewSeq && box.ttsSegmentPreviewLoading === false) return
 
-    if (!data.success) {
+    if (!data.success || !data.job_id) {
       box.ttsSegmentPreviewLoading = false
       box.ttsSegmentPreviewUrl = ''
       box.ttsSegmentPreviewId = ''
       box.ttsSegmentPreviewSentenceCount = 0
       box.ttsSegmentPreviewWarnings = []
       box.ttsSegmentPreviewError = data.error || t('processor.ttsSegmentPreviewFailed')
+      box.ttsSegmentPreviewProgress = null
+      return
+    }
+
+    // 启动任务已成功拿到 job_id：轮询直到完成，不再靠一次性阻塞的 fetch
+    // 干等（合成慢的引擎/长文本此前会导致连接长时间挂起，界面一直卡在
+    // 加载态却拿不到任何进度或结果）。
+    const result = await waitForBoxPreviewJobFinished(box.id, data.job_id)
+    if (mySeq !== boxSegmentPreviewSeq && box.ttsSegmentPreviewLoading === false) return
+
+    if (!result || !result.success) {
+      box.ttsSegmentPreviewLoading = false
+      box.ttsSegmentPreviewUrl = ''
+      box.ttsSegmentPreviewId = ''
+      box.ttsSegmentPreviewSentenceCount = 0
+      box.ttsSegmentPreviewWarnings = []
+      box.ttsSegmentPreviewError = (result && result.error) || t('processor.ttsSegmentPreviewFailed')
+      box.ttsSegmentPreviewProgress = null
       return
     }
 
     if (box.ttsSegmentPreviewUrl) URL.revokeObjectURL(box.ttsSegmentPreviewUrl)
-    const blob = await (await fetch(`data:audio/wav;base64,${data.audio_base64}`)).blob()
+    const blob = await (await fetch(`data:audio/wav;base64,${result.audio_base64}`)).blob()
     box.ttsSegmentPreviewUrl = URL.createObjectURL(blob)
-    box.ttsSegmentPreviewId = data.preview_id || ''
-    box.ttsSegmentPreviewSentenceCount = data.sentence_count || 0
-    box.ttsSegmentPreviewWarnings = data.warnings || []
+    box.ttsSegmentPreviewId = result.preview_id || ''
+    box.ttsSegmentPreviewSentenceCount = result.sentence_count || 0
+    box.ttsSegmentPreviewWarnings = result.warnings || []
     box.ttsSegmentPreviewError = ''
+    box.ttsSegmentPreviewProgress = null
   } catch (e: any) {
     box.ttsSegmentPreviewUrl = ''
     box.ttsSegmentPreviewId = ''
     box.ttsSegmentPreviewSentenceCount = 0
     box.ttsSegmentPreviewWarnings = []
     box.ttsSegmentPreviewError = e?.message || String(e)
+    box.ttsSegmentPreviewProgress = null
   } finally {
     box.ttsSegmentPreviewLoading = false
+    clearBoxSegmentPreviewPolling(box.id)
   }
 }
 
@@ -2929,6 +3007,7 @@ const createBox = (): DialogueBox => ({
   ttsSegmentPreviewSentenceCount: 0,
   ttsSegmentPreviewWarnings: [],
   ttsSegmentPreviewError: '',
+  ttsSegmentPreviewProgress: null,
   override: createBoxOverride(),
 })
 
