@@ -3624,6 +3624,242 @@ def subtitle_split_entry():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route("/api/subtitle/embed", methods=["POST"])
+def subtitle_embed():
+    """
+    把前端当前编辑好的字幕，以"软字幕"（独立字幕轨，播放器里可开关/切换，
+    不烧录进画面）方式封装进原始视频/音频，生成一个可下载的新文件。
+
+    与 /api/subtitle/export（只返回 SRT/LRC/TXT 文本）是两回事：这里落盘
+    生成的是一个完整的新媒体文件，用 ffmpeg "-c copy" 只拷贝原始视频/
+    音频流、新增一条字幕流，速度接近纯文件拷贝，不重新编码、不损失画质
+    音质。大文件封装可能耗时数秒到数十秒，所以走异步 job 轮询，复用
+    /api/subtitle/recognize 那一套 job 存储。
+
+    body（JSON）：
+      - media_id : /api/subtitle/upload 返回的媒体 ID（必填）
+      - entries  : [{"start": 1.2, "end": 3.4, "text": "..."}, ...]（必填，
+                   与 /api/subtitle/export 同结构，即前端此刻编辑区里的
+                   最终字幕内容，不依赖识别阶段是否还留有该任务的 job）
+
+    轮询 /api/subtitle/job/<job_id>，done 后 job.result 里的
+    download_url 即可直接用于下载（GET，浏览器可直接触发保存）。
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        media_id = (data.get("media_id") or "").strip()
+        entries = data.get("entries") or []
+        if not media_id:
+            return jsonify({"success": False, "error": "缺少 media_id"}), 400
+        if not isinstance(entries, list) or not entries:
+            return jsonify({"success": False, "error": "没有可嵌入的字幕内容"}), 400
+
+        media_dir = (SUBTITLE_DIR / media_id).resolve()
+        if not str(media_dir).startswith(str(SUBTITLE_DIR)) or not media_dir.is_dir():
+            return jsonify({"success": False, "error": "媒体不存在或已过期，请重新上传"}), 404
+
+        # 原始媒体文件：目录下除了识别阶段产生的 _extracted_16k.wav /
+        # 本接口自身产物（_embed_ 软字幕 / _embedvideo_ 硬字幕烧录）
+        # 之外的那个文件。
+        media_files = [
+            p for p in media_dir.iterdir()
+            if p.is_file() and p.name != "_extracted_16k.wav"
+            and not p.name.startswith("_embed_") and not p.name.startswith("_embedvideo_")
+        ]
+        if not media_files:
+            return jsonify({"success": False, "error": "媒体目录为空，请重新上传"}), 404
+        src_path = media_files[0]
+
+        ffmpeg_ok, ffmpeg_msg = subtitle_processor.check_ffmpeg_available()
+        if not ffmpeg_ok:
+            return jsonify({"success": False, "error": ffmpeg_msg}), 400
+
+        try:
+            srt_content = subtitle_processor.export_srt(entries)
+        except Exception as e:
+            return jsonify({"success": False, "error": f"字幕内容有误，无法生成 SRT: {e}"}), 400
+
+        job_id = uuid.uuid4().hex
+        _set_subtitle_job(job_id, status="running", media_id=media_id, progress={"stage": "embed"})
+
+        def _run():
+            try:
+                srt_path = media_dir / f"_embed_{job_id}.srt"
+                srt_path.write_text(srt_content, encoding="utf-8")
+
+                is_audio_only = not subtitle_processor.is_video_file(str(src_path))
+                # 音频输入强制走 .mka（Matroska Audio）——WAV/MP3/FLAC 等
+                # 常见音频容器完全不支持字幕流，mux_soft_subtitles 内部
+                # 已经固定用 "-f matroska" 复用，输出文件名后缀必须跟着
+                # 改成 .mka，否则文件名后缀和实际容器格式对不上。
+                out_ext = ".mka" if is_audio_only else src_path.suffix
+                out_name = f"_embed_{job_id}{out_ext}"
+                out_path = media_dir / out_name
+
+                subtitle_processor.mux_soft_subtitles(
+                    str(src_path), str(srt_path), str(out_path),
+                    is_audio_only=is_audio_only,
+                )
+
+                _set_subtitle_job(
+                    job_id,
+                    status="done",
+                    result={
+                        "success": True,
+                        "filename": f"{Path(src_path).stem}_字幕{out_ext}",
+                        "download_url": f"/api/subtitle/embed/download/{media_id}/{out_name}",
+                    },
+                )
+            except Exception as e:
+                logger.error(f"字幕嵌入任务失败: {e}", exc_info=True)
+                _set_subtitle_job(job_id, status="failed", error=str(e))
+
+        Thread(target=_run, daemon=True).start()
+
+        return jsonify({"success": True, "job_id": job_id}), 200
+
+    except Exception as e:
+        logger.error(f"字幕嵌入启动失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/subtitle/embed-video", methods=["POST"])
+def subtitle_embed_video():
+    """
+    专供纯音频文件使用：把当前编辑区字幕烧录（硬字幕，不可关闭）进一段
+    纯色背景画面，与原始音频合成一个标准 mp4。
+
+    与 /api/subtitle/embed（软字幕）的关系：软字幕封装音频只能落到
+    .mka 容器，而不少播放器（包括 VLC 桌面端）在"纯音频文件"上不会
+    渲染字幕轨——即便字幕轨已启用，也没有画面可以叠加显示。这个接口
+    换一种更"笨"但更可靠的方式：造一帧纯色画面撑出一个标准视频容器，
+    把字幕直接画进画面里，任何播放器打开都能看到，代价是字幕不能像
+    软字幕那样被关闭/切换语言。
+
+    body（JSON）：
+      - media_id : /api/subtitle/upload 返回的媒体 ID（必填，且必须是
+                   音频文件；视频文件请使用 /api/subtitle/embed）
+      - entries  : [{"start": 1.2, "end": 3.4, "text": "..."}, ...]（必填）
+
+    轮询方式与 /api/subtitle/embed 完全一致，同样用
+    /api/subtitle/job/<job_id>。
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        media_id = (data.get("media_id") or "").strip()
+        entries = data.get("entries") or []
+        if not media_id:
+            return jsonify({"success": False, "error": "缺少 media_id"}), 400
+        if not isinstance(entries, list) or not entries:
+            return jsonify({"success": False, "error": "没有可嵌入的字幕内容"}), 400
+
+        media_dir = (SUBTITLE_DIR / media_id).resolve()
+        if not str(media_dir).startswith(str(SUBTITLE_DIR)) or not media_dir.is_dir():
+            return jsonify({"success": False, "error": "媒体不存在或已过期，请重新上传"}), 404
+
+        media_files = [
+            p for p in media_dir.iterdir()
+            if p.is_file() and p.name != "_extracted_16k.wav"
+            and not p.name.startswith("_embed_") and not p.name.startswith("_embedvideo_")
+        ]
+        if not media_files:
+            return jsonify({"success": False, "error": "媒体目录为空，请重新上传"}), 404
+        src_path = media_files[0]
+
+        if subtitle_processor.is_video_file(str(src_path)):
+            return jsonify({"success": False, "error": "该媒体已是视频，请使用软字幕导出"}), 400
+
+        ffmpeg_ok, ffmpeg_msg = subtitle_processor.check_ffmpeg_available()
+        if not ffmpeg_ok:
+            return jsonify({"success": False, "error": ffmpeg_msg}), 400
+
+        try:
+            srt_content = subtitle_processor.export_srt(entries)
+        except Exception as e:
+            return jsonify({"success": False, "error": f"字幕内容有误，无法生成 SRT: {e}"}), 400
+
+        try:
+            duration = subtitle_processor.probe_duration_sec(str(src_path))
+        except Exception as e:
+            return jsonify({"success": False, "error": f"读取音频时长失败: {e}"}), 400
+
+        job_id = uuid.uuid4().hex
+        _set_subtitle_job(job_id, status="running", media_id=media_id, progress={"stage": "embed_video"})
+
+        def _run():
+            try:
+                srt_path = media_dir / f"_embedvideo_{job_id}.srt"
+                srt_path.write_text(srt_content, encoding="utf-8")
+
+                out_name = f"_embedvideo_{job_id}.mp4"
+                out_path = media_dir / out_name
+
+                subtitle_processor.burn_subtitles_to_video(
+                    str(src_path), str(srt_path), str(out_path), duration_sec=duration,
+                )
+
+                _set_subtitle_job(
+                    job_id,
+                    status="done",
+                    result={
+                        "success": True,
+                        "filename": f"{Path(src_path).stem}_字幕.mp4",
+                        "download_url": f"/api/subtitle/embed/download/{media_id}/{out_name}",
+                    },
+                )
+            except Exception as e:
+                logger.error(f"字幕烧录任务失败: {e}", exc_info=True)
+                _set_subtitle_job(job_id, status="failed", error=str(e))
+
+        Thread(target=_run, daemon=True).start()
+
+        return jsonify({"success": True, "job_id": job_id}), 200
+
+    except Exception as e:
+        logger.error(f"字幕烧录启动失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/subtitle/embed/download/<media_id>/<path:filename>", methods=["GET"])
+def subtitle_embed_download(media_id: str, filename: str):
+    """
+    下载 /api/subtitle/embed 或 /api/subtitle/embed-video 生成的内嵌
+    字幕文件。文件名固定形如 _embed_<job_id><ext>（软字幕）或
+    _embedvideo_<job_id>.mp4（硬字幕烧录），均由后端自己生成，不接受
+    任意路径；as_attachment 触发浏览器另存为，下载名用原始文件名 +
+    "_字幕" 后缀更利于识别。
+    """
+    try:
+        media_dir = (SUBTITLE_DIR / media_id).resolve()
+        if not str(media_dir).startswith(str(SUBTITLE_DIR)):
+            return jsonify({"error": "无权访问"}), 403
+        if not (filename.startswith("_embed_") or filename.startswith("_embedvideo_")):
+            return jsonify({"error": "无权访问"}), 403
+        file_path = (media_dir / filename).resolve()
+        if not str(file_path).startswith(str(media_dir)) or not file_path.is_file():
+            return jsonify({"error": "文件不存在或已过期，请重新生成"}), 404
+
+        # 下载名去掉内部 job_id 前缀，还原成"原文件名_字幕.ext"
+        media_files = [
+            p for p in media_dir.iterdir()
+            if p.is_file() and p.name != "_extracted_16k.wav"
+            and not p.name.startswith("_embed_") and not p.name.startswith("_embedvideo_")
+        ]
+        if media_files:
+            stem = Path(media_files[0]).stem
+        else:
+            stem = "subtitle"
+        download_name = f"{stem}_字幕{file_path.suffix}"
+
+        return send_from_directory(
+            str(file_path.parent), file_path.name,
+            as_attachment=True, download_name=download_name,
+        )
+    except Exception as e:
+        logger.error(f"字幕嵌入文件下载失败: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/subtitle/cleanup", methods=["POST"])
 def subtitle_cleanup():
     """

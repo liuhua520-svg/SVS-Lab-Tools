@@ -882,3 +882,178 @@ def export_subtitles(entries: List[Dict[str, Any]], fmt: str) -> str:
     if not fn:
         raise ValueError(f"不支持的导出格式: {fmt}")
     return fn(entries)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 软字幕封装（视频/音频 + SRT → 内嵌字幕轨的新文件，不重新编码画面/音轨）
+# ─────────────────────────────────────────────────────────────────────────
+
+# 每种容器格式能承载的字幕编解码器不同：MP4/MOV 系只认 mov_text，
+# WebM 用 webvtt 更稳妥，其余（如 MKV）走 SRT 文本轨最通用。找不到时
+# 兜底退到 "srt"，交给 ffmpeg 自行报错，好过我们在这里瞎猜一个必定
+# 失败的编解码器。
+_SUBTITLE_CODEC_BY_EXT = {
+    ".mp4": "mov_text",
+    ".m4v": "mov_text",
+    ".mov": "mov_text",
+    ".mkv": "srt",
+    ".webm": "webvtt",
+}
+
+
+def mux_soft_subtitles(
+    src_path: str,
+    srt_path: str,
+    dst_path: str,
+    is_audio_only: bool = False,
+) -> str:
+    """
+    把 SRT 字幕以"软字幕"（独立字幕轨，可在播放器里开关/切换，不烧录进
+    画面）方式封装进视频；音频输入则封装成 Matroska Audio（.mka）容器
+    ——WAV/MP3/FLAC/AAC 等常见音频容器完全不支持字幕流（ffmpeg 会直接
+    报 "muxer does not support any stream of type subtitle" 并失败），
+    支持内嵌字幕轨的音频容器本就凤毛麟角，.mka 是最通用的一个，主流
+    播放器（VLC、mpv 等）都能识别并显示其中的字幕轨。
+
+    始终用 "-c copy" 拷贝原始视频/音频流，只新增一条字幕流，因此速度
+    接近纯文件拷贝、不重新编码，不损失画质/音质。
+
+    参数：
+      src_path      : 原始视频/音频文件路径
+      srt_path      : 已生成好的 .srt 字幕文件路径
+      dst_path      : 输出文件路径。视频输入：后缀决定容器格式，进而
+                      决定用哪种字幕编解码器，调用方需自行选一个与
+                      src 容器兼容的输出后缀，通常直接沿用原始后缀
+                      即可。音频输入：后缀会被忽略，容器强制为
+                      Matroska（内部按 .mka 复用 srt 编解码器），调用
+                      方应仍传入 .mka 后缀的路径以保持文件名一致，但
+                      即便传别的后缀，产出内容也一定是合法的 mka。
+      is_audio_only : 源文件是否为纯音频（无视频流）。
+
+    返回：dst_path。失败抛 RuntimeError，附带 ffmpeg 的 stderr 尾部。
+    """
+    ffmpeg = get_ffmpeg_path()
+    Path(dst_path).parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        ffmpeg, "-y",
+        "-i", str(src_path),
+        "-i", str(srt_path),
+        "-map", "0",
+        "-map", "1",
+        "-c", "copy",
+    ]
+
+    if is_audio_only:
+        # 强制走 Matroska 复用器：不依赖 dst_path 后缀猜容器（不少音频
+        # 输出场景下调用方即便传了 .mka 后缀，也不该假设 ffmpeg 会按
+        # 后缀正确选择复用器），显式 "-f matroska" 更可靠。
+        cmd += ["-c:s", "srt", "-f", "matroska"]
+    else:
+        dst_ext = Path(dst_path).suffix.lower()
+        subtitle_codec = _SUBTITLE_CODEC_BY_EXT.get(dst_ext, "srt")
+        cmd += ["-c:s", subtitle_codec]
+
+    cmd += [
+        # 部分播放器（尤其是 mp4/mov）靠这个 metadata 判断字幕轨语言，
+        # disposition=default 让播放器默认开启显示，而不是封装进去了
+        # 但要用户手动到字幕菜单里选。
+        "-metadata:s:s:0", "language=chi",
+        "-disposition:s:0", "default",
+        str(dst_path),
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg 软字幕封装失败: {result.stderr.strip()[-800:]}")
+    if not Path(dst_path).exists():
+        raise RuntimeError("ffmpeg 执行完成但未生成输出文件")
+    return dst_path
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 硬字幕烧录（纯音频 → 纯色背景视频 + 烧录字幕，兼容所有播放器）
+#   与上面的软字幕封装是两条不同路子：纯音频容器（wav/mp3/...）没有
+#   画面可言，字幕轨挂在音频占位图上很多播放器根本不渲染（VLC 就是
+#   如此），软字幕在"纯音频"场景下体验并不可靠。这里换个思路：造一帧
+#   纯色画面撑出一个视频容器，把字幕直接画（烧录）进画面里，牺牲"可
+#   关闭字幕"这个软字幕特性，换取"任何播放器打开都能看见"的确定性。
+# ─────────────────────────────────────────────────────────────────────────
+
+def _escape_ffmpeg_filter_path(path: str) -> str:
+    """
+    转义传给 ffmpeg 滤镜参数（如 subtitles=<path>）的文件路径。
+
+    ffmpeg 滤镜参数本身用冒号分隔键值对，Windows 路径的盘符冒号
+    （如 "C:\\..."）会被误判成参数分隔符导致解析失败，因此：
+      1) 反斜杠统一换成正斜杠（Windows/Linux 两边 ffmpeg 都认，规避
+         反斜杠自身在滤镜语法里也是转义字符的双重转义问题）；
+      2) 冒号转义成 "\\:"。
+    """
+    p = path.replace("\\", "/")
+    p = p.replace(":", r"\:")
+    return p
+
+
+def burn_subtitles_to_video(
+    audio_path: str,
+    srt_path: str,
+    dst_path: str,
+    duration_sec: float,
+    width: int = 1280,
+    height: int = 720,
+    bg_color: str = "0x1a1a2e",
+) -> str:
+    """
+    把 SRT 字幕烧录（硬字幕，不可关闭）进一段纯色背景画面，与原始音频
+    合成一个标准 mp4，供"纯音频 + 字幕"想要在任意播放器直接看到文字"
+    的场景使用（是 mux_soft_subtitles 在纯音频输入上的体验短板的补充
+    方案，两者并存，不是互相替代）。
+
+    参数：
+      audio_path   : 原始音频文件路径（不重新处理其内容，直接编码为
+                      AAC；ffmpeg 遇到无法直接 copy 的编码差异时会自动
+                      转码，不会报错，只是不再是"无损拷贝"）
+      srt_path     : 已生成好的 .srt 字幕文件路径
+      dst_path     : 输出 .mp4 路径
+      duration_sec : 音频总时长（秒）；纯色背景视频源本身没有天然时长，
+                      需要显式告诉 ffmpeg 生成到哪里为止，同时也用
+                      "-shortest" 兜底，双重保险防止输出比音频长/短
+      width/height : 背景画面分辨率，字幕字号按此换算
+      bg_color     : 背景颜色（ffmpeg 颜色写法，如 "0x1a1a2e" 或
+                      "black"）
+
+    返回：dst_path。失败抛 RuntimeError，附带 ffmpeg 的 stderr 尾部。
+    """
+    ffmpeg = get_ffmpeg_path()
+    Path(dst_path).parent.mkdir(parents=True, exist_ok=True)
+
+    escaped_srt = _escape_ffmpeg_filter_path(str(Path(srt_path).resolve()))
+    # 字号/边距按分辨率简单换算，1280x720 时字号 28，其余分辨率按高度
+    # 等比例缩放，避免超高分辨率背景下字幕小到看不清、或低分辨率下
+    # 字幕占满半个画面。
+    font_size = max(16, round(28 * height / 720))
+    margin_v = max(20, round(40 * height / 720))
+    force_style = (
+        f"FontSize={font_size},"
+        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+        f"BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV={margin_v}"
+    )
+
+    cmd = [
+        ffmpeg, "-y",
+        "-f", "lavfi", "-i", f"color=c={bg_color}:s={width}x{height}:r=24",
+        "-i", str(audio_path),
+        "-vf", f"subtitles='{escaped_srt}':force_style='{force_style}'",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-t", str(max(0.1, duration_sec)),
+        "-shortest",
+        str(dst_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg 字幕烧录失败: {result.stderr.strip()[-800:]}")
+    if not Path(dst_path).exists():
+        raise RuntimeError("ffmpeg 执行完成但未生成输出文件")
+    return dst_path
