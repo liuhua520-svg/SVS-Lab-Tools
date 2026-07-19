@@ -82,7 +82,7 @@ import { useAppLocale } from '../i18n'
 
 const { t } = useAppLocale()
 
-const appVersion = '2.0.0'
+const appVersion = '1.0.0'
 
 const mitLicenseText = `MIT License
 
