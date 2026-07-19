@@ -142,7 +142,7 @@ const ackGroups: AckGroup[] = [
     items: [
       { name: 'Flask', version: '2.3.3', link: 'https://github.com/pallets/flask' },
       { name: 'soundfile', version: '0.12.1', link: 'https://github.com/bastibe/python-soundfile' },
-      { name: 'numpy', version: '>=1.26.0,<2.0.0', link: 'https://github.com/numpy/numpy' },
+      { name: 'numpy', version: '=1.26.4', link: 'https://github.com/numpy/numpy' },
       { name: 'torch', version: '>=2.3.1', link: 'https://github.com/pytorch/pytorch' },
     ],
   },
@@ -170,6 +170,7 @@ const ackGroups: AckGroup[] = [
       { name: 'requests', version: '-', link: 'https://github.com/psf/requests' },
       { name: 'transformers', version: '>=4.40.0', link: 'https://github.com/huggingface/transformers' },
       { name: 'nemo_toolkit[asr]', version: '>=2.7.0,<2.8.0', link: 'https://github.com/NVIDIA-NeMo/Speech' },
+	  { name: 'opencc-python-reimplemented', version: '>=0.1.7', link: 'https://github.com/yichen0831/opencc-python' },
     ],
   },
   {
