@@ -868,29 +868,34 @@ def add_spaces_around_english(text: str) -> str:
 # ═════════════════════════════════════════════════════════════════════════
 # 对外入口（新增）：大写字母逐个加空格 / 大写转小写 / 小写转大写
 #   三个按钮均只处理英文字母（A-Z / a-z），不影响其它任何文字与标点：
-#     · 大写字母逐个加空格：每一个大写字母前后补空格，把连写的大写缩写
-#       拆成单字母序列（"ABC" → "A B C"），便于 TTS / 强制对齐按字母朗读，
-#       常见于处理英文缩写、字母歌一类的场景。已经是小写或非字母字符不受
-#       影响；同一行内因补空格产生的多余空格按其它按钮的惯例统一清理。
+#     · 大写字母逐个加空格：只在两个"紧挨着的大写字母"之间插入空格，把
+#       连写的大写缩写拆成单字母序列（"ABC" → "A B C"），便于 TTS / 强制
+#       对齐按字母朗读，常见于处理英文缩写、字母歌一类的场景。
+#       —— 大写字母与紧邻的小写字母之间不插入空格，因此普通的首字母
+#          大写单词不受影响（"Vocal" 保持 "Vocal"，不会被拆成 "V ocal"）；
+#          只有当大写字母前后本身也是大写字母时才在两者之间断开
+#          （"VOcal" → 只有 V、O 相邻且都是大写，所以只在 V 和 O 之间
+#          插入空格，得到 "V Ocal"，其后的 "cal" 不受影响）。
 #     · 大写转小写：整段文本里的英文字母统一转小写（"VOCAL" → "vocal"）。
 #     · 小写转大写：整段文本里的英文字母统一转大写（"Vocal" → "VOCAL"）。
 #   后两个直接复用 Python 内置 str.upper()/str.lower()，对中日韩等非英文
 #   字符没有任何影响，不需要额外处理。
 # ═════════════════════════════════════════════════════════════════════════
 
-_UPPERCASE_LETTER_RE = re.compile(r"[A-Z]")
+# 只匹配"两个相邻大写字母的交界处"（零宽断言，不消耗字符），用于在这一
+# 交界处插入空格，而不是给每个大写字母本身前后都加空格。
+_UPPERCASE_BOUNDARY_RE = re.compile(r"(?<=[A-Z])(?=[A-Z])")
 
 
 def add_spaces_around_uppercase(text: str) -> str:
-    """把每一个大写英文字母前后都补上空格，让连写的大写字母逐个断开
-    （如 "ABC" → "A B C"）。不影响小写字母及其它任何文字/标点。"""
+    """只在连续相邻的大写英文字母之间插入空格（如 "ABC" → "A B C"）。
+    大写字母与紧邻的小写字母之间不加空格，因此 "Vocal" 保持不变，
+    而 "VOcal" 只在 V、O 之间断开变成 "V Ocal"（"cal" 不受影响）。
+    不影响小写字母及其它任何文字/标点。"""
     if not text:
         return text
 
-    def _replace(m: "re.Match") -> str:
-        return f" {m.group(0)} "
-
-    spaced = _UPPERCASE_LETTER_RE.sub(_replace, text)
+    spaced = _UPPERCASE_BOUNDARY_RE.sub(" ", text)
     lines = spaced.split("\n")
     cleaned_lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in lines]
     return "\n".join(cleaned_lines)
