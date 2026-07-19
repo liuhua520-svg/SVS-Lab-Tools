@@ -20,7 +20,7 @@ from phoneme_converter import (
     convert_phoneme,
     build_ja_hiragana_lab,
     merge_lab_silence,
-    word_to_arpabet_g2p_only,
+    word_to_arpabet,
     distribute_arpabet_phones,
     katakana_to_romaji_moras,
     hiragana_to_katakana,
@@ -853,21 +853,8 @@ class MFAProcessor:
 
             if self._is_english_word(mark):
                 if english_word_align:
-                    # 英语单词级对齐模式：仍需要音素级输出，只是不依赖
-                    # MFA Phone Tier 的真实对齐结果——直接走 G2P（g2p_en）
-                    # 把整个单词映射为 ARPABET 音素序列（小写、无重音数字），
-                    # 不经过 IPA→ARPABET 重标注表，再按权重比例把词的时间
-                    # 跨度分配给各个音素。
-                    g2p_phones = word_to_arpabet_g2p_only(mark)
-                    if g2p_phones:
-                        for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
-                            lines.append(f"{s} {e} {p}")
-                    else:
-                        logger.warning(
-                            f"[zh] 英语词 '{mark}' 无法通过 G2P 获取音素"
-                            "（g2p_en 未命中/未安装），按整词输出。"
-                        )
-                        lines.append(f"{start} {end} {mark.lower()}")
+                    # 英语单词级对齐模式：直接输出单词，不做音素拆分
+                    lines.append(f"{start} {end} {mark.lower()}")
                 else:
                     entries = self._get_arpabet_entries(start, end, phone_items)
                     if entries:
@@ -877,7 +864,7 @@ class MFAProcessor:
                         # MFA Phone Tier 为空（CJK 声学模型不输出 ARPABET，或替代
                         # 对齐后端 phone_items=[]）：走 G2P 获取音素序列，再按权重
                         # 比例把词的时间跨度分配给各个 ARPABET 音素。
-                        g2p_phones = word_to_arpabet_g2p_only(mark)
+                        g2p_phones = word_to_arpabet(mark)
                         if g2p_phones:
                             for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
                                 lines.append(f"{s} {e} {p}")
@@ -938,20 +925,9 @@ class MFAProcessor:
                 lines.append(f"{start} {end} sil")
                 continue
 
-            # 英语单词级对齐模式：仍走音素级输出——直接用 G2P（g2p_en）
-            # 把单词映射为 ARPABET 音素序列（小写、无重音数字），不经过
-            # IPA→ARPABET 重标注表，再按权重比例分配时间跨度。
+            # 英语单词级对齐模式：直接输出单词，跳过音素拆分
             if english_word_align:
-                g2p_phones = word_to_arpabet_g2p_only(mark)
-                if g2p_phones:
-                    for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
-                        lines.append(f"{s} {e} {p}")
-                else:
-                    logger.warning(
-                        f"[en] 英语词 '{mark}' 无法通过 G2P 获取音素"
-                        "（g2p_en 未命中/未安装），按整词输出。"
-                    )
-                    lines.append(f"{start} {end} {mark.lower()}")
+                lines.append(f"{start} {end} {mark.lower()}")
                 continue
 
             entries = self._get_arpabet_entries(start, end, phone_items)
@@ -968,7 +944,7 @@ class MFAProcessor:
             # 个音素——而不是像旧版本那样把整个单词原样当成一个"音素"
             # 塞进 LAB（这正是 WhisperXAligner 英语输出始终停留在词级、
             # 从未真正到达音素级的根本原因）。
-            g2p_phones = word_to_arpabet_g2p_only(mark)
+            g2p_phones = word_to_arpabet(mark)
             if g2p_phones:
                 for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
                     lines.append(f"{s} {e} {p}")
@@ -1045,7 +1021,7 @@ class MFAProcessor:
                     for s, e, p in entries:
                         lines.append(f"{s} {e} {p}")
                 else:
-                    g2p_phones = word_to_arpabet_g2p_only(mark)
+                    g2p_phones = word_to_arpabet(mark)
                     if g2p_phones:
                         for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
                             lines.append(f"{s} {e} {p}")
@@ -1127,26 +1103,15 @@ class MFAProcessor:
 
             if self._is_english_word(mark):
                 if english_word_align:
-                    # 英语单词级对齐模式：仍需要音素级输出，直接走 G2P
-                    # （g2p_en）把单词映射为 ARPABET 音素序列（小写、无
-                    # 重音数字），不经过 IPA→ARPABET 重标注表。
-                    g2p_phones = word_to_arpabet_g2p_only(mark)
-                    if g2p_phones:
-                        for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
-                            lines.append(f"{s} {e} {p}")
-                    else:
-                        logger.warning(
-                            f"[ko] 英语词 '{mark}' 无法通过 G2P 获取音素"
-                            "（g2p_en 未命中/未安装），按整词输出。"
-                        )
-                        lines.append(f"{start} {end} {mark.lower()}")
+                    # 英语单词级对齐模式：直接输出单词，不做音素拆分
+                    lines.append(f"{start} {end} {mark.lower()}")
                 else:
                     entries = self._get_arpabet_entries(start, end, phone_items)
                     if entries:
                         for s, e, p in entries:
                             lines.append(f"{s} {e} {p}")
                     else:
-                        g2p_phones = word_to_arpabet_g2p_only(mark)
+                        g2p_phones = word_to_arpabet(mark)
                         if g2p_phones:
                             for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
                                 lines.append(f"{s} {e} {p}")
@@ -1339,26 +1304,15 @@ class MFAProcessor:
 
             if self._is_english_word(mark):
                 if english_word_align:
-                    # 英语单词级对齐模式：仍需要音素级输出，直接走 G2P
-                    # （g2p_en）把单词映射为 ARPABET 音素序列（小写、无
-                    # 重音数字），不经过 IPA→ARPABET 重标注表。
-                    g2p_phones = word_to_arpabet_g2p_only(mark)
-                    if g2p_phones:
-                        for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
-                            lines.append(f"{s} {e} {p}")
-                    else:
-                        logger.warning(
-                            f"[yue] 英语词 '{mark}' 无法通过 G2P 获取音素"
-                            "（g2p_en 未命中/未安装），按整词输出。"
-                        )
-                        lines.append(f"{start} {end} {mark.lower()}")
+                    # 英语单词级对齐模式：直接输出单词，不做音素拆分
+                    lines.append(f"{start} {end} {mark.lower()}")
                 else:
                     entries = self._get_arpabet_entries(start, end, phone_items)
                     if entries:
                         for s, e, p in entries:
                             lines.append(f"{s} {e} {p}")
                     else:
-                        g2p_phones = word_to_arpabet_g2p_only(mark)
+                        g2p_phones = word_to_arpabet(mark)
                         if g2p_phones:
                             for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
                                 lines.append(f"{s} {e} {p}")

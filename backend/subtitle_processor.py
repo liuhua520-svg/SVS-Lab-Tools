@@ -870,10 +870,40 @@ def export_txt(entries: List[Dict[str, Any]]) -> str:
     return "\n".join(e["text"] for e in entries) + "\n"
 
 
+def _lab_safe_label(text: str) -> str:
+    """
+    LAB 每行是"起 止 标签"三个以空白分隔的字段（与本项目 MFA/强制对齐
+    产出的 .lab 同一套约定，参见 tts_processor._entries_to_lab_text），
+    标签字段本身不能包含空白或换行，否则会被解析成多余的字段。字幕文本
+    常见含空格/换行/制表符，这里统一折叠成单个空格；折叠后为空则回退为
+    下划线，避免产出空标签导致该行被下游解析器忽略。
+    """
+    collapsed = re.sub(r"\s+", " ", (text or "").strip())
+    return collapsed or "_"
+
+
+def export_lab(entries: List[Dict[str, Any]]) -> str:
+    """
+    导出为 LAB 格式：每条字幕一行 "<起始_100ns> <结束_100ns> <文本>"，
+    与本项目强制对齐管线产出的 HTK 风格 .lab 时间单位一致（100ns，即
+    1 秒 = 10,000,000 单位），方便直接复用现有 LAB 相关工具链。这里是
+    "整句一行"的字幕级 LAB，不同于 MFA/Qwen3-FA 对齐产出的音素级 LAB。
+    """
+    lines = []
+    for e in entries:
+        start_100ns = round(max(0.0, float(e["start"])) * 10_000_000)
+        end_100ns = round(max(0.0, float(e["end"])) * 10_000_000)
+        if end_100ns <= start_100ns:
+            continue
+        lines.append(f"{start_100ns} {end_100ns} {_lab_safe_label(e['text'])}")
+    return "\n".join(lines) + "\n"
+
+
 EXPORTERS = {
     "srt": export_srt,
     "lrc": export_lrc,
     "txt": export_txt,
+    "lab": export_lab,
 }
 
 

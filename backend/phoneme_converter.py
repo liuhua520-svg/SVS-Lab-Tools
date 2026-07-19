@@ -599,54 +599,6 @@ _EN_DICT_CACHE: Optional[dict[str, list[str]]] = None
 _G2P_EN_INSTANCE = None
 _G2P_EN_LOAD_ATTEMPTED = False
 
-# NLTK 资源下载超时（秒）。nltk.download() 底层用 urllib，默认不设
-# 超时；国内网络访问 raw.githubusercontent.com 等国外源被墙/连接被
-# 静默丢弃时，会长时间挂起甚至永久不返回，直接卡死处理该请求的
-# 线程。用子线程 + join(timeout) 包裹，超时就放弃并继续（该词退化
-# 为 None，调用方走整词兜底），不阻塞主流程。
-_NLTK_DOWNLOAD_TIMEOUT_SEC = 8
-
-# 进程级"网络不可用"标记：一旦一次 NLTK 资源下载超时/失败，本次
-# 进程生命周期内不再重试网络探测，避免一段文本里几十个 OOV 单词
-# 各自触发一次 8 秒超时、累加成更长时间的整体挂起。
-_NLTK_NETWORK_UNAVAILABLE = False
-
-
-def _nltk_download_with_timeout(nltk_module, res_name: str, timeout: float) -> bool:
-    """
-    在子线程中调用 nltk.download(res_name, quiet=True)，最多等待
-    timeout 秒；超时或下载失败返回 False，不抛异常、不无限期阻塞
-    调用线程。
-
-    注意：子线程若真的还在阻塞（网络层面卡死），join 超时后主线程
-    会继续往下走，但该子线程本身可能仍在后台悬挂直到系统 TCP 超时
-    才结束——这是 daemon 线程的可接受代价，换来的是主请求线程不被
-    拖死。
-    """
-    import threading
-
-    result: dict[str, bool] = {"ok": False}
-
-    def _worker() -> None:
-        try:
-            result["ok"] = bool(nltk_module.download(res_name, quiet=True))
-        except Exception as exc:
-            logger.warning(f"[G2P] NLTK 资源 {res_name} 下载线程异常: {exc}")
-            result["ok"] = False
-
-    t = threading.Thread(target=_worker, name=f"nltk-dl-{res_name}", daemon=True)
-    t.start()
-    t.join(timeout)
-
-    if t.is_alive():
-        logger.warning(
-            f"[G2P] NLTK 资源 {res_name} 下载超过 {timeout}s 未完成"
-            "（可能是网络不可达/被墙），放弃等待，继续走后续流程"
-        )
-        return False
-
-    return result["ok"]
-
 _PROB_TOKEN_RE = re.compile(r"^\d+(\.\d+)?$")
 _WORD_EDGE_STRIP_RE = re.compile(r"^[^a-z']+|[^a-z']+$")
 _TRAILING_STRESS_RE = re.compile(r"\d+$")
@@ -739,7 +691,7 @@ def _get_g2p_en():
          G2p() 成功实例化之后才标记"已尝试"；若 NLTK 下载失败或
          ImportError，下次还会重试。
     """
-    global _G2P_EN_INSTANCE, _G2P_EN_LOAD_ATTEMPTED, _NLTK_NETWORK_UNAVAILABLE
+    global _G2P_EN_INSTANCE, _G2P_EN_LOAD_ATTEMPTED
     if _G2P_EN_INSTANCE is not None or _G2P_EN_LOAD_ATTEMPTED:
         return _G2P_EN_INSTANCE
 
@@ -759,26 +711,9 @@ def _get_g2p_en():
                 try:
                     _nltk.data.find(res_path)
                 except LookupError:
-                    if _NLTK_NETWORK_UNAVAILABLE:
-                        # 本进程已确认网络不可达，跳过后续所有资源的
-                        # 下载尝试，避免每个资源/每个新词各自卡一次
-                        # _NLTK_DOWNLOAD_TIMEOUT_SEC 秒累加成长时间阻塞。
-                        logger.info(
-                            f"[G2P] 已知 NLTK 网络不可达，跳过资源 {res_name} 的下载尝试"
-                        )
-                        continue
                     logger.info(f"[G2P] 正在下载 NLTK 资源: {res_name} …")
-                    ok = _nltk_download_with_timeout(
-                        _nltk, res_name, _NLTK_DOWNLOAD_TIMEOUT_SEC
-                    )
-                    if ok:
-                        logger.info(f"[G2P] NLTK 资源 {res_name} 已就绪")
-                    else:
-                        logger.warning(
-                            f"[G2P] NLTK 资源 {res_name} 下载超时/失败，"
-                            "标记网络不可用，本进程后续不再重试"
-                        )
-                        _NLTK_NETWORK_UNAVAILABLE = True
+                    _nltk.download(res_name, quiet=True)
+                    logger.info(f"[G2P] NLTK 资源 {res_name} 已就绪")
         except ImportError:
             logger.warning(
                 "[G2P] 未安装 nltk，g2p_en 词性标注可能受限；"
@@ -812,32 +747,6 @@ def _get_g2p_en():
     return _G2P_EN_INSTANCE
 
 
-def _run_g2p_en(clean: str) -> list[str]:
-    """
-    对已清洗（小写、去首尾非字母字符）的单词调用 g2p_en，返回
-    ARPABET 音素序列（小写、无重音数字）。找不到 g2p_en 或转换
-    失败时返回空列表，不抛异常。
-    """
-    g2p = _get_g2p_en()
-    if g2p is None:
-        return []
-    try:
-        raw_phones = g2p(clean)
-    except Exception as exc:
-        logger.warning(f"[G2P] g2p_en 转换失败 '{clean}': {exc}")
-        return []
-    phones: list[str] = []
-    for p in raw_phones:
-        p = (p or "").strip()
-        if not p or p == " ":
-            continue
-        # g2p_en 输出标准 ARPABET，重音标在末尾数字（如 "AH0"）
-        p_clean = _TRAILING_STRESS_RE.sub("", p).lower()
-        if p_clean.isalpha():
-            phones.append(p_clean)
-    return phones
-
-
 def word_to_arpabet(word: str) -> Optional[list[str]]:
     """
     英语单词（或含数字的 token，如 "2024"、"21st"）→ ARPABET 音素
@@ -866,55 +775,29 @@ def word_to_arpabet(word: str) -> Optional[list[str]]:
         if converted:
             return converted
 
-    phones = _run_g2p_en(clean)
-    if phones:
-        return phones
+    g2p = _get_g2p_en()
+    if g2p is not None:
+        try:
+            raw_phones = g2p(clean)
+        except Exception as exc:
+            logger.warning(f"[G2P] g2p_en 转换失败 '{clean}': {exc}")
+            raw_phones = []
+        phones: list[str] = []
+        for p in raw_phones:
+            p = (p or "").strip()
+            if not p or p == " ":
+                continue
+            # g2p_en 输出标准 ARPABET，重音标在末尾数字（如 "AH0"）
+            p_clean = _TRAILING_STRESS_RE.sub("", p).lower()
+            if p_clean.isalpha():
+                phones.append(p_clean)
+        if phones:
+            return phones
 
     # 词典和 g2p_en 都没找到，但原始 token 里仍混有数字（如 "2nd"、
     # "k9"）：展开数字部分再试一次，好过直接放弃整个词。
     if any(ch.isdigit() for ch in raw):
         return _expand_digits_to_phones(raw)
-
-    return None
-
-
-def word_to_arpabet_g2p_only(word: str) -> Optional[list[str]]:
-    """
-    英语单词级对齐专用：跳过本地 MFA 词典 + IPA→ARPABET 重标注表，
-    永远直接走 g2p_en 做"单词 → ARPABET 音素"映射。
-
-    与 word_to_arpabet() 的区别：
-      word_to_arpabet()          MFA 词典优先，查不到才用 g2p_en 兜底
-                                  （词典命中的词会经过 EN_IPA_TO_ARPABET
-                                  重标注，音素记号来源不统一）
-      word_to_arpabet_g2p_only() 不查 MFA 词典，一律用 g2p_en 直接生成，
-                                  同一套模型输出、记号风格完全一致
-                                  （小写、无重音数字）
-
-    仅用于 mfa_processor.py 中的对齐场景（_process_*_words 里 MFA
-    Phone Tier 为空、需要 G2P 兜底获取音素时）。SVP/VSQX 音素写入
-    等其余场景继续使用 word_to_arpabet()，不受影响。
-
-    Returns
-    -------
-    list[str]   成功转换的音素序列（长度 ≥ 1）
-    None        g2p_en 未安装 / 转换失败 / 数字展开均失败，调用方
-                应保留旧的整词单条目兜底，不崩溃。
-    """
-    raw = (word or "").strip()
-    clean = _WORD_EDGE_STRIP_RE.sub("", raw.lower())
-
-    if not clean:
-        # 纯数字 token（如 "2024"）：展开为英文单词后递归走 G2P，
-        # 避免数字字面字符出现在最终 ARPABET/LAB 输出中。
-        return _expand_digits_to_phones(raw, g2p_only=True)
-
-    phones = _run_g2p_en(clean)
-    if phones:
-        return phones
-
-    if any(ch.isdigit() for ch in raw):
-        return _expand_digits_to_phones(raw, g2p_only=True)
 
     return None
 
@@ -984,10 +867,9 @@ def extract_native_english_words(text: str) -> set[str]:
     return result
 
 
-def _expand_digits_to_phones(raw: str, g2p_only: bool = False) -> Optional[list[str]]:
+def _expand_digits_to_phones(raw: str) -> Optional[list[str]]:
     """把含数字的 token（"2024" / "21st" / "3.5"）展开为英文拼写单词，
-    对每个展开出的单词分别递归调用 word_to_arpabet()（或
-    word_to_arpabet_g2p_only()，取决于 g2p_only），再拼接为一个
+    对每个展开出的单词分别递归调用 word_to_arpabet()，再拼接为一个
     完整音素序列。找不到 num2words 或展开失败时返回 None。
     """
     if not any(ch.isdigit() for ch in raw):
@@ -1020,8 +902,7 @@ def _expand_digits_to_phones(raw: str, g2p_only: bool = False) -> Optional[list[
         w = w.strip()
         if not w:
             continue
-        # 递归：展开后的单词（如 "twenty"）走对应的 G2P 流程
-        sub = word_to_arpabet_g2p_only(w) if g2p_only else word_to_arpabet(w)
+        sub = word_to_arpabet(w)   # 递归：展开后的单词（如 "twenty"）走正常 G2P 流程
         if sub:
             all_phones.extend(sub)
     return all_phones or None

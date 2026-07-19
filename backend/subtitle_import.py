@@ -12,10 +12,15 @@
 
 核心流程：
   1) 解析字幕文件，得到 [(start_sec, end_sec, text), ...]（见
-     parse_srt / parse_lrc）。
+     parse_srt / parse_lrc / parse_lab）。
        - SRT 自带起止时间。
        - LRC 只有起始时间：每一条的结束时间用下一条的起始时间推断；
          最后一条没有下一条可推断，使用整个音频文件的时长作为结束时间。
+       - LAB（parse_lab）同样自带起止时间（100ns 单位），是本项目字幕级
+         LAB 导出（subtitle_processor.export_lab）的逆操作，主要供
+         SubtitleEditor.vue"导入字幕"场景使用——此时时间轴已经精确，
+         不需要再送 Qwen3-FA 重新对齐，但仍复用同一套 parse_subtitle_file
+         入口，供 app.py 各路由统一调用。
   2) 相邻两条字幕之间如果有空白间隙（说话人停顿、背景音等），这段间隙
      音频不会被丢弃——作为独立的"静音段"保留在两条字幕之间，音频总长
      与原始音频完全一致；这样切分后按顺序拼接回去（或原样交给下游按
@@ -185,17 +190,75 @@ def parse_lrc(content: str, audio_duration_sec: Optional[float] = None,
 
 
 def detect_subtitle_format(filename: str, content: str) -> str:
-    """按扩展名优先、内容兜底的方式判断字幕格式，返回 'srt' / 'lrc'。"""
+    """按扩展名优先、内容兜底的方式判断字幕格式，返回 'srt' / 'lrc' / 'lab'。"""
     ext = Path(filename).suffix.lower().lstrip(".")
-    if ext in ("srt", "lrc"):
+    if ext in ("srt", "lrc", "lab"):
         return ext
     # 扩展名不认识（如 .txt）：内容里出现 "-->" 视为 SRT，出现
-    # "[mm:ss" 形式的时间标签视为 LRC，都不像则默认按 SRT 尝试解析。
+    # "[mm:ss" 形式的时间标签视为 LRC，每行形如"两个整数 + 文本"（HTK
+    # LAB 的典型形态）视为 LAB，都不像则默认按 SRT 尝试解析。
     if "-->" in content:
         return "srt"
     if _LRC_TIME_TAG_RE.search(content):
         return "lrc"
+    if _looks_like_lab(content):
+        return "lab"
     return "srt"
+
+
+_LAB_LINE_RE = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\S.*)$")
+
+
+def _looks_like_lab(content: str) -> bool:
+    """抽样前几个非空行，若都能匹配"起 止 文本"三段式即认为是 LAB。"""
+    sample = [ln for ln in content.splitlines() if ln.strip()][:5]
+    if not sample:
+        return False
+    return all(_LAB_LINE_RE.match(ln) for ln in sample)
+
+
+def parse_lab(content: str) -> List[SubtitleCue]:
+    """
+    解析 LAB 字幕文本，返回按时间排序的 SubtitleCue 列表。
+
+    与本项目导出的字幕级 LAB（见 subtitle_processor.export_lab）同一套
+    约定：每行 "<起始_100ns> <结束_100ns> <文本>"，时间单位 100ns（1 秒 =
+    10,000,000 单位），与 MFA/Qwen3-FA 强制对齐产出的音素级 LAB 用的是
+    同一时间单位，但这里每行是一整条字幕文本，不是单个音素。
+
+    容错处理：
+      - 允许行首/行尾有多余空白。
+      - 文本字段里如果本身包含数字也没问题——只要求前两个字段能被
+        解析成整数即可，其余原样拼进文本（re.match 用 \\s+ 分隔前两个
+        字段，第三个字段用 .* 贪婪匹配到行尾，不会被时间戳格式限制）。
+      - 结束时间早于或等于开始时间的畸形行会被跳过。
+      - 兼容本项目其它模块（tts_processor._parse_lab_lines 等）产出的
+        SIL 占位标签：文本为纯 "SIL"（不区分大小写）的行会被当作静音
+        间隙跳过，不作为一条可编辑字幕导入，避免时间轴上出现大量空文本
+        的 SIL 行淹没真正的字幕内容。
+    """
+    cues: List[SubtitleCue] = []
+    for line in content.splitlines():
+        m = _LAB_LINE_RE.match(line)
+        if not m:
+            continue
+        start_100ns_raw, end_100ns_raw, text = m.groups()
+        try:
+            start_100ns = int(start_100ns_raw)
+            end_100ns = int(end_100ns_raw)
+        except ValueError:
+            continue
+        if end_100ns <= start_100ns:
+            continue
+        text = text.strip()
+        if not text or text.upper() == "SIL":
+            continue
+        start = start_100ns / 10_000_000
+        end = end_100ns / 10_000_000
+        cues.append(SubtitleCue(start, end, text))
+
+    cues.sort(key=lambda c: c.start)
+    return cues
 
 
 def parse_subtitle_file(filename: str, content: str,
@@ -203,13 +266,15 @@ def parse_subtitle_file(filename: str, content: str,
     """
     自动判断格式并解析，返回 (format, cues)。
 
-    content 需要已经按文本读取（调用方负责处理编码探测，常见的 SRT/LRC
-    多为 UTF-8 或 UTF-8 BOM，个别老文件是 GBK——见 app.py 路由层的
-    _read_subtitle_text 编码兜底逻辑）。
+    content 需要已经按文本读取（调用方负责处理编码探测，常见的
+    SRT/LRC/LAB 多为 UTF-8 或 UTF-8 BOM，个别老文件是 GBK——见 app.py
+    路由层的 _decode_subtitle_text 编码兜底逻辑）。
     """
     fmt = detect_subtitle_format(filename, content)
     if fmt == "lrc":
         cues = parse_lrc(content, audio_duration_sec=audio_duration_sec)
+    elif fmt == "lab":
+        cues = parse_lab(content)
     else:
         cues = parse_srt(content)
     return fmt, cues

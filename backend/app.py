@@ -3385,6 +3385,27 @@ def subtitle_upload():
             logger.warning(f"读取媒体时长失败（不影响后续识别）: {e}")
             duration = None
 
+        # 额外提取一份用于前端波形可视化的 PCM WAV。原因：<video>/<audio>
+        # 标签播放靠浏览器/系统的完整媒体管线，几乎任何容器格式都能放；但
+        # SubtitleWaveform.vue 用 Web Audio API 的 decodeAudioData 来解码出
+        # 采样数据画波形，这个接口不是完整的容器解复用器，对 mp4/mkv/avi
+        # 等视频容器、甚至部分小众音频编码的支持很不可靠，直接拿原始上传
+        # 文件去 decodeAudioData 经常报 "Unable to decode audio data"。这里
+        # 统一转成 PCM WAV（复用 extract_audio，与 ASR 识别用的是同一套
+        # ffmpeg 转码逻辑，已经过验证）用于波形预览，解码稳定性因此与原始
+        # 容器格式、编码完全无关。仅用于可视化，不影响实际播放/剪辑/导出，
+        # 转码失败（如 ffmpeg 不可用）也不算上传失败，只是波形不显示。
+        waveform_url = None
+        try:
+            ffmpeg_ok, _ = subtitle_processor.check_ffmpeg_available()
+            if ffmpeg_ok:
+                waveform_wav_path = media_dir / "_waveform_preview.wav"
+                subtitle_processor.extract_audio(str(saved_path), str(waveform_wav_path))
+                waveform_url = f"/api/subtitle/media/{media_id}/{quote(waveform_wav_path.name)}"
+        except Exception as e:
+            logger.warning(f"波形预览音频提取失败（不影响播放与字幕编辑）: {e}")
+            waveform_url = None
+
         return jsonify({
             "success": True,
             "media_id": media_id,
@@ -3392,6 +3413,7 @@ def subtitle_upload():
             "is_video": is_video,
             "duration": duration,
             "play_url": f"/api/subtitle/media/{media_id}/{quote(saved_name)}",
+            "waveform_url": waveform_url,
         }), 200
 
     except Exception as e:
@@ -3880,6 +3902,75 @@ def subtitle_cleanup():
         return jsonify({"success": True}), 200
     except Exception as e:
         logger.error(f"字幕媒体清理失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# =====================================================================
+# 字幕编辑（独立页面 SubtitleEditor.vue）：上传媒体 + 导入已有 SRT/LRC/LAB
+# 字幕直接进入时间轴编辑器校对，不经过 ASR 识别。媒体上传/播放/清理
+# 复用 /api/subtitle/upload、/api/subtitle/media、/api/subtitle/cleanup
+# 与 SUBTITLE_DIR（字幕编辑本质上也是"媒体 + 字幕条目"的编辑会话，
+# 与字幕识别页共用同一套媒体存储没有问题）；导出同样复用
+# /api/subtitle/export（已在上方 EXPORTERS 里新增 "lab" 格式）与
+# /api/subtitle/split_entry。这里只新增"导入 SRT/LRC/LAB 文件解析为
+# 字幕条目"这一步识别页没有的能力，解析逻辑直接复用 subtitle_import.py
+# 里的 parse_subtitle_file（SRT/LRC 已在"字幕跟读"功能验证过，LAB
+# 解析 parse_lab 是本次新增，用于导入本项目自己导出的字幕级 LAB）。
+# =====================================================================
+
+@app.route("/api/subtitle-editor/import", methods=["POST"])
+def subtitle_editor_import():
+    """
+    解析用户上传的 SRT/LRC/LAB 字幕文件，返回字幕条目列表供前端直接载入
+    编辑器（不切音频、不对齐，纯文本解析，是本路由与
+    /api/subtitle-import/split 的关键区别——后者是为了做强制对齐才把
+    音频按字幕时间轴切片）。
+
+    请求为 multipart/form-data：
+      - subtitle_file : .srt / .lrc / .lab 字幕文件（必填；其余扩展名按
+                        内容自动判断格式）
+      - duration       : 当前媒体总时长（秒，可选）。仅在字幕是 LRC 格式
+                         时用于推断最后一条的结束时间；不传时最后一条
+                         结束时间使用固定兜底时长（见 parse_lrc）。LAB
+                         本身自带精确的起止时间，不受此参数影响。
+
+    响应：
+      {
+        "success": true,
+        "format": "srt" | "lrc" | "lab",
+        "entries": [{"start": float, "end": float, "text": str}, ...]
+      }
+    """
+    try:
+        subtitle_file = request.files.get("subtitle_file")
+        if not subtitle_file or not subtitle_file.filename:
+            return jsonify({"success": False, "error": "请上传 SRT / LRC / LAB 字幕文件"}), 400
+
+        duration_raw = request.form.get("duration", "").strip()
+        audio_duration: Optional[float] = None
+        if duration_raw:
+            try:
+                audio_duration = float(duration_raw)
+            except ValueError:
+                audio_duration = None
+
+        subtitle_bytes = subtitle_file.read()
+        subtitle_text = _decode_subtitle_text(subtitle_bytes)
+
+        fmt, cues = subtitle_import.parse_subtitle_file(
+            subtitle_file.filename, subtitle_text, audio_duration_sec=audio_duration
+        )
+        if not cues:
+            return jsonify({
+                "success": False,
+                "error": f"未能从字幕文件（识别为 {fmt.upper()}）中解析出任何有效条目",
+            }), 400
+
+        entries = [{"start": c.start, "end": c.end, "text": c.text} for c in cues]
+        return jsonify({"success": True, "format": fmt, "entries": entries}), 200
+
+    except Exception as e:
+        logger.error(f"字幕编辑器导入失败: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
