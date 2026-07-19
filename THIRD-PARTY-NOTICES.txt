@@ -72,6 +72,16 @@ Based on backend/requirements.txt
   License: MIT
   Link: https://github.com/JDongian/python-jamo
 
+- opencc-python-reimplemented>=0.1.7
+  Copyright (c) Yichen Huang (Eugene)
+  License: Apache-2.0
+  Link: https://pypi.org/project/opencc-python-reimplemented/
+
+  Note:
+    Pure Python implementation of OpenCC.
+    Uses dictionary files originally developed by BYVoid.
+    Dictionary data may have separate copyright and license terms.
+
 === 音频处理 ===
 - soundfile==0.12.1
   Copyright (c) 2013-2024 Bastian Bechtold
