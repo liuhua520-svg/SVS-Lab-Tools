@@ -28,6 +28,11 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../components/SubtitleRecognizer.vue'),
   },
   {
+    path: '/subtitle-editor',
+    name: 'subtitleEditor',
+    component: () => import('../components/SubtitleEditor.vue'),
+  },
+  {
     path: '/about',
     name: 'about',
     component: () => import('../components/AboutPage.vue'),

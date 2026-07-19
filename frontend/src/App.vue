@@ -28,6 +28,10 @@
                     <el-icon><VideoCamera /></el-icon>
                     <span>{{ t('menu.subtitle') }}</span>
                   </el-dropdown-item>
+                  <el-dropdown-item command="subtitleEditor" :class="{ 'is-active-route': currentRouteName === 'subtitleEditor' }">
+                    <el-icon><Edit /></el-icon>
+                    <span>{{ t('menu.subtitleEditor') }}</span>
+                  </el-dropdown-item>
                   <el-dropdown-item command="englishG2P" :class="{ 'is-active-route': currentRouteName === 'englishG2P' }">
                     <el-icon><Document /></el-icon>
                     <span>{{ t('menu.englishG2P') }}</span>
@@ -100,7 +104,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Menu, House, Notebook, Setting, ChatDotRound, VideoCamera, QuestionFilled, InfoFilled, Document } from '@element-plus/icons-vue'
+import { Menu, House, Notebook, Setting, ChatDotRound, VideoCamera, QuestionFilled, InfoFilled, Document, Edit } from '@element-plus/icons-vue'
 import { getElementPlusLocale, useAppLocale } from './i18n'
 import { useI18n } from 'vue-i18n'
 

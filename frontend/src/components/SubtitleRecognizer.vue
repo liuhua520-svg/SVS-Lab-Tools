@@ -206,6 +206,22 @@
           </div>
         </div>
 
+        <div v-if="mediaInfo && entries.length" class="section-heading waveform-heading">
+          <span>🌊 {{ t('subtitle.waveformTitle') }}</span>
+        </div>
+        <SubtitleWaveform
+          v-if="mediaInfo && entries.length"
+          :entries="entries"
+          :media-url="mediaInfo.waveform_url || mediaInfo.play_url"
+          :duration="mediaInfo.duration || 0"
+          :current-time="currentTime"
+          :active-uid="activeUid"
+          class="waveform-block"
+          @seek="onWaveformSeek"
+          @update-entry="onWaveformUpdateEntry"
+          @add-entry="onWaveformAddEntry"
+        />
+
         <div class="section-heading subtitle-list-heading">
           <span>📝 {{ t('subtitle.subtitleListTitle') }}</span>
           <div class="list-actions">
@@ -277,6 +293,7 @@
         <div class="export-buttons">
           <el-button @click="exportSubtitle('srt')">📥 {{ t('subtitle.exportSrt') }}</el-button>
           <el-button @click="exportSubtitle('lrc')">📥 {{ t('subtitle.exportLrc') }}</el-button>
+          <el-button @click="exportSubtitle('lab')">📥 {{ t('subtitle.exportLab') }}</el-button>
           <el-button @click="exportSubtitle('txt')">📥 {{ t('subtitle.exportTxt') }}</el-button>
           <el-tooltip v-if="mediaInfo && !mediaInfo.is_video" :content="t('subtitle.embedAudioHint')" placement="top">
             <el-button type="primary" :loading="embedding === 'soft'" @click="embedSubtitleIntoMedia('soft')">
@@ -302,6 +319,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { useAppLocale } from '../i18n'
+import SubtitleWaveform from './SubtitleWaveform.vue'
 
 const { t } = useAppLocale()
 
@@ -379,6 +397,7 @@ interface MediaInfo {
   is_video: boolean
   duration: number | null
   play_url: string
+  waveform_url: string | null
 }
 
 const uploading = ref(false)
@@ -412,6 +431,7 @@ const handleFileSelect = async (file: any) => {
       is_video: data.is_video,
       duration: data.duration,
       play_url: data.play_url,
+      waveform_url: data.waveform_url ?? null,
     }
     ElMessage.success(`✅ ${t('subtitle.uploadSuccess')}`)
   } catch (e: any) {
@@ -754,6 +774,7 @@ const currentEntry = computed(() => {
 })
 
 const jumpToEntry = (row: SubtitleEntry) => {
+  activeUid.value = row._uid
   const el = videoRef.value || audioRef.value
   if (!el) return
   el.currentTime = row.start
@@ -763,10 +784,61 @@ const jumpToEntry = (row: SubtitleEntry) => {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// 波形时间轴联动：SubtitleWaveform 组件只负责展示与拖拽交互，具体的
+// 数据变更（时间调整/新增条目）与播放器控制都由父组件这里统一处理，
+// 与表格编辑（onTimeEdit 等）共用同一份 entries，两种编辑方式互相同步。
+// ─────────────────────────────────────────────────────────────────
+const activeUid = ref<number | null>(null)
+
+const onWaveformSeek = (time: number) => {
+  const el = videoRef.value || audioRef.value
+  if (el) el.currentTime = time
+  currentTime.value = time
+}
+
+const onWaveformUpdateEntry = (payload: { uid: number; start?: number; end?: number }) => {
+  const row = entries.value.find((e) => e._uid === payload.uid)
+  if (!row) return
+  if (payload.start !== undefined) {
+    row.start = payload.start
+    row._startText = formatTimeInput(row.start)
+  }
+  if (payload.end !== undefined) {
+    row.end = payload.end
+    row._endText = formatTimeInput(row.end)
+  }
+  activeUid.value = payload.uid
+}
+
+// 在时间轴空白处双击新增一条字幕：找到该时间点前后相邻的条目，夹在
+// 中间插入一条 2 秒（或更短，避免越界侵占相邻条目）默认时长的空白字幕，
+// 与表格里的"➕ 后插一条"（insertAfter）行为保持一致的默认时长策略。
+const onWaveformAddEntry = (time: number) => {
+  const sorted = entries.value
+  let insertAt = sorted.length
+  for (let i = 0; i < sorted.length; i++) {
+    if (time < sorted[i].start) {
+      insertAt = i
+      break
+    }
+  }
+  const prev = sorted[insertAt - 1]
+  const next = sorted[insertAt]
+  if (prev && time < prev.end) return // 双击落在已有字幕区块内部，交由拖拽/表格编辑处理，这里不重复插入
+  const start = time
+  const maxEnd = next ? next.start : start + 2
+  const end = Math.min(start + 2, maxEnd)
+  if (end - start < 0.1) return // 相邻条目间隙太窄，放不下新字幕
+  const newEntry = toEditableEntry({ start, end, text: '' })
+  entries.value.splice(insertAt, 0, newEntry)
+  activeUid.value = newEntry._uid
+}
+
+// ─────────────────────────────────────────────────────────────────
 // 导出（前端持有完整字幕数据，请求后端仅做格式转换，返回文本后
 // 用 Blob 方式触发浏览器下载，不落盘到工作目录）
 // ─────────────────────────────────────────────────────────────────
-const exportSubtitle = async (format: 'srt' | 'lrc' | 'txt') => {
+const exportSubtitle = async (format: 'srt' | 'lrc' | 'lab' | 'txt') => {
   if (!entries.value.length) {
     ElMessage.warning(t('subtitle.exportEmpty'))
     return
@@ -951,6 +1023,14 @@ onBeforeUnmount(() => {
 
 .subtitle-list-heading {
   margin-top: 20px;
+}
+
+.waveform-heading {
+  margin-top: 20px;
+}
+
+.waveform-block {
+  margin-bottom: 8px;
 }
 
 .list-actions {
