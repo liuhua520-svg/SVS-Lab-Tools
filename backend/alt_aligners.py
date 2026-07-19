@@ -395,6 +395,143 @@ def normalize_text_for_whisperx(text: str, lang: str = "zh") -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# 2c. Qwen3-FA / Qwen3-ASR 对齐前繁体转简体预处理（仅普通话 "zh"）
+#
+#     背景：Qwen3-ForcedAligner-0.6B 与 Qwen3-ASR-1.7B 均基于简体中文语料
+#     训练/对齐，普通话参考文本一旦混有繁体字（哪怕只有个别字），常见
+#     后果包括——分词/音节切分错位、退化区间（同一时间戳挤压多个字符）、
+#     甚至整段对齐直接失败。MFA（依赖 pypinyin，简繁均可正常转拼音）与
+#     WhisperX（wav2vec2 CTC 对齐，字符集容忍度更高）目前未观测到同等
+#     程度的问题，因此这里的转换只作用于 Qwen3-FA / Qwen3-ASR 两个后端，
+#     不影响 MFA / WhisperX / NeMo。
+#
+#     语种范围：只对内部语言代码 "zh"（普通话）生效。"yue"（粤语）不
+#     参与转换——粤语书面语（尤其港澳地区）本就习惯使用繁体字，且部分
+#     粤语专用字/俗字在简体字集里没有对应写法或转换后会引起歧义，因此
+#     粤语参考文本按原始书写（繁体或简体）直接使用，不做任何转换。
+#
+#     实现依赖 opencc（優先 opencc-python-reimplemented，纯 Python 实现，
+#     免 C 扩展编译）。alt_aligners.py 运行在主进程 .mfa_env 中（不在
+#     独立的 .qwen3_env / .nemo_env 里），因此只需要在主 requirements.txt
+#     里声明该依赖。若环境中未安装该库，转换会被跳过并记录一条 warning
+#     日志，不会中断对齐流程本身（与本文件其它可选依赖——如 2. 节的
+#     numpy 缺失回退——保持一致的"能力缺失时降级而非报错"风格）。
+# ═════════════════════════════════════════════════════════════════════════════
+
+# 【惰性单例】OpenCC 转换器只在真正需要时才初始化一次（避免给不涉及
+# 中文的任务增加无谓的启动开销），后续调用直接复用。
+# None   = 尚未尝试初始化
+# False  = 已尝试过，opencc 未安装/初始化失败（本进程生命周期内不再重试）
+# 其他   = 已就绪的 opencc.OpenCC 实例
+_opencc_t2s_converter = None  # type: ignore[var-annotated]
+
+
+def _get_opencc_t2s_converter():
+    """
+    懒加载并返回一个 OpenCC "繁体 → 简体" (t2s) 转换器实例。
+
+    返回 None 表示 opencc 未安装或初始化失败——调用方应把这种情况当作
+    "无法转换，原文本直接使用"处理，而不是抛出异常中断整个对齐任务
+    （繁体字混入参考文本本身不是致命错误，只是会降低 Qwen3-FA/ASR 的
+    对齐质量；宁可尽力而为地对齐，也不应该因为一个可选的文本预处理
+    步骤而让整个任务失败）。
+    """
+    global _opencc_t2s_converter
+    if _opencc_t2s_converter is False:
+        return None
+    if _opencc_t2s_converter is not None:
+        return _opencc_t2s_converter
+
+    try:
+        from opencc import OpenCC
+        # "t2s"：Traditional Chinese → Simplified Chinese（不做地区词汇
+        # 转换，只做繁→简字形转换，避免把台湾/香港特有词汇替换成大陆
+        # 用词而改变歌词本身的用字选择——本项目只需要 Qwen3-FA/ASR 能
+        # 正确处理字符，不需要、也不应该做词汇层面的地域化替换）。
+        _opencc_t2s_converter = OpenCC("t2s")
+        logger.info("[繁简转换] OpenCC (t2s) 初始化成功")
+    except ImportError as e:
+        logger.warning(
+            f"[繁简转换] 未安装 opencc（{e}），Qwen3-FA/Qwen3-ASR 遇到繁体"
+            "参考文本时将无法自动转换为简体，可能导致对齐质量下降或失败。"
+            "建议在对应虚拟环境中执行: "
+            "pip install opencc-python-reimplemented"
+        )
+        _opencc_t2s_converter = False
+        return None
+    except Exception as e:
+        logger.warning(f"[繁简转换] OpenCC 初始化失败（{e}），跳过繁简转换")
+        _opencc_t2s_converter = False
+        return None
+
+    return _opencc_t2s_converter
+
+
+def _contains_traditional_chinese(text: str) -> bool:
+    """
+    快速检测 text 中是否包含"繁体独有"（即转简体后字形会发生变化）的
+    汉字，用于在真正调用 OpenCC 转换、并打印日志之前先做一次廉价判断，
+    避免对纯简体/非中文文本做无意义的转换调用与日志噪音。
+
+    实现方式：复用同一个 OpenCC(t2s) 转换器，直接对比"转换前后是否
+    相同"——这比维护一份独立的"繁体字符集合"更可靠（覆盖 OpenCC 内部
+    完整的繁简映射表，包括繁体异体字），代价是要先跑一次转换，但由于
+    转换本身就是本函数存在的目的（检测到就要转换），这个开销不是浪费。
+    """
+    if not text:
+        return False
+    converter = _get_opencc_t2s_converter()
+    if converter is None:
+        return False
+    try:
+        return converter.convert(text) != text
+    except Exception:
+        return False
+
+
+def convert_traditional_to_simplified(text: str, language: str) -> str:
+    """
+    Qwen3-FA / Qwen3-ASR 专用：若 text 属于普通话中文，且检测到繁体字，
+    转换为简体后返回；否则原样返回 text。
+
+    仅对语言判定为 "zh"（含 Mandarin 各种别名）生效——"yue"（粤语）
+    书面语在香港/澳门等地本就习惯使用繁体字（甚至部分粤语专用字在
+    简体字集里没有对应写法或写法会引起歧义），因此粤语不参与繁体转
+    简体，保留原始书写用字。日语中的"新字体"汉字、韩语中的"正字"汉字
+    同样与繁体中文字形部分重叠，对这两个语种做繁简转换会误伤本就正确
+    的日文/韩文汉字写法，因此严格限定语种范围，不做跨语种的"顺手"转换。
+
+    text 为空或不含任何繁体独有字符时直接返回原文本，不做无意义的
+    字符串重建，也不产生日志噪音（参见 _contains_traditional_chinese）。
+    """
+    if not text:
+        return text
+
+    int_lang = _normalize_lang(language)
+    if int_lang != "zh":
+        return text
+
+    if not _contains_traditional_chinese(text):
+        return text
+
+    converter = _get_opencc_t2s_converter()
+    if converter is None:
+        # 理论上不会走到这里（_contains_traditional_chinese 已经确认过
+        # converter 可用才会返回 True），保留作为防御性兜底。
+        return text
+
+    try:
+        converted = converter.convert(text)
+    except Exception as e:
+        logger.warning(f"[繁简转换] 转换失败（{e}），继续使用原始文本: {text[:60]}")
+        return text
+
+    if converted != text:
+        logger.info(f"[繁简转换] 检测到繁体字，已转换为简体: '{text}' → '{converted}'")
+    return converted
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # 3. 工具函数
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -2607,6 +2744,13 @@ class Qwen3ASRAligner(AltAlignerBase):
                 "ko": "Korean",
             }.get(int_lang, language)
 
+            # 【繁体转简体】text 目前只在下方 transcribed 为空时作为兜底
+            # 文本使用（context 固定传空字符串，不送入模型），这里提前转换
+            # 好，保证一旦真的走到兜底分支，用的也是简体文本，与 Qwen3-FA
+            # 侧行为一致。详见 convert_traditional_to_simplified() 顶部说明。
+            if text:
+                text = convert_traditional_to_simplified(text, language)
+
             logger.info(f"[Qwen3-ASR] 调用独立服务: {self.endpoint}")
             result = self._call_qwen3_service(
                 audio_path=audio_path,
@@ -2615,9 +2759,28 @@ class Qwen3ASRAligner(AltAlignerBase):
             )
 
             transcribed = (result.get("raw_text") or "").strip()
+            # 【繁体转简体】Qwen3-ASR 是纯识别模式，模型自己输出的转录文本
+            # 才是真正流向下游（LAB 生成、SVP/VSQX 歌词文本）的内容——
+            # 粤语等场景下模型可能原样输出繁体转录结果，这里同样转换为
+            # 简体后再继续，保证最终产出的文字与 Qwen3-FA 侧一致，都是
+            # 简体。
+            if transcribed:
+                transcribed = convert_traditional_to_simplified(transcribed, language)
             segments = result.get("segments") or []
 
             entries = self._flatten_segments_to_entries(segments, int_lang)
+            # 【繁体转简体】entries 里每个 token 的字符/词面同样来自模型
+            # 原始输出（与上面的 transcribed 同源但分别提取），可能仍带
+            # 繁体字，这里单独转换，避免转换顺序依赖——entries 与
+            # transcribed 各自独立转换，互不影响，结果一致。语种范围判断
+            # （仅普通话 "zh" 生效，粤语 "yue" 保留原始繁/简书写习惯）已
+            # 收敛在 convert_traditional_to_simplified() 内部，这里不重复
+            # 判断，只在 entries 非空时才逐条尝试转换。
+            if entries:
+                entries = [
+                    (s, e, convert_traditional_to_simplified(w, language) if w else w)
+                    for s, e, w in entries
+                ]
 
             logger.info(f"[Qwen3-ASR] 转录文本: {transcribed[:120]}")
 
@@ -3918,6 +4081,13 @@ class Qwen3ForcedAligner(AltAlignerBase):
                 "error": "Qwen3-ForcedAligner 需要参考文本（text 不能为空）",
                 "processing_time": 0,
             }
+
+        # 【繁体转简体】必须在做任何分段规划 / 送入模型之前完成，一次性
+        # 转换整段参考文本：_align_chunked 里的句子边界规划、_align_single_
+        # chunk 传给模型的每一段文本，都直接复用这里转换后的结果，不需要
+        # 在多个调用点分别处理。详见 convert_traditional_to_simplified()
+        # 顶部说明。
+        text = convert_traditional_to_simplified(text, language)
 
         try:
             self._load_model()

@@ -815,7 +815,8 @@ def text_optimize():
     文本优化弹窗统一入口。body: {"text": "...", "action": "smart" |
     "number_only" | "digit_to_words" | "symbol_only" | "add_spaces" |
     "strip_symbols" | "newline_after_comma" | "newline_after_period" |
-    "newline_every_n" | "hyphen_to_space", "language":
+    "newline_every_n" | "hyphen_to_space" | "add_spaces_uppercase" |
+    "uppercase_to_lowercase" | "lowercase_to_uppercase", "language":
     "cmn"|"yue"|"eng"|"jpn"|"kor"（仅
     smart/number_only/digit_to_words/symbol_only 需要，其余 action 与
     语种无关，可不传）, "n": 2（仅 newline_every_n 需要，表示"每几句插入

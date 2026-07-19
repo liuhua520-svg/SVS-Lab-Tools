@@ -727,6 +727,184 @@ class TsubakiProcessor:
         return out
 
     # ----------------------------
+    # PyWORLD 子进程隔离调用
+    # ----------------------------
+    # 【崩溃修复】pw.dio() / pw.harvest() / pw.stonemask() 是编译好的 C++
+    # 扩展，实测在部分 Windows 环境下会在原生层面直接触发 Access
+    # Violation (0xC0000005) / 栈缓冲区溢出（0xC0000409），这类错误发生
+    # 在解释器之外，Python 的 try/except 完全无法捕获——受影响的不是
+    # "这一次 F0 提取失败"，而是整个 Flask 主进程（以及它此刻正在服务
+    # 的所有其它请求）瞬间被操作系统杀死，日志里不会有任何 Traceback，
+    # 只会看到进程静默退出。
+    #
+    # _f0_worker() 已经实现了一套完整的"子进程隔离 + 内存清洗 + 长音频
+    # 分块"方案（详见其函数体注释），但此前一直是未被调用的死代码——
+    # process_audio_f0() 里 dio/harvest 分支实际调用的是本进程内的
+    # pw.dio() / pw.harvest()，没有走隔离路径，这就是崩溃的真正原因。
+    # 这里补上真正的调用桥梁：用 multiprocessing.Process 启动
+    # _f0_worker，主进程只通过 Queue 收结果，即使子进程整个被 Access
+    # Violation 干掉，主进程也只会在 queue 里等不到数据（用 join+超时
+    # 探测），可以正常返回一个可控的失败结果，不会被拖着一起崩溃。
+    def _run_pyworld_isolated(
+        self, audio_path: str, config: "AudioProcessingConfig",
+        timeout_sec: float = 120.0,
+    ) -> Dict:
+        """
+        在独立子进程中运行 PyWORLD (dio/harvest) F0 提取，返回与
+        process_audio_f0() 相同结构的 {"success", "f0", "t", "sr",
+        "method"} / {"success": False, "error": ...} 字典。
+
+        子进程本身异常退出（被系统杀死、Access Violation 等）不会抛出
+        Python 异常，而是通过判断 process.exitcode 是否为 None/0 以及
+        queue 是否有数据来识别，转换成正常的失败结果返回给调用方——
+        这样即使 PyWORLD 在这台机器上确实无法稳定运行，用户看到的也只是
+        "F0 提取失败"的错误提示，而不是整个后端服务被打挂。
+        """
+        ctx = mp.get_context("spawn")
+        q: mp.Queue = ctx.Queue()
+        proc = ctx.Process(
+            target=_f0_worker,
+            args=(audio_path, config.to_dict(), q),
+            daemon=True,
+        )
+        proc.start()
+
+        result = None
+        try:
+            result = q.get(timeout=timeout_sec)
+        except Exception:
+            # 队列超时或子进程尚未写入就已经死亡：不在这里立即判定失败，
+            # 下面 join 后统一根据 exitcode 给出更准确的错误信息。
+            result = None
+        finally:
+            proc.join(timeout=5.0)
+            if proc.is_alive():
+                # 正常情况下 q.get 返回后子进程应已结束；这里是防御性兜底
+                # （例如极端情况下子进程卡死），避免残留僵尸进程。
+                proc.terminate()
+                proc.join(timeout=5.0)
+
+        if result is not None:
+            return result
+
+        exitcode = proc.exitcode
+        if exitcode is None:
+            # join 超时后仍未退出，理论上不会走到这里（上面已 terminate）。
+            error_msg = "PyWORLD 子进程未在预期时间内返回结果"
+        elif exitcode < 0:
+            # 负的退出码 = 被信号杀死；Windows 上 Access Violation /
+            # 栈溢出等原生崩溃通常表现为非 0（常见如 -1073741819 即
+            # 0xC0000005 的有符号表示）。把原始 exitcode 带上，方便
+            # 用户/日志据此判断是不是同一类已知的原生崩溃。
+            error_msg = (
+                f"PyWORLD 子进程被操作系统终止（exitcode={exitcode}），"
+                "通常是该环境下 pyworld 原生扩展与其它库存在 ABI 冲突"
+                "导致的底层崩溃（Access Violation / 栈溢出），并非本次"
+                "音频或参考文本内容本身的问题。建议：① 尝试切换到 "
+                "CREPE 或 RMVPE 提取 F0（不依赖 pyworld 原生扩展）；"
+                "② 检查 .mfa_env 内 pyworld 与其它原生扩展包（如 "
+                "opencc、ctranslate2 等）是否存在版本冲突，必要时重建"
+                "虚拟环境。"
+            )
+        else:
+            error_msg = f"PyWORLD 子进程异常退出（exitcode={exitcode}），未返回结果"
+
+        logger.error(f"[PyWORLD 隔离子进程] {error_msg}")
+        return {"success": False, "error": error_msg}
+
+    def _finalize_f0_result(
+        self, f0: np.ndarray, t: np.ndarray, sr, method: str,
+        config: "AudioProcessingConfig",
+    ) -> Dict:
+        """
+        F0 提取后的统一收尾处理：无声段线性插值 + 可选平滑，四种方法
+        （dio / harvest / crepe / rmvpe）共用同一套逻辑，确保只有"提取
+        算法"这一个变量不同，后处理行为完全一致。
+
+        原本这段逻辑内联在 process_audio_f0() 里，dio/harvest 改为走
+        _run_pyworld_isolated() 子进程隔离调用后单独抽成方法，避免两条
+        路径各自维护一份、后续改动容易漏改其中一处。
+        """
+        f0 = np.asarray(f0, dtype=np.float64)
+        t = np.asarray(t, dtype=np.float64)
+
+        # 线性插值无声段（仅当存在足够的有声帧时）
+        voiced_idx = np.nonzero(f0 > 0)[0]
+        if len(voiced_idx) > 1:
+            unvoiced_idx = np.where(f0 == 0)[0]
+            if len(unvoiced_idx) > 0:
+                f0[unvoiced_idx] = np.interp(
+                    unvoiced_idx, voiced_idx, f0[voiced_idx]
+                )
+
+        # 可选平滑：① 倍频/半频误判纠正 → ② log2（半音）域中值滤波
+        # 去尖峰 → ③ 移动平均。
+        #
+        # 【修复】原实现直接在 Hz 域对原始值做移动平均，没有去尖峰
+        # 步骤——均值滤波对孤立尖峰没有抑制能力，尖峰只会被摊薄扩散
+        # 到相邻几帧而不是被消除，表现为"开了平滑窗口但仍有锯齿"。
+        # 同时 Hz 域平均本身在感知上也不准确（音高感知是对数关系），
+        # 这里改为与 VSQX PIT 曲线平滑（_build_vsqx_part_xml）一致的
+        # "log2 域中值去尖峰 + 移动平均"，避免两处平滑策略不一致导致
+        # 叠加后行为难以预测（例如两个平滑窗口都调大时被压缩两次）。
+        #
+        # 【进一步修复：倍频/半频误判专项纠正】中值滤波去尖峰依赖
+        # "异常值在窗口内占少数"这个假设：核大小为 N 时只能纠正连续
+        # 不超过 (N-1)//2 帧的异常。但倍频/半频误判（DIO/Harvest 这类
+        # DSP 音高提取器最典型的失败模式之一）经常连续持续 20-50ms
+        # （4-10 帧 @ 5ms/帧），一旦超过中值滤波窗口能扛住的长度，
+        # 中值本身就落在错误值上，之后的 moving average 只会在错误值
+        # 和正确值之间画一条平滑但依然错误的过渡曲线——看起来顺滑，
+        # 实际音高是错的（实测：合成信号里连续 8 帧的半频误判，仅靠
+        # 中值滤波+移动平均完全未被修正）。
+        #
+        # 倍频误判有一个中值滤波没有利用到的强特征：误差幅度几乎
+        # 精确等于整数个八度（2x/0.5x，偶尔 3x/(1/3)x），而不是任意
+        # 随机幅度；真实的大幅音高变化（滑音/甩音跨越 5-6 个半音，
+        # 约 0.4-0.5 个八度）远小于八度检测的下限，不会被误纠正。
+        # 因此在中值滤波之前先用更宽的邻域窗口（150ms 量级，足以
+        # 跨越常见误判持续时长，让邻域中位数仍由多数正确帧主导）
+        # 专门检测并按整数八度直接纠正，不再依赖"中值滤波窗口能否
+        # 扛过去"这种和误判段落长度赛跑的运气。
+        if config.f0_smooth and len(f0) > 2:
+            win = int(config.f0_smooth_window)
+            if win % 2 == 0:
+                win += 1
+            if win > 1:
+                voiced = f0 > 0
+                if np.any(voiced):
+                    # ① 倍频/半频误判专项纠正（先于去尖峰/平滑）
+                    f0 = self._correct_octave_errors(f0, voiced)
+
+                    f0_log = np.zeros_like(f0)
+                    f0_log[voiced] = np.log2(f0[voiced])
+
+                    # ② 去尖峰：中值滤波（仅在有声帧上，避免污染静音）。
+                    # 窗口跟随平滑窗口自适应，能剔除连续多帧的异常值，
+                    # 而不只是孤立单帧。此前上限固定在 9 点（能扛住
+                    # 连续 4 帧异常），现在放宽到 11 点（能扛住连续
+                    # 5 帧异常）——八度级的大误判已经交给上面的专项
+                    # 纠正处理，这里的中值滤波窗口不必再为"扛住大
+                    # 误判"而束手束脚，可以放宽一点去覆盖更多中等
+                    # 幅度、中等持续时长的跳变，让"关闭/开启 f0_smooth"
+                    # 在这类场景下的差异更容易被感知到。
+                    despike_win = min(11, max(3, win // 2))
+                    if despike_win % 2 == 0:
+                        despike_win += 1
+                    if voiced.sum() >= despike_win:
+                        f0_log[voiced] = self._median_filter_1d(f0_log[voiced], despike_win)
+
+                    # ③ 移动平均（log2 域）
+                    padded = np.pad(f0_log, win // 2, mode="edge")
+                    f0_log = np.convolve(padded, np.ones(win) / win, mode="valid")
+
+                    f0_new = np.zeros_like(f0)
+                    f0_new[voiced] = np.exp2(f0_log[voiced])
+                    f0 = f0_new
+
+        return {"success": True, "f0": f0, "t": t, "sr": sr, "method": method}
+
+    # ----------------------------
     # F0 提取
     # ----------------------------
     def process_audio_f0(self, audio_path: str, config: AudioProcessingConfig) -> Dict:
@@ -746,21 +924,29 @@ class TsubakiProcessor:
 
         method = (config.f0_method or "dio").strip().lower()
 
+        # 【崩溃修复】dio / harvest 走独立子进程隔离调用（见
+        # _run_pyworld_isolated 顶部说明），不在本（Flask 主）进程内直接
+        # 调用 pw.dio() / pw.harvest()——那样一旦 pyworld 原生扩展在当前
+        # 环境下触发 Access Violation，会连带整个后端服务一起崩溃。
+        # 子进程自己负责读音频文件、清洗内存、长音频分块，这里不需要、
+        # 也不应该重复读取一遍 x/sr。
+        if method in ("dio", "harvest"):
+            result = self._run_pyworld_isolated(audio_path, config)
+            if not result.get("success"):
+                return result
+
+            f0 = np.asarray(result.get("f0"), dtype=np.float64)
+            t = np.asarray(result.get("t"), dtype=np.float64)
+            sr = result.get("sr")
+            return self._finalize_f0_result(f0, t, sr, method, config)
+
         try:
             x, sr = sf.read(audio_path)
             if x.ndim > 1:
                 x = np.mean(x, axis=1)
             x = x.astype(np.float64)
 
-            if method == "harvest":
-                import pyworld as pw
-                f0, t = pw.harvest(
-                    x, sr,
-                    f0_floor=config.f0_floor, f0_ceil=config.f0_ceil,
-                    frame_period=5.0
-                )
-
-            elif method == "crepe":
+            if method == "crepe":
                 from f0_extractors import extract_f0_crepe
                 f0, t = extract_f0_crepe(
                     x, sr,
@@ -780,94 +966,16 @@ class TsubakiProcessor:
                 )
 
             else:
-                # 默认 / 'dio'
-                import pyworld as pw
-                _f0, t = pw.dio(
-                    x, sr,
-                    f0_floor=config.f0_floor, f0_ceil=config.f0_ceil,
-                    frame_period=5.0
-                )
-                f0 = pw.stonemask(x, _f0, t, sr)
+                # method 既不是 dio/harvest（已在上面提前返回），也不是
+                # crepe/rmvpe——未知方法名，明确报错而不是静默回退到某个
+                # 默认算法，避免用户拼错 method 时得到一个看似正常、实际
+                # 却不是预期算法的结果。
+                return {
+                    "success": False,
+                    "error": f"未知的 F0 提取方法: '{method}'（支持 dio / harvest / crepe / rmvpe）",
+                }
 
-            # 统一类型
-            f0 = np.asarray(f0, dtype=np.float64)
-            t  = np.asarray(t,  dtype=np.float64)
-
-            # 线性插值无声段（仅当存在足够的有声帧时）
-            voiced_idx = np.nonzero(f0 > 0)[0]
-            if len(voiced_idx) > 1:
-                unvoiced_idx = np.where(f0 == 0)[0]
-                if len(unvoiced_idx) > 0:
-                    f0[unvoiced_idx] = np.interp(
-                        unvoiced_idx, voiced_idx, f0[voiced_idx]
-                    )
-
-            # 可选平滑：① 倍频/半频误判纠正 → ② log2（半音）域中值滤波
-            # 去尖峰 → ③ 移动平均。
-            #
-            # 【修复】原实现直接在 Hz 域对原始值做移动平均，没有去尖峰
-            # 步骤——均值滤波对孤立尖峰没有抑制能力，尖峰只会被摊薄扩散
-            # 到相邻几帧而不是被消除，表现为"开了平滑窗口但仍有锯齿"。
-            # 同时 Hz 域平均本身在感知上也不准确（音高感知是对数关系），
-            # 这里改为与 VSQX PIT 曲线平滑（_build_vsqx_part_xml）一致的
-            # "log2 域中值去尖峰 + 移动平均"，避免两处平滑策略不一致导致
-            # 叠加后行为难以预测（例如两个平滑窗口都调大时被压缩两次）。
-            #
-            # 【进一步修复：倍频/半频误判专项纠正】中值滤波去尖峰依赖
-            # "异常值在窗口内占少数"这个假设：核大小为 N 时只能纠正连续
-            # 不超过 (N-1)//2 帧的异常。但倍频/半频误判（DIO/Harvest 这类
-            # DSP 音高提取器最典型的失败模式之一）经常连续持续 20-50ms
-            # （4-10 帧 @ 5ms/帧），一旦超过中值滤波窗口能扛住的长度，
-            # 中值本身就落在错误值上，之后的 moving average 只会在错误值
-            # 和正确值之间画一条平滑但依然错误的过渡曲线——看起来顺滑，
-            # 实际音高是错的（实测：合成信号里连续 8 帧的半频误判，仅靠
-            # 中值滤波+移动平均完全未被修正）。
-            #
-            # 倍频误判有一个中值滤波没有利用到的强特征：误差幅度几乎
-            # 精确等于整数个八度（2x/0.5x，偶尔 3x/(1/3)x），而不是任意
-            # 随机幅度；真实的大幅音高变化（滑音/甩音跨越 5-6 个半音，
-            # 约 0.4-0.5 个八度）远小于八度检测的下限，不会被误纠正。
-            # 因此在中值滤波之前先用更宽的邻域窗口（150ms 量级，足以
-            # 跨越常见误判持续时长，让邻域中位数仍由多数正确帧主导）
-            # 专门检测并按整数八度直接纠正，不再依赖"中值滤波窗口能否
-            # 扛过去"这种和误判段落长度赛跑的运气。
-            if config.f0_smooth and len(f0) > 2:
-                win = int(config.f0_smooth_window)
-                if win % 2 == 0:
-                    win += 1
-                if win > 1:
-                    voiced = f0 > 0
-                    if np.any(voiced):
-                        # ① 倍频/半频误判专项纠正（先于去尖峰/平滑）
-                        f0 = self._correct_octave_errors(f0, voiced)
-
-                        f0_log = np.zeros_like(f0)
-                        f0_log[voiced] = np.log2(f0[voiced])
-
-                        # ② 去尖峰：中值滤波（仅在有声帧上，避免污染静音）。
-                        # 窗口跟随平滑窗口自适应，能剔除连续多帧的异常值，
-                        # 而不只是孤立单帧。此前上限固定在 9 点（能扛住
-                        # 连续 4 帧异常），现在放宽到 11 点（能扛住连续
-                        # 5 帧异常）——八度级的大误判已经交给上面的专项
-                        # 纠正处理，这里的中值滤波窗口不必再为"扛住大
-                        # 误判"而束手束脚，可以放宽一点去覆盖更多中等
-                        # 幅度、中等持续时长的跳变，让"关闭/开启 f0_smooth"
-                        # 在这类场景下的差异更容易被感知到。
-                        despike_win = min(11, max(3, win // 2))
-                        if despike_win % 2 == 0:
-                            despike_win += 1
-                        if voiced.sum() >= despike_win:
-                            f0_log[voiced] = self._median_filter_1d(f0_log[voiced], despike_win)
-
-                        # ③ 移动平均（log2 域）
-                        padded = np.pad(f0_log, win // 2, mode="edge")
-                        f0_log = np.convolve(padded, np.ones(win) / win, mode="valid")
-
-                        f0_new = np.zeros_like(f0)
-                        f0_new[voiced] = np.exp2(f0_log[voiced])
-                        f0 = f0_new
-
-            return {"success": True, "f0": f0, "t": t, "sr": sr, "method": method}
+            return self._finalize_f0_result(f0, t, sr, method, config)
 
         except ImportError as e:
             logger.error(f"F0 提取失败（依赖缺失，method={method}）: {e}")
@@ -3655,7 +3763,7 @@ def _f0_worker(audio_path: str, config_dict: dict, q: mp.Queue) -> None:
             t = np.concatenate(t_list)
 
         # 仅将干净的数据送出队列，避免在主进程做危险计算
-        q.put({"success": True, "f0": f0, "t": t, "sr": sr})
+        q.put({"success": True, "f0": f0, "t": t, "sr": sr, "method": f0_method})
 
     except Exception as e:
         import traceback

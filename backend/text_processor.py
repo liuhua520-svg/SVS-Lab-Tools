@@ -24,8 +24,10 @@ MFA / TTS / 对齐 / 词典等其它任何后端模块，供 /api/text/optimize 
                                       场景；与 number_only_convert() 的
                                       "完整数值读法"是两套独立规则，二选
                                       一或先后叠加均可。
-  仅转换符号 symbol_only_convert() —— 只转换 + - × ÷ = ℃ ℉ & 这组符号，
-                                      不动数字。
+  仅转换符号 symbol_only_convert() —— 只转换 + - × ÷ = ℃ ℉ & * # 这组符号，
+                                      不动数字（其中 * # 按各语种日常读法
+                                      转换，如中文"星号""井号"，不是数学
+                                      运算符读法）。
   优化文本 - 英文加空格 add_spaces_around_english() —— 在英文单词（连续
                                       [A-Za-z] 片段）前后补空格，避免中英
                                       文/数字紧贴导致 TTS 分词或强制对齐
@@ -434,26 +436,30 @@ _SYMBOL_WORDS: Dict[str, Dict[str, str]] = {
     "zh": {
         "+": "加", "-": "减", "×": "乘", "÷": "除", "=": "等于",
         "℃": "摄氏度", "℉": "华氏度", "&": "和",
-        "*": "乘",  # 键盘常见输入，等价于 ×
+        "*": "星号",  # 键盘常见输入，日常读法是"星号"而非数学乘号
+        "#": "井号",
         "%": "百分之",  # 百分号单独处理（见 _convert_percent），此处仅在
                          # "仅转换符号"模式下若单独出现也能兜底转换
     },
     "en": {
         "+": "plus", "-": "minus", "×": "times", "÷": "divided by", "=": "equals",
         "℃": "degrees Celsius", "℉": "degrees Fahrenheit", "&": "and",
-        "*": "times",
+        "*": "asterisk",
+        "#": "hash",
         "%": "percent",
     },
     "ja": {
         "+": "プラス", "-": "マイナス", "×": "かける", "÷": "わる", "=": "イコール",
         "℃": "度", "℉": "華氏度", "&": "アンド",
-        "*": "かける",
+        "*": "アスタリスク",
+        "#": "シャープ",
         "%": "パーセント",
     },
     "ko": {
         "+": "더하기", "-": "빼기", "×": "곱하기", "÷": "나누기", "=": "같다",
         "℃": "섭씨 도", "℉": "화씨 도", "&": "그리고",
-        "*": "곱하기",
+        "*": "별표",
+        "#": "샵",
         "%": "퍼센트",
     },
 }
@@ -757,7 +763,8 @@ def smart_convert(text: str, language: str) -> str:
          的负号在这一步被识别消费掉，不会误当成减号占位符处理，因为它在
          第 5 步就没有被替换——第 5 步的正则本来就只匹配"非负号"的那些
          "-"）。
-      7. 占位符替换回目标语种的减号文字；同时处理 + × ÷ = & 等其余符号。
+      7. 占位符替换回目标语种的减号文字；同时处理 + × ÷ = & * # 等其余
+         符号（* # 按各语种日常读法转换，如中文"星号""井号"）。
     """
     if not text:
         return text
@@ -856,6 +863,53 @@ def add_spaces_around_english(text: str) -> str:
     lines = spaced.split("\n")
     cleaned_lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in lines]
     return "\n".join(cleaned_lines)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 对外入口（新增）：大写字母逐个加空格 / 大写转小写 / 小写转大写
+#   三个按钮均只处理英文字母（A-Z / a-z），不影响其它任何文字与标点：
+#     · 大写字母逐个加空格：每一个大写字母前后补空格，把连写的大写缩写
+#       拆成单字母序列（"ABC" → "A B C"），便于 TTS / 强制对齐按字母朗读，
+#       常见于处理英文缩写、字母歌一类的场景。已经是小写或非字母字符不受
+#       影响；同一行内因补空格产生的多余空格按其它按钮的惯例统一清理。
+#     · 大写转小写：整段文本里的英文字母统一转小写（"VOCAL" → "vocal"）。
+#     · 小写转大写：整段文本里的英文字母统一转大写（"Vocal" → "VOCAL"）。
+#   后两个直接复用 Python 内置 str.upper()/str.lower()，对中日韩等非英文
+#   字符没有任何影响，不需要额外处理。
+# ═════════════════════════════════════════════════════════════════════════
+
+_UPPERCASE_LETTER_RE = re.compile(r"[A-Z]")
+
+
+def add_spaces_around_uppercase(text: str) -> str:
+    """把每一个大写英文字母前后都补上空格，让连写的大写字母逐个断开
+    （如 "ABC" → "A B C"）。不影响小写字母及其它任何文字/标点。"""
+    if not text:
+        return text
+
+    def _replace(m: "re.Match") -> str:
+        return f" {m.group(0)} "
+
+    spaced = _UPPERCASE_LETTER_RE.sub(_replace, text)
+    lines = spaced.split("\n")
+    cleaned_lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in lines]
+    return "\n".join(cleaned_lines)
+
+
+def uppercase_to_lowercase(text: str) -> str:
+    """把文本中的英文字母统一转换为小写（如 "VOCAL" → "vocal"），
+    不影响非英文字母字符。"""
+    if not text:
+        return text
+    return text.lower()
+
+
+def lowercase_to_uppercase(text: str) -> str:
+    """把文本中的英文字母统一转换为大写（如 "Vocal" → "VOCAL"），
+    不影响非英文字母字符。"""
+    if not text:
+        return text
+    return text.upper()
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -1030,6 +1084,9 @@ _ACTIONS_NO_LANG = {
     "newline_after_comma": newline_after_comma,   # 优化文本：按逗号插入换行（与语种无关）
     "newline_after_period": newline_after_period, # 优化文本：按句号插入换行（与语种无关）
     "hyphen_to_space": hyphen_to_space,           # 优化文本：连字符转空格（与语种无关）
+    "add_spaces_uppercase": add_spaces_around_uppercase,  # 优化文本：大写字母逐个加空格（与语种无关）
+    "uppercase_to_lowercase": uppercase_to_lowercase,     # 优化文本：大写转小写（与语种无关）
+    "lowercase_to_uppercase": lowercase_to_uppercase,     # 优化文本：小写转大写（与语种无关）
 }
 
 
@@ -1041,7 +1098,9 @@ def process_text(text: str, action: str, language: str = "zh", n: int = 2) -> Di
     text: 待处理文本（仅处理这一段文本本身，不涉及任何文件/其它后端）。
     action: "smart" | "number_only" | "digit_to_words" | "symbol_only" |
       "add_spaces" | "strip_symbols" | "newline_after_comma" |
-      "newline_after_period" | "newline_every_n" | "hyphen_to_space"
+      "newline_after_period" | "newline_every_n" | "hyphen_to_space" |
+      "add_spaces_uppercase" | "uppercase_to_lowercase" |
+      "lowercase_to_uppercase"
     language: 语言代码（cmn/yue/eng/jpn/kor 或 zh/en/ja/ko），仅 smart /
       number_only / digit_to_words / symbol_only 需要，其余 action 与语种
       无关。

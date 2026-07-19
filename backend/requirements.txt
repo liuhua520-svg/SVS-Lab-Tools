@@ -69,6 +69,12 @@ accelerate>=0.27.0
 qwen-asr>=1.0.0
 k2
 
+# Qwen3-ForcedAligner / Qwen3-ASR 对齐前繁体转简体预处理
+# （alt_aligners.py 的 convert_traditional_to_simplified()，纯 Python
+# 实现，免 C 扩展编译；未安装时自动跳过转换并记录 warning 日志，不影响
+# 其它对齐功能，详见 alt_aligners.py "2c." 节说明）
+opencc-python-reimplemented>=0.1.7
+
 # ====================== TTS跟读（讲述人 / EdgeTTS） ======================
 edge-tts>=7.0
 # "讲述人"引擎调用 Windows 自带的 SAPI5 语音合成，仅 Windows 需要安装；
