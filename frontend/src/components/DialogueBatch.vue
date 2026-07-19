@@ -1141,6 +1141,7 @@
 
       <!-- "优化文本"弹窗：智能转换 / 仅转换（数字）/ 逐字转换（数字）/
            仅转换符号 / 英文加空格 / 去除多余符号 / 连字符转空格 /
+           大写字母加空格 / 大写转小写 / 小写转大写 / 首字母大写其余小写 /
            按逗号插入换行 / 按句号插入换行 / 按每几句插入换行，全部只在弹窗内的这份文本
            副本上生效；点击"应用"才会写回打开弹窗时指定的那个对话框文本框，
            不点"应用"直接关闭则不影响原文本。与 pipeline.py /
@@ -1183,6 +1184,9 @@
           </el-button>
           <el-button size="small" :loading="textOptimizer.loading === 'lowercase_to_uppercase'" @click="runTextOptimize('lowercase_to_uppercase')">
             🔼 {{ t('processor.textOptimizeLowercaseToUppercase') }}
+          </el-button>
+          <el-button size="small" :loading="textOptimizer.loading === 'capitalize_words'" @click="runTextOptimize('capitalize_words')">
+            🔤 {{ t('processor.textOptimizeCapitalizeWords') }}
           </el-button>
           <el-button size="small" :loading="textOptimizer.loading === 'newline_after_comma'" @click="runTextOptimize('newline_after_comma')">
             ↩️ {{ t('processor.textOptimizeNewlineAfterComma') }}
