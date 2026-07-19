@@ -20,7 +20,7 @@ from phoneme_converter import (
     convert_phoneme,
     build_ja_hiragana_lab,
     merge_lab_silence,
-    word_to_arpabet,
+    word_to_arpabet_g2p_only,
     distribute_arpabet_phones,
     katakana_to_romaji_moras,
     hiragana_to_katakana,
@@ -864,7 +864,7 @@ class MFAProcessor:
                         # MFA Phone Tier 为空（CJK 声学模型不输出 ARPABET，或替代
                         # 对齐后端 phone_items=[]）：走 G2P 获取音素序列，再按权重
                         # 比例把词的时间跨度分配给各个 ARPABET 音素。
-                        g2p_phones = word_to_arpabet(mark)
+                        g2p_phones = word_to_arpabet_g2p_only(mark)
                         if g2p_phones:
                             for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
                                 lines.append(f"{s} {e} {p}")
@@ -944,7 +944,7 @@ class MFAProcessor:
             # 个音素——而不是像旧版本那样把整个单词原样当成一个"音素"
             # 塞进 LAB（这正是 WhisperXAligner 英语输出始终停留在词级、
             # 从未真正到达音素级的根本原因）。
-            g2p_phones = word_to_arpabet(mark)
+            g2p_phones = word_to_arpabet_g2p_only(mark)
             if g2p_phones:
                 for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
                     lines.append(f"{s} {e} {p}")
@@ -1021,7 +1021,7 @@ class MFAProcessor:
                     for s, e, p in entries:
                         lines.append(f"{s} {e} {p}")
                 else:
-                    g2p_phones = word_to_arpabet(mark)
+                    g2p_phones = word_to_arpabet_g2p_only(mark)
                     if g2p_phones:
                         for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
                             lines.append(f"{s} {e} {p}")
@@ -1111,7 +1111,7 @@ class MFAProcessor:
                         for s, e, p in entries:
                             lines.append(f"{s} {e} {p}")
                     else:
-                        g2p_phones = word_to_arpabet(mark)
+                        g2p_phones = word_to_arpabet_g2p_only(mark)
                         if g2p_phones:
                             for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
                                 lines.append(f"{s} {e} {p}")
@@ -1312,7 +1312,7 @@ class MFAProcessor:
                         for s, e, p in entries:
                             lines.append(f"{s} {e} {p}")
                     else:
-                        g2p_phones = word_to_arpabet(mark)
+                        g2p_phones = word_to_arpabet_g2p_only(mark)
                         if g2p_phones:
                             for s, e, p in distribute_arpabet_phones(start, end, g2p_phones):
                                 lines.append(f"{s} {e} {p}")

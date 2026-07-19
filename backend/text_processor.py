@@ -880,6 +880,11 @@ def add_spaces_around_english(text: str) -> str:
 #     · 小写转大写：整段文本里的英文字母统一转大写（"Vocal" → "VOCAL"）。
 #   后两个直接复用 Python 内置 str.upper()/str.lower()，对中日韩等非英文
 #   字符没有任何影响，不需要额外处理。
+#     · 首字母大写其余小写：把每个英文单词统一变成"首字母大写、其余
+#       字母小写"（"hello WORLD" → "Hello World"，"mi di" → "Mi Di"），
+#       不管原文这个单词本来是全大写、全小写还是大小写混合，统一按
+#       这一条规则处理；按英文单词逐个处理，不影响单词之间的空格/标点，
+#       也不影响非英文字符（中日韩文字、数字等原样保留）。
 # ═════════════════════════════════════════════════════════════════════════
 
 # 只匹配"两个相邻大写字母的交界处"（零宽断言，不消耗字符），用于在这一
@@ -915,6 +920,21 @@ def lowercase_to_uppercase(text: str) -> str:
     if not text:
         return text
     return text.upper()
+
+
+# 只匹配"英文单词"本身（连续的英文字母，允许中间带撇号如 don't），用于
+# 逐词定位、只改字母大小写、不改单词边界与非英文字符。
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)*")
+
+
+def capitalize_words(text: str) -> str:
+    """把文本中每个英文单词统一转换为"首字母大写，其余字母小写"
+    （如 "hello WORLD" → "Hello World"，"mi di" → "Mi Di"）。不区分单词
+    原本是全大写还是全小写，统一按这一条规则处理；不影响非英文字符
+    （中日韩文字、数字、标点等原样保留）。"""
+    if not text:
+        return text
+    return _ENGLISH_WORD_RE.sub(lambda m: m.group(0).capitalize(), text)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -1092,6 +1112,7 @@ _ACTIONS_NO_LANG = {
     "add_spaces_uppercase": add_spaces_around_uppercase,  # 优化文本：大写字母逐个加空格（与语种无关）
     "uppercase_to_lowercase": uppercase_to_lowercase,     # 优化文本：大写转小写（与语种无关）
     "lowercase_to_uppercase": lowercase_to_uppercase,     # 优化文本：小写转大写（与语种无关）
+    "capitalize_words": capitalize_words,                 # 优化文本：首字母大写其余小写（与语种无关）
 }
 
 
@@ -1105,7 +1126,7 @@ def process_text(text: str, action: str, language: str = "zh", n: int = 2) -> Di
       "add_spaces" | "strip_symbols" | "newline_after_comma" |
       "newline_after_period" | "newline_every_n" | "hyphen_to_space" |
       "add_spaces_uppercase" | "uppercase_to_lowercase" |
-      "lowercase_to_uppercase"
+      "lowercase_to_uppercase" | "capitalize_words"
     language: 语言代码（cmn/yue/eng/jpn/kor 或 zh/en/ja/ko），仅 smart /
       number_only / digit_to_words / symbol_only 需要，其余 action 与语种
       无关。

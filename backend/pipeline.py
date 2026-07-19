@@ -158,6 +158,39 @@ def _make_alignment_pitch_shifted_copy(src_wav_path: str, semitones: float) -> s
     return tmp_path
 
 
+def _release_gpu_resources_before_f0() -> None:
+    """
+    在"对齐阶段"结束、"F0 提取阶段"开始之前调用，尽量把对齐模型
+    （Qwen3-FA / WhisperX / NeMo 等，均为 CUDA 常驻模型）占用的显存
+    和 CUDA 上下文状态清理干净，再让 F0 提取（尤其 CREPE / RMVPE，
+    同样需要往 GPU 加载模型）开始工作。
+
+    背景：对齐模型和 F0 神经网络模型是两个独立生命周期的 CUDA 使用者，
+    紧挨着连续执行时，前者的显存释放和后者的显存申请之间存在一个
+    时间窗口——大多数情况下无害，但在部分 Windows + CUDA 驱动组合下
+    曾观察到这个窗口内出现底层崩溃（非 Python 异常，np/torch 也无法
+    捕获）。这里加一次显式的同步 + 缓存清理 + 垃圾回收，尽量缩小
+    该窗口；即使当前环境用不到 CUDA（如纯 CPU 部署），也应安全跳过。
+
+    全程做异常兜底，任何失败都不应该影响主流程——这只是一个尽力而为
+    的稳定性加固，不是必需步骤。
+    """
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception as exc:
+        logger.debug(f"[pipeline] 对齐后显存清理跳过（非致命）: {exc}")
+
+
 def _run_alignment(
     audio_file,             # Flask FileStorage 或 FileStorageWrapper
     text: str,
@@ -386,6 +419,11 @@ class AudioProcessingPipeline:
                 f.write(lab_content)
             logger.info(f"✓ LAB 标注完成: {lab_path}")
 
+            # ── 对齐模型（Qwen3-FA/WhisperX/NeMo 等）与 F0 模型（CREPE/
+            #    RMVPE）都是独立的 CUDA 常驻模型，紧邻执行前先清理一次，
+            #    避免显存释放/申请的时间窗口重叠导致底层不稳定 ──────────
+            _release_gpu_resources_before_f0()
+
             # ── 步骤 2：F0 提取（注意：始终基于步骤开头保存的原始 wav_path，
             #    不受 align_pitch_shift_semitones 影响——移调只发生在对齐
             #    阶段内部的临时副本上，此处 wav_path 从未被替换过）───────
@@ -592,6 +630,7 @@ class AudioProcessingPipeline:
 
             audio_data = None
             try:
+                _release_gpu_resources_before_f0()
                 audio_data = self.tsubaki_processor.process_audio_f0(wav_path, config)
                 if not audio_data or not audio_data.get("success"):
                     logger.warning(
@@ -946,6 +985,12 @@ class AudioProcessingPipeline:
                 "skipped_count": skipped_count,
                 "processing_time": int((time.time() - start_time) * 1000),
             }
+
+        # 所有对话框的对齐阶段（可能含 Qwen3-FA/WhisperX/NeMo 等 CUDA 常驻
+        # 模型）已全部结束，build_multitrack_project 内部会对每个音轨做
+        # F0 提取（可能是 CREPE/RMVPE，同样需要 CUDA）——紧邻执行前先清理，
+        # 避免显存释放/申请窗口重叠。
+        _release_gpu_resources_before_f0()
 
         project_result = self.tsubaki_processor.build_multitrack_project(
             project_title=project_title,
