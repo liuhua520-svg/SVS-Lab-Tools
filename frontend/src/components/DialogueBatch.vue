@@ -351,12 +351,12 @@
             <el-row :gutter="20">
               <el-col :xs="24" :sm="12">
                 <el-form-item :label="t('processor.f0Floor')">
-                  <el-input-number v-model="advanced.f0_floor" :min="0" :max="200" :step="5" controls-position="right" :disabled="processing" />
+                  <el-input-number v-model="advanced.f0_floor" :min="35" :max="200" :step="5" controls-position="right" :disabled="processing" />
                 </el-form-item>
               </el-col>
               <el-col :xs="24" :sm="12">
                 <el-form-item :label="t('processor.f0Ceil')">
-                  <el-input-number v-model="advanced.f0_ceil" :min="300" :max="3000" :step="50" controls-position="right" :disabled="processing" />
+                  <el-input-number v-model="advanced.f0_ceil" :min="300" :max="5000" :step="50" controls-position="right" :disabled="processing" />
                 </el-form-item>
               </el-col>
             </el-row>
@@ -1175,6 +1175,15 @@
           <el-button size="small" :loading="textOptimizer.loading === 'hyphen_to_space'" @click="runTextOptimize('hyphen_to_space')">
             ➖ {{ t('processor.textOptimizeHyphenToSpace') }}
           </el-button>
+          <el-button size="small" :loading="textOptimizer.loading === 'add_spaces_uppercase'" @click="runTextOptimize('add_spaces_uppercase')">
+            🔡 {{ t('processor.textOptimizeAddSpacesUppercase') }}
+          </el-button>
+          <el-button size="small" :loading="textOptimizer.loading === 'uppercase_to_lowercase'" @click="runTextOptimize('uppercase_to_lowercase')">
+            🔽 {{ t('processor.textOptimizeUppercaseToLowercase') }}
+          </el-button>
+          <el-button size="small" :loading="textOptimizer.loading === 'lowercase_to_uppercase'" @click="runTextOptimize('lowercase_to_uppercase')">
+            🔼 {{ t('processor.textOptimizeLowercaseToUppercase') }}
+          </el-button>
           <el-button size="small" :loading="textOptimizer.loading === 'newline_after_comma'" @click="runTextOptimize('newline_after_comma')">
             ↩️ {{ t('processor.textOptimizeNewlineAfterComma') }}
           </el-button>
@@ -1479,12 +1488,12 @@
                 <el-row :gutter="20">
                   <el-col :xs="24" :sm="12">
                     <el-form-item :label="t('processor.f0Floor')">
-                      <el-input-number v-model="boxSettings.draft.advanced.f0_floor" :min="0" :max="200" :step="5" controls-position="right" />
+                      <el-input-number v-model="boxSettings.draft.advanced.f0_floor" :min="35" :max="200" :step="5" controls-position="right" />
                     </el-form-item>
                   </el-col>
                   <el-col :xs="24" :sm="12">
                     <el-form-item :label="t('processor.f0Ceil')">
-                      <el-input-number v-model="boxSettings.draft.advanced.f0_ceil" :min="300" :max="3000" :step="50" controls-position="right" />
+                      <el-input-number v-model="boxSettings.draft.advanced.f0_ceil" :min="300" :max="5000" :step="50" controls-position="right" />
                     </el-form-item>
                   </el-col>
                 </el-row>
@@ -2236,8 +2245,8 @@ const advanced = ref<AdvancedConfig>({
   f0_smooth: true,
   f0_smooth_window: 5,
   vsqx_pitch_smooth_window: 5,
-  f0_floor: 0,
-  f0_ceil: 1200,
+  f0_floor: 35,
+  f0_ceil: 2100,
 })
 
 // 与 MFAProcessor.vue 保持一致：显示条件与"英语单词级对齐"开关挂钩。
@@ -2956,8 +2965,8 @@ const createBoxAdvancedOverride = (): BoxAdvancedOverride => ({
   f0_smooth: true,
   f0_smooth_window: 5,
   vsqx_pitch_smooth_window: 5,
-  f0_floor: 0,
-  f0_ceil: 1200,
+  f0_floor: 35,
+  f0_ceil: 2100,
 })
 
 const createBoxOverride = (): BoxOverride => ({

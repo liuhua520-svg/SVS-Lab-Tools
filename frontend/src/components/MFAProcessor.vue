@@ -610,6 +610,15 @@
             <el-button size="small" :loading="textOptimizer.loading === 'hyphen_to_space'" @click="runTextOptimize('hyphen_to_space')">
               ➖ {{ t('processor.textOptimizeHyphenToSpace') }}
             </el-button>
+            <el-button size="small" :loading="textOptimizer.loading === 'add_spaces_uppercase'" @click="runTextOptimize('add_spaces_uppercase')">
+              🔡 {{ t('processor.textOptimizeAddSpacesUppercase') }}
+            </el-button>
+            <el-button size="small" :loading="textOptimizer.loading === 'uppercase_to_lowercase'" @click="runTextOptimize('uppercase_to_lowercase')">
+              🔽 {{ t('processor.textOptimizeUppercaseToLowercase') }}
+            </el-button>
+            <el-button size="small" :loading="textOptimizer.loading === 'lowercase_to_uppercase'" @click="runTextOptimize('lowercase_to_uppercase')">
+              🔼 {{ t('processor.textOptimizeLowercaseToUppercase') }}
+            </el-button>
             <el-button size="small" :loading="textOptimizer.loading === 'newline_after_comma'" @click="runTextOptimize('newline_after_comma')">
               ↩️ {{ t('processor.textOptimizeNewlineAfterComma') }}
             </el-button>
@@ -1283,7 +1292,7 @@
                 <el-form-item :label="t('processor.f0Floor')">
                   <el-input-number
                     v-model="advancedConfig.f0_floor"
-                    :min="0"
+                    :min="35"
                     :max="200"
                     :step="5"
                     controls-position="right"
@@ -1296,7 +1305,7 @@
                   <el-input-number
                     v-model="advancedConfig.f0_ceil"
                     :min="300"
-                    :max="3000"
+                    :max="5000"
                     :step="50"
                     controls-position="right"
                   />
@@ -2565,8 +2574,8 @@ const advancedConfig = ref<AdvancedConfig>({
   f0_smooth: true,
   f0_smooth_window: 5,
   vsqx_pitch_smooth_window: 5,
-  f0_floor: 0,
-  f0_ceil: 1200
+  f0_floor: 35,
+  f0_ceil: 2100
 })
 
 const processing = ref(false)
