@@ -70,6 +70,10 @@
           </el-button>
         </el-upload>
 
+        <el-button plain @click="createBlankSubtitle">
+          ➕ {{ t('subtitleEditor.newSubtitleButton') }}
+        </el-button>
+
         <span v-if="entries.length" class="import-summary">
           {{ t('subtitleEditor.importSummary', { count: entries.length }) }}
         </span>
@@ -354,6 +358,23 @@ const insertAtEnd = () => {
   const duration = mediaInfo.value?.duration || start + 2
   const end = Math.min(start + 2, duration)
   entries.value.push(toEditableEntry({ start, end: Math.max(end, start + 0.3), text: '' }))
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 新建字幕：不导入任何文件，直接从零开始新增一条空白字幕，方便完全
+// 手工从头打轴。若当前编辑区已有内容，先跟导入字幕一样弹窗二次确认，
+// 避免误清空已有的校对结果。
+// ─────────────────────────────────────────────────────────────────
+const createBlankSubtitle = async () => {
+  if (entries.value.length) {
+    try {
+      await ElMessageBox.confirm(t('subtitleEditor.importReplaceWarning'), '', { type: 'warning' })
+    } catch {
+      return
+    }
+    entries.value = []
+  }
+  insertAtEnd()
 }
 
 const deleteEntry = async (index: number) => {
