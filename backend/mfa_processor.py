@@ -12,7 +12,7 @@ import shutil
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional, Set, Callable
 
 from pypinyin import lazy_pinyin, Style
 from mfa_utils import MFAChecker
@@ -1548,8 +1548,18 @@ class MFAProcessor:
     # 主流程（修改位置）
     # =====================================================================
     def process(self, audio_file, text: str, language: str = "cmn",
-                english_word_align: bool = False) -> Dict:
-        """处理单个音频文件"""
+                english_word_align: bool = False,
+                on_process_start: Optional[Callable[[subprocess.Popen], None]] = None,
+                cancel_check: Optional[Callable[[], bool]] = None) -> Dict:
+        """处理单个音频文件
+
+        on_process_start : 可选回调，在 MFA 子进程启动后立刻收到该 Popen
+            句柄——供调用方（如 app.py 的任务取消机制）登记，需要时可以
+            直接 terminate，无需等待 subprocess 自然结束。
+        cancel_check : 可选回调，MFA 对齐运行期间会定期轮询；一旦返回
+            True，会主动 terminate 子进程并提前返回 stage="cancelled"
+            的结果，不必等到 timeout 或子进程自然退出。
+        """
         start_time = time.time()
         try:
             self.temp_dir = tempfile.mkdtemp(prefix="mfa_")
@@ -1631,12 +1641,59 @@ class MFAProcessor:
             if lib_dir.exists():
                 env["LD_LIBRARY_PATH"] = str(lib_dir) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
             
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout_seconds, env=env
+            # 用 Popen 而非 subprocess.run，这样调用方（app.py 的任务取消机制）
+            # 可以拿到子进程句柄，在用户点击"停止"时直接 terminate，不必等
+            # MFA 自然跑完或超时——这是目前唯一能被真正立即中断的处理阶段
+            # （其它阶段如 F0 提取/WhisperX/Qwen3 是进程内调用，只能走协作式
+            # 取消，在阶段边界生效）。
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env
             )
-            
-            if result.returncode != 0:
-                error_msg = result.stderr if result.stderr else "MFA 失败"
+            if on_process_start:
+                try:
+                    on_process_start(proc)
+                except Exception:
+                    pass
+
+            poll_interval = 0.5
+            elapsed = 0.0
+            cancelled = False
+            while True:
+                try:
+                    stdout, stderr = proc.communicate(timeout=poll_interval)
+                    break
+                except subprocess.TimeoutExpired:
+                    elapsed += poll_interval
+                    if cancel_check and cancel_check():
+                        cancelled = True
+                        proc.terminate()
+                        try:
+                            stdout, stderr = proc.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            stdout, stderr = proc.communicate()
+                        break
+                    if elapsed >= timeout_seconds:
+                        proc.kill()
+                        stdout, stderr = proc.communicate()
+                        raise subprocess.TimeoutExpired(cmd, timeout_seconds)
+
+            if on_process_start:
+                try:
+                    on_process_start(None)  # 阶段结束，清除句柄登记
+                except Exception:
+                    pass
+
+            if cancelled:
+                logger.info("⏹ MFA 对齐已取消")
+                return {
+                    "success": False, "error": "用户已取消",
+                    "stage": "cancelled",
+                    "processing_time": int((time.time() - start_time) * 1000)
+                }
+
+            if proc.returncode != 0:
+                error_msg = stderr if stderr else "MFA 失败"
                 logger.error(f"MFA: {error_msg}")
                 return {
                     "success": False, "error": error_msg,

@@ -252,6 +252,47 @@ def get_job(job_id: str):
         return JOBS.get(job_id)
 
 
+# ── 任务取消（协作式）─────────────────────────────────────────────────────
+# 后台任务大多是若干顺序阶段（对齐 → F0 提取 → 工程文件生成，或批量模式下
+# 逐个对话框）拼起来的一次同步调用，中途没有可以直接杀掉的句柄。这里用一个
+# "取消标记"实现协作式取消：点击停止只是把 job 标记为 cancel_requested，
+# 真正在跑的阶段不会被打断，但流水线在每个阶段边界（以及批量模式下每处理完
+# 一个对话框）都会检查这个标记，一旦发现就提前退出、把 job 标记为
+# status="cancelled"。MFA 对齐额外做了子进程句柄保留，取消时会尝试直接
+# terminate，不必等这一步跑完。
+def request_job_cancel(job_id: str) -> bool:
+    with JOB_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return False
+        # 已经结束的任务不允许"取消"（避免覆盖 done/failed 的最终结果）
+        if job.get("status") in ("done", "failed", "cancelled"):
+            return False
+        job["cancel_requested"] = True
+        proc = job.get("_proc")  # 若当前阶段持有子进程句柄（如 MFA），尝试直接终止
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        return True
+
+
+def is_job_cancel_requested(job_id: str) -> bool:
+    with JOB_LOCK:
+        job = JOBS.get(job_id)
+        return bool(job and job.get("cancel_requested"))
+
+
+def set_job_process_handle(job_id: str, proc):
+    """登记当前阶段正在运行的子进程句柄，供 request_job_cancel 直接 terminate。
+    阶段结束后应调用 set_job_process_handle(job_id, None) 清除。"""
+    with JOB_LOCK:
+        job = JOBS.get(job_id)
+        if job is not None:
+            job["_proc"] = proc
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TTS 分段预览缓存："预览"按钮只做 TTS 合成（tts_processor.
 # synthesize_segments_only），不做 Qwen3-FA 对齐；这里把合成产物（分句
@@ -560,10 +601,35 @@ def pipeline_job_status(job_id):
             "error": "任务不存在"
         }), 404
 
+    # _proc 是内部使用的子进程句柄（用于取消时 terminate），不是可序列化的
+    # JSON 值，也不应该暴露给前端——轮询响应里过滤掉。
+    safe_job = {k: v for k, v in job.items() if k != "_proc"}
     return jsonify({
         "success": True,
-        "job": job
+        "job": safe_job
     }), 200
+
+
+@app.route("/api/pipeline/job/<job_id>/cancel", methods=["POST"])
+def pipeline_job_cancel(job_id):
+    """
+    请求取消一个正在排队/运行中的后台任务（协作式取消，见 request_job_cancel
+    上方注释）。任务会在下一个阶段边界（或批量模式下处理完当前对话框后）
+    检测到取消标记并提前结束，status 变为 "cancelled"；如果该阶段持有子
+    进程句柄（如 MFA 对齐），会尝试直接 terminate，无需等待整段跑完。
+
+    任务已经是终态（done/failed/cancelled）时返回 404，前端应当把这种
+    情况当作"已经结束，无需再取消"处理。
+    """
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"success": False, "error": "任务不存在"}), 404
+
+    ok = request_job_cancel(job_id)
+    if not ok:
+        return jsonify({"success": False, "error": "任务已结束，无法取消"}), 409
+
+    return jsonify({"success": True, "status": "cancel_requested"}), 200
 
 
 @app.route("/api/pipeline/formats", methods=["GET"])
@@ -1140,6 +1206,8 @@ def run_pipeline_job(
             word_phoneme_map=word_phoneme_map,
             dict_source=dict_source,
             align_pitch_shift_semitones=align_pitch_shift_semitones,
+            cancel_check=lambda: is_job_cancel_requested(job_id),
+            on_process_start=lambda proc: set_job_process_handle(job_id, proc),
         )
 
         if result.get("success"):
@@ -1147,6 +1215,14 @@ def run_pipeline_job(
                 job_id,
                 status="done",
                 finished_at=datetime.now().isoformat(),
+                result=result,
+            )
+        elif result.get("stage") == "cancelled":
+            set_job(
+                job_id,
+                status="cancelled",
+                finished_at=datetime.now().isoformat(),
+                error=result.get("error", "用户已取消"),
                 result=result,
             )
         else:
@@ -1419,13 +1495,23 @@ def run_mfa_only_job(job_id: str, wav_path: str, text: str, language: str,
                                            qwen3_batch_size=qwen3_batch_size,
                                            nemo_model=(nemo_model or None),
                                            english_word_align=english_word_align,
-                                           align_pitch_shift_semitones=align_pitch_shift_semitones)
+                                           align_pitch_shift_semitones=align_pitch_shift_semitones,
+                                           cancel_check=lambda: is_job_cancel_requested(job_id),
+                                           on_process_start=lambda proc: set_job_process_handle(job_id, proc))
 
         if result.get("success"):
             set_job(
                 job_id,
                 status="done",
                 finished_at=datetime.now().isoformat(),
+                result=result,
+            )
+        elif result.get("stage") == "cancelled":
+            set_job(
+                job_id,
+                status="cancelled",
+                finished_at=datetime.now().isoformat(),
+                error=result.get("error", "用户已取消"),
                 result=result,
             )
         else:
@@ -2016,7 +2102,12 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                 last_box=box_result,
             )
 
-        result = pipeline.process_dialogue_batch(boxes, progress_cb=_progress_cb, **kwargs)
+        result = pipeline.process_dialogue_batch(
+            boxes, progress_cb=_progress_cb,
+            cancel_check=lambda: is_job_cancel_requested(job_id),
+            on_process_start=lambda proc: set_job_process_handle(job_id, proc),
+            **kwargs,
+        )
 
         if pre_failed:
             result["boxes"] = pre_failed + result.get("boxes", [])
@@ -2027,6 +2118,14 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                 job_id,
                 status="done",
                 finished_at=datetime.now().isoformat(),
+                result=result,
+            )
+        elif result.get("stage") == "cancelled":
+            set_job(
+                job_id,
+                status="cancelled",
+                finished_at=datetime.now().isoformat(),
+                error=result.get("error", "用户已取消"),
                 result=result,
             )
         else:

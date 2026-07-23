@@ -206,9 +206,13 @@ def _run_alignment(
                                              # 与 f0_device（F0 提取设备，CREPE/RMVPE 专用）
                                              # 彻底解耦。None 时为向后兼容回退到 f0_device，
                                              # 但正常链路（app.py）应始终显式传入。
-    align_pitch_shift_semitones: float = 0.0,   # 新增：对齐辅助移调（半音，正数升调/负数降调，
+    align_pitch_shift_semitones: float = 0.0,   # 新增：对齐辅助移调（半音，正数升调/降调，
                                                  # 仅影响送入对齐后端的临时音频副本，不影响
                                                  # 最终 LAB 时间戳换算、F0 提取或工程文件音高）
+    cancel_check: Optional[Callable[[], bool]] = None,       # ← 协作式取消：目前仅 MFA 分支
+                                                              #   会在对齐运行期间轮询它
+    on_process_start: Optional[Callable[[object], None]] = None,   # ← MFA 子进程句柄回调，
+                                                                    #   供调用方登记以便直接 terminate
 ) -> Dict:
     """
     统一调度对齐后端，返回与 MFAProcessor.process() 格式兼容的字典。
@@ -230,7 +234,9 @@ def _run_alignment(
         if not align_pitch_shift_semitones:
             processor = MFAProcessor()
             return processor.process(audio_file, text, language,
-                                     english_word_align=english_word_align)
+                                     english_word_align=english_word_align,
+                                     on_process_start=on_process_start,
+                                     cancel_check=cancel_check)
 
         tmp_dir = tempfile.mkdtemp(prefix="mfa_pitch_align_")
         try:
@@ -245,6 +251,8 @@ def _run_alignment(
                 return processor.process(
                     _LocalFileAdapter(shifted_path), text, language,
                     english_word_align=english_word_align,
+                    on_process_start=on_process_start,
+                    cancel_check=cancel_check,
                 )
             finally:
                 if os.path.exists(shifted_path):
@@ -359,7 +367,19 @@ class AudioProcessingPipeline:
         word_phoneme_map: bool = False,                  # ← 英语单词 → 音素写入（SVP/VSQX）
         dict_source: str = "default",                     # ← 单词→音素词典来源
         align_pitch_shift_semitones: float = 0.0,        # ← 对齐辅助移调（半音），不影响最终产物音高
+        cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：每个阶段边界调用一次，
+                                                              #   返回 True 时提前中止并返回 stage="cancelled"
+        on_process_start: Optional[Callable[[object], None]] = None,   # ← MFA 子进程句柄回调，
+                                                                        #   供调用方登记以便直接 terminate
     ) -> Dict:
+        def _cancelled(stage: str, processing_time: int) -> Dict:
+            logger.info(f"⏹ 任务已取消 (阶段: {stage})")
+            return {
+                "success": False, "error": "用户已取消",
+                "stage": "cancelled", "cancelled_at_stage": stage,
+                "processing_time": processing_time,
+            }
+
         config = AudioProcessingConfig(
             bpm=bpm,
             base_pitch=base_pitch,
@@ -394,6 +414,9 @@ class AudioProcessingPipeline:
             audio_file.save(wav_path)
             audio_file.seek(0)
 
+            if cancel_check and cancel_check():
+                return _cancelled("alignment", int((time.time() - start_time) * 1000))
+
             # ── 步骤 1：对齐标注 ──────────────────────────────────────────
             logger.info(f"[ 步骤 1/3 ] 对齐标注 (backend={aligner_backend})...")
             align_result = _run_alignment(audio_file, text, language, aligner_backend,
@@ -403,7 +426,11 @@ class AudioProcessingPipeline:
                                            english_word_align=english_word_align,
                                            nemo_model=nemo_model,
                                            aligner_device=aligner_device,
-                                           align_pitch_shift_semitones=align_pitch_shift_semitones)
+                                           align_pitch_shift_semitones=align_pitch_shift_semitones,
+                                           cancel_check=cancel_check,
+                                           on_process_start=on_process_start)
+            if align_result.get("stage") == "cancelled":
+                return _cancelled("alignment", int((time.time() - start_time) * 1000))
             if not align_result.get("success"):
                 error = align_result.get("error", "对齐处理失败")
                 logger.error(f"✗ 对齐失败: {error}")
@@ -418,6 +445,9 @@ class AudioProcessingPipeline:
             with open(lab_path, "w", encoding="utf-8") as f:
                 f.write(lab_content)
             logger.info(f"✓ LAB 标注完成: {lab_path}")
+
+            if cancel_check and cancel_check():
+                return _cancelled("f0_extraction", int((time.time() - start_time) * 1000))
 
             # ── 对齐模型（Qwen3-FA/WhisperX/NeMo 等）与 F0 模型（CREPE/
             #    RMVPE）都是独立的 CUDA 常驻模型，紧邻执行前先清理一次，
@@ -439,6 +469,9 @@ class AudioProcessingPipeline:
                 logger.warning(f"⚠ 音高提取异常: {e}，继续生成工程文件")
                 audio_data = None
             logger.info("✓ 音高提取完成")
+
+            if cancel_check and cancel_check():
+                return _cancelled("project_generation", int((time.time() - start_time) * 1000))
 
             # ── 步骤 3：生成工程文件 ─────────────────────────────────────
             logger.info(f"[ 步骤 3/3 ] 生成 {output_format.upper()} 工程文件...")
@@ -512,6 +545,8 @@ class AudioProcessingPipeline:
         nemo_model: Optional[str] = None,        # ← NeMo Forced Aligner 模型覆盖（可选）
         english_word_align: bool = False,        # ← 英语单词级对齐
         align_pitch_shift_semitones: float = 0.0,   # ← 对齐辅助移调（半音），不影响 LAB 时间戳换算
+        cancel_check: Optional[Callable[[], bool]] = None,       # ← 协作式取消（MFA 分支运行期间轮询）
+        on_process_start: Optional[Callable[[object], None]] = None,   # ← MFA 子进程句柄回调
     ) -> Dict:
         """仅执行对齐标注（不生成工程文件）"""
         import time
@@ -527,7 +562,16 @@ class AudioProcessingPipeline:
                                     english_word_align=english_word_align,
                                     nemo_model=nemo_model,
                                     aligner_device=aligner_device,
-                                    align_pitch_shift_semitones=align_pitch_shift_semitones)
+                                    align_pitch_shift_semitones=align_pitch_shift_semitones,
+                                    cancel_check=cancel_check,
+                                    on_process_start=on_process_start)
+
+            if result.get("stage") == "cancelled":
+                return {
+                    **result,
+                    "processing_time": int((time.time() - start_time) * 1000),
+                    "aligner_backend": aligner_backend,
+                }
 
             if result.get("success"):
                 lab_content = result.get("lab_content", "")
@@ -714,6 +758,10 @@ class AudioProcessingPipeline:
                                                      #   字段传入，per-box 优先，此参数仅在该字段
                                                      #   缺失时兜底
         progress_cb: Optional[Callable[[int, int, Dict], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：每处理完
+                                                              #   一个对话框检查一次
+        on_process_start: Optional[Callable[[object], None]] = None,   # ← MFA 子进程句柄回调
+                                                                        #   （某个对话框走 MFA 对齐时）
     ) -> Dict:
         """
         对话文本框批量处理入口：逐个对话框顺序处理（对齐/LAB/MIDI 导入 + 音高提取），
@@ -922,7 +970,23 @@ class AudioProcessingPipeline:
                         nemo_model=nemo_model,
                         aligner_device=aligner_device,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
+                        cancel_check=cancel_check,
+                        on_process_start=on_process_start,
                     )
+                    if align_result.get("stage") == "cancelled":
+                        logger.info(f"⏹ 批量处理已取消（对话框 #{idx} 对齐阶段）")
+                        processed_count = sum(1 for r in results if r.get("status") == "done")
+                        failed_count    = sum(1 for r in results if r.get("status") == "failed")
+                        skipped_count   = sum(1 for r in results if r.get("status") == "skipped_empty")
+                        return {
+                            "success": False, "error": "用户已取消",
+                            "stage": "cancelled",
+                            "boxes": results,
+                            "processed_count": processed_count,
+                            "failed_count": failed_count,
+                            "skipped_count": skipped_count,
+                            "processing_time": int((time.time() - start_time) * 1000),
+                        }
                     if not align_result.get("success"):
                         box_result.update(
                             status="failed",
@@ -971,6 +1035,21 @@ class AudioProcessingPipeline:
             if progress_cb:
                 progress_cb(i + 1, total, box_result)
 
+            if cancel_check and cancel_check():
+                logger.info(f"⏹ 批量处理已取消（已处理 {i + 1}/{total} 个对话框）")
+                processed_count = sum(1 for r in results if r.get("status") == "done")
+                failed_count    = sum(1 for r in results if r.get("status") == "failed")
+                skipped_count   = sum(1 for r in results if r.get("status") == "skipped_empty")
+                return {
+                    "success": False, "error": "用户已取消",
+                    "stage": "cancelled",
+                    "boxes": results,
+                    "processed_count": processed_count,
+                    "failed_count": failed_count,
+                    "skipped_count": skipped_count,
+                    "processing_time": int((time.time() - start_time) * 1000),
+                }
+
         processed_count = sum(1 for r in results if r.get("status") == "done")
         failed_count    = sum(1 for r in results if r.get("status") == "failed")
         skipped_count   = sum(1 for r in results if r.get("status") == "skipped_empty")
@@ -979,6 +1058,18 @@ class AudioProcessingPipeline:
             return {
                 "success": False,
                 "error": "没有任何对话框成功处理，无法生成工程文件",
+                "boxes": results,
+                "processed_count": processed_count,
+                "failed_count": failed_count,
+                "skipped_count": skipped_count,
+                "processing_time": int((time.time() - start_time) * 1000),
+            }
+
+        if cancel_check and cancel_check():
+            logger.info("⏹ 批量处理已取消（所有对话框已处理完毕，工程文件生成前）")
+            return {
+                "success": False, "error": "用户已取消",
+                "stage": "cancelled",
                 "boxes": results,
                 "processed_count": processed_count,
                 "failed_count": failed_count,
