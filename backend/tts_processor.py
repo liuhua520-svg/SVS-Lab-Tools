@@ -876,7 +876,7 @@ def _qwen3_tts_synth_to_file(text: str, voice: str, out_path: str, options: Dict
 
     # Qwen3-TTS 模型推理（尤其 CPU 上，或首次调用触发模型下载）耗时可能
     # 明显长于 Qwen3-ASR 的单次转写，超时时间给得更宽松一些。
-    resp = requests.post(url, json=payload, timeout=600)
+    resp = requests.post(url, json=payload, timeout=86400)
     resp.raise_for_status()
     data = resp.json()
     if not data.get("success"):
@@ -915,14 +915,21 @@ def synthesize_segment_to_file(text: str, voice: str, rate: str, volume: str,
 def synthesize_preview(text: str, voice: str, rate: str = "+0%",
                         volume: str = "+0%", pitch: str = "+0Hz",
                         engine: str = DEFAULT_ENGINE,
-                        qwen3_tts_options: Optional[Dict] = None) -> bytes:
+                        qwen3_tts_options: Optional[Dict] = None,
+                        language: Optional[str] = None) -> bytes:
     """快速试听：只做一次单句合成（不切句、不对齐），返回音频字节数据
     （EdgeTTS 为 mp3，讲述人 / Qwen3-TTS 为 wav），供前端 <audio> 直接
     播放。预览文本过长时截断到前 200 字。
 
     qwen3_tts_options 见 _qwen3_tts_synth_to_file() 顶部说明；voice 在
     engine="qwen3_tts" 且 mode 为 voice_design/voice_clone 时不是必填项
-    （分别改由 instruct / 参考音频驱动）。"""
+    （分别改由 instruct / 参考音频驱动）。
+
+    language 为可选项：调用方（如对话框批量处理每个框自己的\"有效语言\"）
+    传入时，且 engine="qwen3_tts"，会先做一次与 synthesize_segments_only()
+    相同的繁体转简体处理（仅普通话生效，粤语不转），保证试听音频与用户
+    在语种下拉框里的选择行为一致；不传时（如\"语音预设管理\"弹窗那种没有
+    语种概念的纯音色试听场景）跳过这一步，保持原文本不变。"""
     ok, msg = check_available(engine)
     if not ok:
         raise RuntimeError(msg)
@@ -935,6 +942,10 @@ def synthesize_preview(text: str, voice: str, rate: str = "+0%",
     voice_required = not (engine == "qwen3_tts" and qwen3_mode in ("voice_design", "voice_clone"))
     if voice_required and not voice:
         raise ValueError("未指定音色")
+
+    if engine == "qwen3_tts" and language:
+        from alt_aligners import convert_traditional_to_simplified
+        text = convert_traditional_to_simplified(text, language)
 
     preview_text = text[:200]
     suffix = segment_file_suffix(engine)
@@ -1086,6 +1097,19 @@ def synthesize_segments_only(
     # 未来只改了一处导致行为不一致。
     from pipeline import _convert_digits_to_words
     text = _convert_digits_to_words(text, language)
+
+    # 繁体转简体（仅 Qwen3-TTS + 普通话）：Qwen3-TTS 对"语言"参数不区分
+    # 普通话/粤语（qwen3tts_server.py 里 cmn/yue 都映射到同一个 "Chinese"
+    # 大类），实际决定它读普通话还是粤语腔调的，很大程度上是文本本身的
+    # 字形/用词——繁体字混入普通话文本容易被模型误判成粤语。这里复用
+    # alt_aligners.py 对齐前用的同一套转换规则（普通话转简体、粤语原样
+    # 保留，避免误伤粤语书面语惯用的繁体字），在合成前统一处理，与上面
+    # 数字转换同理：必须在切句/合成之前做，才能保证 TTS 实际读出来的文字
+    # 和后续对齐用的参考文本（sentences）一致。EdgeTTS/SAPI 本身对繁简
+    # 混排容错度较高，不受此问题影响，因此只对 qwen3_tts 引擎生效。
+    if engine == "qwen3_tts":
+        from alt_aligners import convert_traditional_to_simplified
+        text = convert_traditional_to_simplified(text, language)
 
     sentence_list = sentences if sentences is not None else split_sentences(text)
     if not sentence_list:
@@ -1325,6 +1349,10 @@ def synthesize_and_align(
     align_pitch_shift_semitones: float = 0.0,
     progress_cb: Optional[Callable[[int, int], None]] = None,
     qwen3_tts_options: Optional[Dict] = None,
+    stage_cb: Optional[Callable[[str], None]] = None,   # ← 阶段切换回调，调用一次
+                                                          #   传入 "tts" 或 "align"，供调用方
+                                                          #   区分 progress_cb 报告的 (done,total)
+                                                          #   当前属于合成阶段还是对齐阶段。
 ) -> Dict:
     """
     TTS 跟读主流程（合成 + 对齐一次性做完）：依次调用
@@ -1348,6 +1376,11 @@ def synthesize_and_align(
       }
       失败: {"success": False, "error": str}
     """
+    if stage_cb:
+        try:
+            stage_cb("tts")
+        except Exception:
+            pass
     seg_result = synthesize_segments_only(
         text=text, language=language, voice=voice, work_dir=work_dir, stem=stem,
         engine=engine, rate=rate, volume=volume, pitch=pitch,
@@ -1357,6 +1390,11 @@ def synthesize_and_align(
     if not seg_result.get("success"):
         return seg_result
 
+    if stage_cb:
+        try:
+            stage_cb("align")
+        except Exception:
+            pass
     segments_dir = seg_result["segments_dir"]
     try:
         align_result = align_segments(

@@ -367,11 +367,25 @@ class AudioProcessingPipeline:
         word_phoneme_map: bool = False,                  # ← 英语单词 → 音素写入（SVP/VSQX）
         dict_source: str = "default",                     # ← 单词→音素词典来源
         align_pitch_shift_semitones: float = 0.0,        # ← 对齐辅助移调（半音），不影响最终产物音高
+        fill_short_rests: bool = False,                    # ← 填充短休止符（见 AudioProcessingConfig 说明）
+        fill_short_rests_max_length: str = "16",            # ← 判定"短"的音符时值阈值（8/16/32/64/128）
         cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：每个阶段边界调用一次，
                                                               #   返回 True 时提前中止并返回 stage="cancelled"
         on_process_start: Optional[Callable[[object], None]] = None,   # ← MFA 子进程句柄回调，
                                                                         #   供调用方登记以便直接 terminate
+        stage_cb: Optional[Callable[[str, str], None]] = None,   # ← 阶段进度回调 (stage, status)，
+                                                                   #   stage ∈ "align"/"f0"/"project"，
+                                                                   #   status ∈ "start"/"done"；供路由层
+                                                                   #   实时写入 job 供前端轮询按阶段展示
+                                                                   #   进度条（而不是单一的百分比/计数）。
     ) -> Dict:
+        def _stage(stage: str, status: str) -> None:
+            if stage_cb:
+                try:
+                    stage_cb(stage, status)
+                except Exception:
+                    pass
+
         def _cancelled(stage: str, processing_time: int) -> Dict:
             logger.info(f"⏹ 任务已取消 (阶段: {stage})")
             return {
@@ -394,6 +408,8 @@ class AudioProcessingPipeline:
             f0_ceil=f0_ceil,
             f0_device=f0_device,
             crepe_model=crepe_model,
+            fill_short_rests=fill_short_rests,
+            fill_short_rests_max_length=fill_short_rests_max_length,
         )
 
         import time
@@ -419,6 +435,7 @@ class AudioProcessingPipeline:
 
             # ── 步骤 1：对齐标注 ──────────────────────────────────────────
             logger.info(f"[ 步骤 1/3 ] 对齐标注 (backend={aligner_backend})...")
+            _stage("align", "start")
             align_result = _run_alignment(audio_file, text, language, aligner_backend,
                                            f0_device, whisperx_model,
                                            whisperx_batch_size=whisperx_batch_size,
@@ -445,6 +462,7 @@ class AudioProcessingPipeline:
             with open(lab_path, "w", encoding="utf-8") as f:
                 f.write(lab_content)
             logger.info(f"✓ LAB 标注完成: {lab_path}")
+            _stage("align", "done")
 
             if cancel_check and cancel_check():
                 return _cancelled("f0_extraction", int((time.time() - start_time) * 1000))
@@ -458,6 +476,7 @@ class AudioProcessingPipeline:
             #    不受 align_pitch_shift_semitones 影响——移调只发生在对齐
             #    阶段内部的临时副本上，此处 wav_path 从未被替换过）───────
             logger.info("[ 步骤 2/3 ] 音高提取...")
+            _stage("f0", "start")
             try:
                 audio_data = self.tsubaki_processor.process_audio_f0(wav_path, config)
                 if not audio_data or not audio_data.get("success"):
@@ -469,12 +488,14 @@ class AudioProcessingPipeline:
                 logger.warning(f"⚠ 音高提取异常: {e}，继续生成工程文件")
                 audio_data = None
             logger.info("✓ 音高提取完成")
+            _stage("f0", "done")
 
             if cancel_check and cancel_check():
                 return _cancelled("project_generation", int((time.time() - start_time) * 1000))
 
             # ── 步骤 3：生成工程文件 ─────────────────────────────────────
             logger.info(f"[ 步骤 3/3 ] 生成 {output_format.upper()} 工程文件...")
+            _stage("project", "start")
             project_result = self.tsubaki_processor.process_full_pipeline(
                 wav_path=wav_path,
                 lab_path=lab_path,
@@ -503,6 +524,7 @@ class AudioProcessingPipeline:
 
             project_path = project_result.get("output_path")
             processing_time = int((time.time() - start_time) * 1000)
+            _stage("project", "done")
 
             logger.info("=" * 60)
             logger.info("✓ 完整处理流程完成")
@@ -632,10 +654,21 @@ class AudioProcessingPipeline:
         original_text: str = "",                          # ← 原始歌词文本（汉字/韩文），用于预提取英语单词
         dict_source: str = "default",                      # ← 单词→音素词典来源
         ja_devoiced_phoneme: bool = False,                      # ← 日语辅音起始音素锁定（<p lock="1">）
+        fill_short_rests: bool = False,                    # ← 填充短休止符（见 AudioProcessingConfig 说明）
+        fill_short_rests_max_length: str = "16",            # ← 判定"短"的音符时值阈值（8/16/32/64/128）
+        stage_cb: Optional[Callable[[str, str], None]] = None,   # ← 阶段进度回调 (stage, status)，
+                                                                   #   stage ∈ "f0"/"project"，status ∈ "start"/"done"
     ) -> Dict:
         """仅执行工程文件生成（已有 WAV 以及 LAB/MIDI 之一）"""
         import time
         start_time = time.time()
+
+        def _stage(stage: str, status: str) -> None:
+            if stage_cb:
+                try:
+                    stage_cb(stage, status)
+                except Exception:
+                    pass
 
         try:
             logger.info("[ 工程文件模式 ] 生成项目文件")
@@ -670,9 +703,12 @@ class AudioProcessingPipeline:
                 export_pitch_line=export_pitch_line,
                 vsqx_pitch_smooth_window=vsqx_pitch_smooth_window,
                 f0_device=f0_device, crepe_model=crepe_model,
+                fill_short_rests=fill_short_rests,
+                fill_short_rests_max_length=fill_short_rests_max_length,
             )
 
             audio_data = None
+            _stage("f0", "start")
             try:
                 _release_gpu_resources_before_f0()
                 audio_data = self.tsubaki_processor.process_audio_f0(wav_path, config)
@@ -683,6 +719,8 @@ class AudioProcessingPipeline:
                     audio_data = None
             except Exception as e:
                 logger.warning(f"⚠ 音高提取异常: {e}，继续生成工程文件")
+            _stage("f0", "done")
+            _stage("project", "start")
 
             result = self.tsubaki_processor.process_full_pipeline(
                 wav_path=wav_path,
@@ -705,6 +743,7 @@ class AudioProcessingPipeline:
             )
 
             result["processing_time"] = int((time.time() - start_time) * 1000)
+            _stage("project", "done")
             return result
 
         except Exception as e:
@@ -757,11 +796,22 @@ class AudioProcessingPipeline:
                                                      #   box 自带的 "align_pitch_shift_semitones"
                                                      #   字段传入，per-box 优先，此参数仅在该字段
                                                      #   缺失时兜底
+        fill_short_rests: bool = False,        # ← 填充短休止符整批默认值（可被每框 override 覆盖）
+        fill_short_rests_max_length: str = "16",  # ← 判定"短"的音符时值阈值（8/16/32/64/128）
         progress_cb: Optional[Callable[[int, int, Dict], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：每处理完
                                                               #   一个对话框检查一次
         on_process_start: Optional[Callable[[object], None]] = None,   # ← MFA 子进程句柄回调
                                                                         #   （某个对话框走 MFA 对齐时）
+        stage_cb: Optional[Callable[[str, str, Optional[int]], None]] = None,   # ← 阶段进度回调
+                                                                                 #   (stage, status, box_index)。
+                                                                                 #   stage ∈ "align"/"f0"/"project"；
+                                                                                 #   status ∈ "start"/"done"；
+                                                                                 #   box_index 在 "align" 阶段为该框
+                                                                                 #   下标（0-based），"f0"/"project"
+                                                                                 #   阶段为 None（批量共享同一次调用，
+                                                                                 #   per-box F0 进度改由 f0_progress_cb
+                                                                                 #   下传给 build_multitrack_project）。
     ) -> Dict:
         """
         对话文本框批量处理入口：逐个对话框顺序处理（对齐/LAB/MIDI 导入 + 音高提取），
@@ -837,7 +887,16 @@ class AudioProcessingPipeline:
             f0_ceil=f0_ceil,
             f0_device=f0_device,
             crepe_model=crepe_model,
+            fill_short_rests=fill_short_rests,
+            fill_short_rests_max_length=fill_short_rests_max_length,
         )
+
+        def _stage(stage: str, status: str, box_index: Optional[int] = None) -> None:
+            if stage_cb:
+                try:
+                    stage_cb(stage, status, box_index)
+                except Exception:
+                    pass
 
         total = len(boxes)
         results: List[Dict] = []
@@ -896,6 +955,10 @@ class AudioProcessingPipeline:
                     vsqx_pitch_smooth_window=box_override.get("vsqx_pitch_smooth_window", config.vsqx_pitch_smooth_window),
                     f0_floor=box_override.get("f0_floor", config.f0_floor),
                     f0_ceil=box_override.get("f0_ceil", config.f0_ceil),
+                    fill_short_rests=box_override.get("fill_short_rests", config.fill_short_rests),
+                    fill_short_rests_max_length=box_override.get(
+                        "fill_short_rests_max_length", config.fill_short_rests_max_length
+                    ),
                 )
             else:
                 box_config = config
@@ -961,6 +1024,7 @@ class AudioProcessingPipeline:
                         continue
 
                     audio_adapter = _LocalFileAdapter(wav_path_final)
+                    _stage("align", "start", idx)
                     align_result = _run_alignment(
                         audio_adapter, text, box_language, box_aligner_backend,
                         f0_device, whisperx_model,
@@ -973,6 +1037,7 @@ class AudioProcessingPipeline:
                         cancel_check=cancel_check,
                         on_process_start=on_process_start,
                     )
+                    _stage("align", "done", idx)
                     if align_result.get("stage") == "cancelled":
                         logger.info(f"⏹ 批量处理已取消（对话框 #{idx} 对齐阶段）")
                         processed_count = sum(1 for r in results if r.get("status") == "done")
@@ -1006,6 +1071,8 @@ class AudioProcessingPipeline:
 
                 track_inputs.append({
                     "title": track_title,
+                    "box_index": idx,   # ← 供 build_multitrack_project 的 f0_progress_cb
+                                        #   回传，定位这条音轨对应的是哪一个原始对话框。
                     "wav_path": wav_path_final,
                     "lab_path": lab_path_final,
                     "midi_path": midi_path_final,
@@ -1027,13 +1094,24 @@ class AudioProcessingPipeline:
                 )
                 results.append(box_result)
 
+                # 注意：这里的 box_result 在最终返回值 results 里标记为
+                # "done" 是准确的（对齐/LAB/MIDI 导入已经成功，这个对话框
+                # 后续一定会被写入工程文件，不会再失败）——但音高提取还没
+                # 做（F0 是批量处理最后对所有 track_inputs 一次性提取的），
+                # 如果这里就把"done"实时推给前端，会导致对话框在音高还没
+                # 提取时就被前端标记为"已完成"。所以实时进度回调改用
+                # "pending_f0"这个中间状态，等下面 build_multitrack_project
+                # 真正对这个音轨做完 F0 提取后，再通过 f0_progress_cb 补发
+                # 一次真正的 "done"（见下方 _f0_progress_cb）。
+                if progress_cb:
+                    progress_cb(i + 1, total, {**box_result, "status": "pending_f0"})
+
             except Exception as e:
                 logger.error(f"✗ 对话框 #{idx} 处理异常: {e}", exc_info=True)
                 box_result.update(status="failed", error=str(e))
                 results.append(box_result)
-
-            if progress_cb:
-                progress_cb(i + 1, total, box_result)
+                if progress_cb:
+                    progress_cb(i + 1, total, box_result)
 
             if cancel_check and cancel_check():
                 logger.info(f"⏹ 批量处理已取消（已处理 {i + 1}/{total} 个对话框）")
@@ -1083,6 +1161,26 @@ class AudioProcessingPipeline:
         # 避免显存释放/申请窗口重叠。
         _release_gpu_resources_before_f0()
 
+        _stage("f0", "start")
+
+        # box_index -> 该框在 results 里已经记录好的最终结果字典（在上面
+        # 逐框对齐循环里已经 append 过，status 已经是准确的 "done"）——
+        # F0 提取真正完成后，直接原样把这个已经存在的记录再发一次给
+        # progress_cb，让前端这次才真正标记"已完成"，不需要在这里重新
+        # 构造一份新的 box_result。
+        _results_by_box_index = {r.get("index"): r for r in results if r.get("index") is not None}
+
+        def _f0_progress_cb(done: int, f0_total: int, track_title: str, box_index: Optional[int] = None) -> None:
+            if progress_cb:
+                progress_cb(done, f0_total, {"stage": "f0", "track_title": track_title})
+                # 这一条音轨自己的 F0 提取刚做完：如果能定位到它对应的
+                # 原始对话框，补发一次那个对话框的最终结果（status 已经是
+                # "done"），供前端把这一个框、且仅这一个框，实时标记为
+                # 已完成——而不是要等整批 F0 全部提取完才统一知道。
+                box_final = _results_by_box_index.get(box_index)
+                if box_final is not None:
+                    progress_cb(done, f0_total, box_final)
+
         project_result = self.tsubaki_processor.build_multitrack_project(
             project_title=project_title,
             track_inputs=track_inputs,
@@ -1096,7 +1194,10 @@ class AudioProcessingPipeline:
             vsqx_singer_bs=vsqx_singer_bs,
             phoneme_mode=phoneme_mode,
             ja_devoiced_phoneme=ja_devoiced_phoneme,
+            f0_progress_cb=_f0_progress_cb,
         )
+        _stage("f0", "done")
+        _stage("project", "start")
 
         processing_time = int((time.time() - start_time) * 1000)
 
@@ -1110,6 +1211,8 @@ class AudioProcessingPipeline:
                 "skipped_count": skipped_count,
                 "processing_time": processing_time,
             }
+
+        _stage("project", "done")
 
         logger.info("=" * 60)
         logger.info("✓ 对话文本框批量处理完成")

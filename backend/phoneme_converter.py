@@ -1246,7 +1246,15 @@ def build_ja_hiragana_lab(
             continue
 
         # ── Other consonant ────────────────────────────────────
-        flush_pending_as_dash()
+        # 与 build_ja_merged_lab() 同一处是同一个 bug/同一个修复：辅音
+        # 音素与前一个 pending 辅音完全相同时，代表促音（っ）的"重复
+        # 辅音"标注方式（如 っき → k,k,i），不是"孤立辅音"，不应该
+        # flush 成 "-"，详细说明见 build_ja_merged_lab() 对应位置的注释。
+        if pending is not None and ph == pending[2]:
+            result.append((pending[0], pending[1], "っ"))
+            pending = None
+        else:
+            flush_pending_as_dash()
         pending = (start, end, ph)
         i += 1
 
@@ -1696,7 +1704,28 @@ def build_ja_merged_lab(
 
         # ── Other consonant ────────────────────────────────────────────
         if pending is not None:
-            result.append(_emit(pending[0], pending[1], "-", None))
+            if ph == pending[2]:
+                # 辅音音素与前一个 pending 辅音完全相同 → 促音（っ/ッ）的
+                # "重复辅音"标注方式：与上面 "cl" 分支处理的是同一件事
+                # （促音），只是标注习惯不同——MFA japanese_mfa 用单一的
+                # "cl" 记号，而这里遇到的对齐后端（如 Qwen3-ForcedAligner）
+                # 把促音直接标成和下一个音节声母完全相同的辅音、连续出现
+                # 两次，例如 っき → (k, k, i)、っきゃ → (ky, ky, a)、
+                # っす → (s, s, u)。
+                #
+                # 这种"辅音后面紧跟着另一个辅音"，本质上不是"辅音后面
+                # 没跟上元音"（那种情况才应该输出 "-"，代表对齐异常/
+                # 无法识别的辅音串），而是促音的正常表示法，之前误落进了
+                # 下面通用的"其他辅音"分支，把第一个辅音当成孤立辅音直接
+                # flush 成 "-"，导致 kka/kki/kku/kke/kko/kkya/kkyu/kkyo
+                # 等促音音节全部变成 "-"（bug 见 phoneme_converter.py
+                # 变更记录）。现在识别为促音：第一个（pending）辅音单独
+                # 输出 っ/ッ，第二个辅音重新进入 pending、继续等待其后的
+                # 元音正常合并成音节。
+                cl_char = "ッ" if output == "katakana" else "っ"
+                result.append(_emit(pending[0], pending[1], cl_char, None))
+            else:
+                result.append(_emit(pending[0], pending[1], "-", None))
         pending = (start, end, ph)
         i += 1
 

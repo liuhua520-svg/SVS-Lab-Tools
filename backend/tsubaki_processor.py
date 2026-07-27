@@ -14,7 +14,7 @@ import traceback
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import soundfile as sf
@@ -88,6 +88,21 @@ class AudioProcessingConfig:
     # 新增：默认关闭 d4c 硬筛，避免把有效 F0 删空
     enable_ap_check: bool = False
 
+    # ── 填充短休止符（参考 UtaFormatix3 "Fill rests between notes with
+    # the previous note"）：当两个音符之间的静音段（sil/pau/sp 等，见
+    # TsubakiProcessor._is_true_silence）短于设定的最大时值时，不再让它
+    # 在工程文件里保持物理空白，而是把前一个音符的结束时间延长到吞掉
+    # 这段短休止符，避免大量细碎的短促断句。仅影响"填充"这一步本身，
+    # 发生在音高（F0/refine_pitch/MIDI 音高解析）处理之前——填充只改变
+    # segments 的时间边界，不改变音高判定逻辑。
+    fill_short_rests: bool = False
+
+    # 判定"短"的阈值，以音符时值表示："8"/"16"/"32"/"64"/"128" 分别对应
+    # 8分/16分/32分/64分/128分音符（不含，即严格小于该时值的休止符才会
+    # 被填充）。实际换算为绝对时间（blick，与 BPM 相关）时使用
+    # config.bpm；数值越大（如 128）阈值越短，能填充的休止符越少。
+    fill_short_rests_max_length: str = "16"
+
     def to_dict(self) -> Dict:
         return {
             "bpm": self.bpm,
@@ -104,6 +119,8 @@ class AudioProcessingConfig:
             "vsqx_pitch_smooth_window": self.vsqx_pitch_smooth_window,
             "use_double_precision": self.use_double_precision,
             "enable_ap_check": self.enable_ap_check,
+            "fill_short_rests": self.fill_short_rests,
+            "fill_short_rests_max_length": self.fill_short_rests_max_length,
         }
 
 # ---------------------------------------------------------------------------
@@ -300,6 +317,32 @@ class TsubakiProcessor:
         return bool(TsubakiProcessor._ASCII_WORD_RE.match(label))
 
     @staticmethod
+    def _is_dict_lookup_candidate(label: str) -> bool:
+        """
+        判断 label 是否值得尝试自定义词典查询（词典命中与否由
+        dictionary_manager.lookup_word 的返回值决定，这里只排除
+        明显不可能有词条、查了也是浪费的 label）。
+
+        与 _is_ascii_word_label 的区别：后者额外要求"纯 ASCII 字母"，
+        只适用于"英语单词 → G2P"这条兜底路径；但自定义词典的词条键
+        本就不限于英语单词，可以是任意语言的文字（例如日语假名 う/が/
+        ちゃ、中文汉字、拼音音节等）——只要词典里存在这个键，就应该
+        被查到并写入音素。之前误用 _is_ascii_word_label 作为词典查询
+        的入口条件，导致假名/汉字等非 ASCII 词典完全无法命中（词典
+        本身没问题，是入口条件拦住了查询本身）。
+
+        这里只排除真正不该查的情况：空标签、'-' 占位符、真静音标签
+        （sil/pau/sp 等，见 _is_true_silence 对应的 _TRUE_SILENCE 集合）。
+        其余任何非空 label（ASCII 单词、假名、汉字、音素符号……）都
+        允许尝试查询，命中与否完全交给词典数据本身决定。
+        """
+        if not label or label == "-":
+            return False
+        if label.strip().lower() in TsubakiProcessor._TRUE_SILENCE:
+            return False
+        return True
+
+    @staticmethod
     def _label_is_english_word(
         label: str,
         language: str,
@@ -347,6 +390,120 @@ class TsubakiProcessor:
             return float(info.frames) / float(info.samplerate)
         except Exception:
             return 0.0
+
+    # ── 音符时值 → blick（100ns）换算的分母表：键与前端"适用该处理的
+    # 最大长度（不含）"下拉框一致（8/16/32/64/128 分音符）。一个四分
+    # 音符在给定 BPM 下的时长（秒）= 60 / bpm；N 分音符 = 四分音符 / (N/4)。
+    _NOTE_LENGTH_DENOMINATORS = {"8": 2, "16": 4, "32": 8, "64": 16, "128": 32}
+
+    @classmethod
+    def _note_length_to_blicks(cls, note_length: str, bpm: float) -> int:
+        """将"N 分音符"换算为绝对时长，单位 blick（100ns，与 BPM 无关的
+        绝对时间轴，见文件顶部 _BLICKS_PER_SECOND 说明）。
+
+        换算关系：一个四分音符时长（秒）= 60 / bpm；
+                 N 分音符时长（秒） = (60 / bpm) / (N / 4)
+        例如 bpm=120 时，16 分音符 = 60/120/4 = 0.125 秒 = 1,250,000 blick。
+        """
+        try:
+            bpm_val = float(bpm) if bpm and float(bpm) > 0 else 120.0
+        except (TypeError, ValueError):
+            bpm_val = 120.0
+        denom = cls._NOTE_LENGTH_DENOMINATORS.get(str(note_length), 4)
+        quarter_note_sec = 60.0 / bpm_val
+        note_sec = quarter_note_sec / (denom / 4.0)
+        return int(round(note_sec * _BLICKS_PER_SECOND))
+
+    def _fill_short_rests(
+        self,
+        segments: List[LabelSegment],
+        config: "AudioProcessingConfig",
+    ) -> List[LabelSegment]:
+        """填充短休止符（参考 UtaFormatix3 "Fill rests between notes with
+        the previous note"）。
+
+        当相邻两个音符之间存在一段较短的静音标注（sil/pau/sp 等，见
+        _is_true_silence）时，把这段休止符"吞并"进前一个音符——即把前一个
+        音符的 end_time 延长到该休止符的 end_time，并丢弃这段休止符本身，
+        使时间轴上不再出现这段物理空白。
+
+        判定"短"的标准：休止符自身时长（end_time - start_time）严格小于
+        config.fill_short_rests_max_length 指定的音符时值换算出的绝对时长
+        （blick，取决于 config.bpm）。达到或超过该时值的休止符保持不变。
+
+        必须在此方法调用方（process_full_pipeline / build_multitrack_project）
+        对音高进行任何处理（F0 提取结果应用 / MIDI 音高解析 / refine_pitch）
+        之前执行——本方法只调整 segments 的时间边界，不涉及、也不依赖任何
+        音高信息，因此在音高处理之前或之后调用在数值上是等价的，但为了
+        保证下游音符时长展示、pitchDelta 采样窗口等都基于"填充后"的最终
+        时间轴，约定统一在音高处理之前执行。
+
+        无操作（原样返回）的情况：
+        - config.fill_short_rests 未开启；
+        - segments 为空；
+        - 休止符是整条时间轴上的第一个 segment（不存在"前一个音符"可供
+          延长，与 UtaFormatix3 行为一致——该实现只填充"前面有音符"的
+          短休止符，开头的静音留空）。
+
+        Parameters
+        ----------
+        segments : 按时间顺序排列的标注段列表（LAB 或 MIDI 转换而来）
+        config : 音频处理配置，读取 fill_short_rests / fill_short_rests_max_length / bpm
+
+        Returns
+        -------
+        List[LabelSegment] : 处理后的新列表（不修改传入的 segments 列表本身
+            以外的对象；被吞并的休止符不会出现在返回结果里）
+        """
+        if not getattr(config, "fill_short_rests", False) or not segments:
+            return segments
+
+        max_blicks = self._note_length_to_blicks(
+            getattr(config, "fill_short_rests_max_length", "16"), config.bpm
+        )
+        if max_blicks <= 0:
+            return segments
+
+        # 按开始时间排序，保证"前一个音符"的判定是时间顺序上真正的前驱，
+        # 而不是列表原始顺序（正常情况下两者一致，这里仅作保险）。
+        ordered = sorted(segments, key=lambda s: s.start_time)
+
+        result: List[LabelSegment] = []
+        filled_count = 0
+        for seg in ordered:
+            is_rest = self._is_true_silence(seg.label)
+            rest_duration = seg.end_time - seg.start_time
+
+            if (
+                is_rest
+                and result
+                and rest_duration < max_blicks
+            ):
+                # 吞并进前一个（时间顺序上真正相邻的）音符：延长其 end_time。
+                # 用一个新的 LabelSegment 替换，而不是原地修改 dataclass
+                # 字段，避免影响调用方可能持有的其它引用。
+                prev = result[-1]
+                result[-1] = LabelSegment(
+                    start_time=prev.start_time,
+                    end_time=seg.end_time,
+                    label=prev.label,
+                    devoiced_phoneme=getattr(prev, "devoiced_phoneme", None),
+                )
+                filled_count += 1
+                continue
+
+            result.append(seg)
+
+        if filled_count:
+            logger.info(
+                "[填充短休止符] 已填充 %d 个短休止符 (阈值=%s分音符 ≈ %.3fs @ bpm=%.1f)",
+                filled_count,
+                getattr(config, "fill_short_rests_max_length", "16"),
+                max_blicks / _BLICKS_PER_SECOND,
+                config.bpm,
+            )
+
+        return result
 
     def _load_lab_segments(self, lab_path: str) -> List[LabelSegment]:
         segments: List[LabelSegment] = []
@@ -1072,6 +1229,41 @@ class TsubakiProcessor:
             # 原本就有的 "-" 标签由于不属于 _is_true_silence，会顺利走到这里，被正确保留为 "-" 音符
             note = self._default_svp_note(seg.label, tone, onset, dur)
 
+            # ── 音素写入 phonemes 字段：日语去母音化自动音素 > 自定义词典 >
+            #    英语 G2P 兜底 > 默认（交给 SynthesizerV 自带发音引擎）──
+            #
+            # 【优先级说明】去母音化音素优先于自定义词典命中：去母音化是
+            # 对"这一次演唱"的客观声学事实——该音节的元音在原始 LAB 里
+            # 被显式标记为去母音化（大写 I/U），代表这个音节在这一次的
+            # 录音里确实被去母音化地唱出来了；而自定义词典是一条与具体
+            # 演唱无关的静态替换规则（"每次遇到某个假名都换成某个音素"），
+            # 并不知道、也不区分这次出现是否被去母音化。当两者冲突时，
+            # 应保留"这次确实被去母音化"这一更具体的声学事实，而不是让
+            # 一条通用的静态词典规则覆盖掉它——否则用户为某个假名配置的
+            # 词典音素，会在该假名恰好被去母音化的场合，把去母音化这个
+            # 事实抹掉，变成没有去母音化效果的普通发音。
+            # 词典仍然覆盖"该音节未被去母音化"的所有其余场合。
+            #
+            # 【解耦说明】选择了自定义词典（dict_source != "default"）时，只要
+            # 词典命中该词，就应写入音素——不要求用户额外打开
+            # "英语单词→音素映射"（word_phoneme_map）开关；该开关只控制"词典
+            # 未命中时，是否兜底走软件默认 G2P（word_to_arpabet）转换全部英语
+            # 单词"。因此这里的入口条件是"开关已开启 或 已选择自定义词典"，
+            # 而不是像旧版那样把整段逻辑（含词典查询）都锁在开关之后。
+            #
+            # 【重要】词典查询的入口条件用 _is_dict_lookup_candidate，而不是
+            # 只认纯 ASCII 单词的 _is_ascii_word_label：自定义词典的条目不
+            # 局限于真实英语单词（dictionary_manager.py 明确支持任意语言的
+            # 字词），也完全可以是假名（う/が/ちゃ）、汉字、拼音音节，或
+            # ARPABET/VOCALOID 音素符号本身（跨语种英语在 MFA 里回退到音素级
+            # 对齐时，seg.label 可能直接是 "ah"/"ch" 这样的音素符号而非完整
+            # 拼写单词）。此前误用 _is_ascii_word_label 作为入口条件，导致
+            # 假名/汉字等非 ASCII 词典完全无法命中——词典数据本身没问题，
+            # 是入口条件在查询之前就把这些 label 挡住了。
+            # 语言守卫（_label_is_english_word，用于防止拼音 rang/wang/dong
+            # 等被 g2p_en 误判为英语词）只应用于 G2P 兜底（word_to_arpabet），
+            # 不应用于词典查询。
+            #
             # ── 日语去母音化音素写入（ja_devoiced_phoneme）──────────────────
             # seg.devoiced_phoneme 由 process_full_pipeline() 在 phoneme_mode
             # 为 merge/hiragana/katakana 且 ja_devoiced_phoneme=True 时，通过
@@ -1083,40 +1275,16 @@ class TsubakiProcessor:
             # 保持辅音本身（す→'s'、つ→'ts'），但き/ひ/ぴ有专属去母音化
             # 记号（き→"k'"、ひ→"C"、ぴ→"p'"），ふ固定为 "p\\"。有浊音的
             # 音节（如 ご/go）以及单独元音 / ん・ン・N / っ・ッ / 静音段的
-            # devoiced_phoneme 恒为 None，此时 phonemes 字段保持默认（空），
-            # 交给 SynthesizerV 自带发音引擎处理。
-            # 与 VSQX 的 <p lock="1"> 不同：SVP 没有锁定字段，这里只写入
-            # 音素本身；与英语 word_phoneme_map / 自定义词典路径完全解耦，
-            # 各走各的，互不影响（下面的 elif 才是英语单词映射逻辑）。
+            # devoiced_phoneme 恒为 None，此时不写入，交给下面的词典/默认
+            # 逻辑处理。
             if getattr(seg, "devoiced_phoneme", None):
                 note["phonemes"] = seg.devoiced_phoneme
 
-            # ── 音素写入 phonemes 字段：词典命中 与 word_phoneme_map 开关解耦 ──
-            # 条件：label 是 ASCII 形态（非静音/非 CJK 占位符）。
-            #
-            # 【解耦说明】选择了自定义词典（dict_source != "default"）时，只要
-            # 词典命中该词，就应写入音素——不要求用户额外打开
-            # "英语单词→音素映射"（word_phoneme_map）开关；该开关只控制"词典
-            # 未命中时，是否兜底走软件默认 G2P（word_to_arpabet）转换全部英语
-            # 单词"。因此这里的入口条件是"开关已开启 或 已选择自定义词典"，
-            # 而不是像旧版那样把整段逻辑（含词典查询）都锁在开关之后。
-            #
-            # 【重要】词典查询本身不受 _label_is_english_word 语言守卫限制：
-            # 该守卫（native_english_words / is_in_english_dict）判断的是
-            # "这是否是一个真实的英语单词"，用于防止中文拼音 rang/wang/dong
-            # 等被 g2p_en 误当英语词转换成 ARPABET——但自定义词典的条目不
-            # 局限于真实英语单词（dictionary_manager.py 明确支持任意语言的
-            # 字词，甚至可以是 ARPABET/VOCALOID 音素符号本身，例如跨语种
-            # 英语在 MFA 里回退到音素级对齐时，seg.label 可能直接是
-            # "ah"/"ch" 这样的音素符号而非完整拼写单词）。若仍然对词典查询
-            # 套用这层语言守卫，会导致词典里明明存在的音素因为 label 不是
-            # "真实英语单词"而被判定为未命中，音素因此没有被写入。因此语言
-            # 守卫只应用于 G2P 兜底（word_to_arpabet），不应用于词典查询。
             _dict_selected = bool(dict_source) and dict_source != "default"
             if (
                 not getattr(seg, "devoiced_phoneme", None)
                 and (word_phoneme_map or _dict_selected)
-                and self._is_ascii_word_label(seg.label)
+                and self._is_dict_lookup_candidate(seg.label)
             ):
                 try:
                     resolved_phones: Optional[List[str]] = None
@@ -1143,11 +1311,13 @@ class TsubakiProcessor:
 
                     # G2P 兜底（word_to_arpabet）：仅在词典未命中、且用户开启了
                     # word_phoneme_map 开关时才走，并且必须通过语言守卫
-                    # （_label_is_english_word），防止拼音误判——这是唯一
-                    # 需要该守卫的地方。
+                    # （_label_is_english_word）与 ASCII 单词形态校验
+                    # （_is_ascii_word_label），防止拼音/假名误判——这两层
+                    # 校验只需要应用在 G2P 兜底这一条路径上。
                     if (
                         resolved_phones is None
                         and word_phoneme_map
+                        and self._is_ascii_word_label(seg.label)
                         and self._label_is_english_word(seg.label, language, native_english_words)
                     ):
                         from phoneme_converter import word_to_arpabet
@@ -2243,6 +2413,11 @@ class TsubakiProcessor:
                     f"（歌词字数: {len(lyric_words) if lyric_words else 0}）"
                 )
 
+            # ── ②.5 填充短休止符（须在音高处理之前执行；仅改变 segments
+            #    的时间边界，不涉及音高判定，见 _fill_short_rests 说明）──
+            if getattr(config, "fill_short_rests", False):
+                segments = self._fill_short_rests(segments, config)
+
             # ── ③ F0 数据 ─────────────────────────────────────────────────────
             f0, t, sr = None, None, None
             if audio_f0_data and audio_f0_data.get("success"):
@@ -2343,6 +2518,14 @@ class TsubakiProcessor:
         phoneme_mode: str = "none",
         ja_devoiced_phoneme: bool = False,   # 日语辅音起始音素锁定（仅 vsqx 生效，
                                            # 语义与 process_full_pipeline 一致）
+        f0_progress_cb: Optional[Callable[[int, int, str, Optional[int]], None]] = None,   # ← 每完成一个
+                                           # 音轨的 F0 提取调用一次 (done, total, track_title,
+                                           # box_index)。box_index 来自 track_inputs 里每个
+                                           # 音轨自带的 "box_index" 字段（对话文本框批量处理
+                                           # 传入，单曲目/单文件调用不传则为 None）——供调用方
+                                           # 精确定位是哪一个对话框的 F0 提取刚刚完成，从而把
+                                           # "已完成"状态实时下发给这一个框，而不是等整批全部
+                                           # 音轨都提取完才能笼统地知道"批处理进度往前走了"。
     ) -> Dict:
         """
         对话文本框批量处理功能的工程文件生成入口：不再为每个对话框生成
@@ -2396,9 +2579,12 @@ class TsubakiProcessor:
         vsqx_singer / vsqx_singer_id / vsqx_singer_bs : 合并后单音轨共用的 VSQX 声库
         phoneme_mode : 整批对话框默认的音素转换模式（"none" / "merge" / "hiragana" /
             "katakana"），应用于每个对话框的 LAB 段落（与单文件"仅生成工程"模式
-            语义一致）。仅在段落来自 LAB 且输出格式为 sv / vsqx 时生效；USTX 始终
-            使用原始音素/文字，不应用转换（与用户预期一致：USTX 侧重歌词音节而非
-            音素级精修）；来自 MIDI 的段落（歌词文本）同样不应用音素转换。某个
+            语义一致）。仅在段落来自 LAB 时生效，对 sv / vsqx / ustx 三种输出格式
+            均适用（与单文件 process_full_pipeline() 一致，不区分格式）；来自
+            MIDI 的段落（歌词文本）不应用音素转换。去母音化音素写入
+            （ja_devoiced_phoneme，写入 <p lock="1"> / SVP phonemes 字段）仍然
+            只在 sv / vsqx 下生效——USTX 音符没有对应的锁定音素字段，这一项
+            对 USTX 没有意义，但不影响 phoneme_mode 转换本身照常应用。某个
             对话框在 track_inputs 里提供了 "phoneme_mode" 字段时，仅该对话框使用
             覆盖值。
         音高解析说明（混合 MIDI / 非 MIDI 对话框场景）：
@@ -2427,7 +2613,8 @@ class TsubakiProcessor:
                 phoneme_mode = "none"
 
             resolved_tracks: List[Dict] = []
-            for tr in track_inputs:
+            _track_total = len(track_inputs)
+            for _tr_idx, tr in enumerate(track_inputs):
                 wav_path  = tr.get("wav_path")
                 lab_path  = tr.get("lab_path")
                 midi_path = tr.get("midi_path")
@@ -2489,18 +2676,23 @@ class TsubakiProcessor:
                     if midi_lyric_words:
                         segments = self._apply_midi_lyrics_to_segments(segments, midi_lyric_words)
 
-                    # 音素转换：仅对来自 LAB 的段落、且目标格式非 USTX 时生效
-                    # （USTX 始终使用原始音素/文字，不应用转换——见函数 docstring）。
+                    # 音素转换：对来自 LAB 的段落生效，与单文件模式
+                    # process_full_pipeline() 保持一致——USTX 同样应用
+                    # phoneme_mode（merge/hiragana/katakana），不再无条件
+                    # 排除 USTX（USTX 只是不支持"词典/英语单词→音素映射"
+                    # word_phoneme_map 这一项，见 ustxDictHint；音素转换
+                    # 本身对 USTX 完全适用，之前这里误把两者混为一谈）。
                     # 使用该音轨自己的 tr_phoneme_mode（"仅生成工程"模式下可
                     # 按对话框单独覆盖，未覆盖时即为整批统一的 phoneme_mode）。
-                    if tr_phoneme_mode != "none" and fmt != "ustx":
+                    if tr_phoneme_mode != "none":
                         try:
                             from phoneme_converter import apply_phoneme_mode
                             seg_tuples = [(s.start_time, s.end_time, s.label) for s in segments]
-                            # 去母音化音素写入对 sv（SVP phonemes 字段）和 vsqx
-                            # （<p lock="1">）都有意义；USTX 已在上面被整体排除
-                            # （fmt != "ustx"），故这里只需排除其余尚不支持该
-                            # 写入的格式（如 midi，没有音素字段）。
+                            # 去母音化音素写入（<p lock="1"> / SVP phonemes 字段）
+                            # 对 USTX 没有意义（USTX 音符没有对应的锁定音素字段），
+                            # 故仍然只在 sv/vsqx 这两个支持该写入的格式启用；
+                            # 但这只影响 _want_devoiced 这一项，不应该连累整个
+                            # phoneme_mode 转换本身在 USTX 下被跳过。
                             _want_devoiced = tr_ja_devoiced_phoneme and fmt in ("sv", "vsqx")
                             # devoiced_target 必须按 fmt 区分：sv/svp 用 SynthesizerV
                             # 罗马字体系（辅音原样保留），vsqx 用 VOCALOID4 官方
@@ -2539,6 +2731,12 @@ class TsubakiProcessor:
                     lyric_words = self._midi_lyrics_to_words(midi_lyrics)
                     segments = self._segments_from_midi_notes(midi_notes, lyric_words=lyric_words)
 
+                # 填充短休止符（须在音高处理/F0 提取之前执行，使用该音轨
+                # 自己的有效配置 tr_config，与单文件模式 process_full_pipeline
+                # 的调用时机一致，见 _fill_short_rests 说明）。
+                if getattr(tr_config, "fill_short_rests", False):
+                    segments = self._fill_short_rests(segments, tr_config)
+
                 # F0 提取（每条音轨独立提取，使用该音轨自己的有效配置
                 # tr_config：未开启"单独设置"时与全局 config 完全一致）。
                 f0_arr, t_arr = None, None
@@ -2554,6 +2752,12 @@ class TsubakiProcessor:
                         )
                 except Exception as _f0_err:
                     logger.warning("[多音轨] 音轨 %r F0 提取异常: %s，该音轨将不含音高曲线", tr_title, _f0_err)
+
+                if f0_progress_cb:
+                    try:
+                        f0_progress_cb(_tr_idx + 1, _track_total, tr_title, tr.get("box_index"))
+                    except Exception:
+                        pass
 
                 # word_phoneme_map 的原始文本预提取英语单词集合（防拼音误判）
                 # ——使用该音轨自己的 tr_language / tr_word_phoneme_map。
@@ -2830,28 +3034,39 @@ class TsubakiProcessor:
 
             label = seg.label
 
-            # ── 音素写入 <p> 字段：词典命中 与 word_phoneme_map 开关解耦 ─────
+            # ── 音素写入 <p> 字段：日语去母音化自动音素 > 自定义词典 >
+            #    英语 G2P 兜底 > 默认（<p></p>，交给 VOCALOID 自带 G2P）──
             # <p></p>                    → VOCALOID 自带 G2P（默认）
             # <p lock="1"><![CDATA[…]]></p>  → 手工音素 + 锁定（phoneme lock）
             #
-            # 【解耦说明】与 SVP 分支同理：只要选择了自定义词典
-            # （dict_source != "default"）且命中该词，就应写入 <p lock="1">，
-            # 不要求用户额外打开 word_phoneme_map 开关；该开关只控制"词典
-            # 未命中时，是否兜底走软件默认 G2P（word_to_arpabet →
-            # arpabet_to_vocaloid4）转换全部英语单词"。
+            # 【优先级说明】与 SVP 分支（_build_svp_track_payload）同理：
+            # 去母音化音素优先于自定义词典命中——去母音化是对"这一次演唱"
+            # 的客观声学事实（该音节的元音在原始 LAB 里被显式标记为去
+            # 母音化，代表这次录音里确实被去母音化地唱出来了），而自定义
+            # 词典是一条与具体演唱无关的静态替换规则，并不知道、也不区分
+            # 这次出现是否被去母音化。两者冲突时应保留"这次确实被去母音化"
+            # 这一更具体的声学事实，而不是让通用的静态词典规则覆盖掉它。
+            # 词典仍然覆盖"该音节未被去母音化"的所有其余场合。
             #
-            # 【重要】词典查询本身不受 _label_is_english_word 语言守卫限制，
-            # 理由与 SVP 分支相同：词典条目不局限于真实英语单词，也可以是
-            # ARPABET/VOCALOID 音素符号本身（跨语种英语在 MFA 里回退到音素级
-            # 对齐时，label 可能直接是 "ah"/"ch" 这样的音素符号）。语言守卫
-            # （native_english_words / is_in_english_dict，用于防止拼音
-            # rang/wang/dong 等误判为英语词）只应用于 G2P 兜底
-            # （word_to_arpabet），不应用于词典查询，否则词典里明明存在的
-            # 音素会因 label 未通过"真实英语单词"判定而被跳过、不被写入。
-            p_tag = '<p></p>'
-
-            # ── 日语去母音化音素写入（ja_devoiced_phoneme）：与英语
-            # word_phoneme_map / 自定义词典路径完全解耦，各走各的，互不影响。
+            # 【解耦说明】只要选择了自定义词典（dict_source != "default"）
+            # 且命中该词，就应写入 <p lock="1">，不要求用户额外打开
+            # word_phoneme_map 开关；该开关只控制"词典未命中时，是否兜底
+            # 走软件默认 G2P（word_to_arpabet → arpabet_to_vocaloid4）转换
+            # 全部英语单词"。
+            #
+            # 【重要】词典查询的入口条件用 _is_dict_lookup_candidate，而不是
+            # 只认纯 ASCII 单词的 _is_ascii_word_label：自定义词典的条目不
+            # 局限于真实英语单词，也完全可以是假名（う/が/ちゃ）、汉字、
+            # 拼音音节，或 ARPABET/VOCALOID 音素符号本身（跨语种英语在 MFA
+            # 里回退到音素级对齐时，label 可能直接是 "ah"/"ch" 这样的音素
+            # 符号而非完整拼写单词）。此前误用 _is_ascii_word_label 作为
+            # 入口条件，导致假名/汉字等非 ASCII 词典完全无法命中——词典
+            # 数据本身没问题，是入口条件在查询之前就把这些 label 挡住了。
+            # 语言守卫（_label_is_english_word，用于防止拼音 rang/wang/dong
+            # 等被 g2p_en 误判为英语词）只应用于 G2P 兜底（word_to_arpabet），
+            # 不应用于词典查询。
+            #
+            # ── 日语去母音化音素写入（ja_devoiced_phoneme）──────────────────
             # seg.devoiced_phoneme 由 process_full_pipeline() 在 phoneme_mode
             # 为 merge/hiragana/katakana 且 ja_devoiced_phoneme=True 时，通过
             # apply_phoneme_mode(..., with_devoiced_phoneme=True) 预先算出，
@@ -2864,15 +3079,35 @@ class TsubakiProcessor:
             # 母音化后是 "k'" 而非 'k'；ひ→hi 是 "C"；ぴ→pi 是 "p'"），
             # ふ固定使用 "p\\"（与是否去母音化无关）。有浊音的音节
             # （如 ご/go）以及单独元音 / ん・ン・N / っ・ッ / 静音段的
-            # devoiced_phoneme 恒为 None，此时保持 <p></p>，交给 VOCALOID
-            # 自带 G2P 处理。
+            # devoiced_phoneme 恒为 None，此时不写入，交给下面的词典/默认
+            # 逻辑处理。
             # VSQX 专属：写入后额外加 lock="1" 锁定，防止用户误触发自动重新
             # 发音；SVP 没有锁定概念，只写入音素本身（见 _build_svp_track_payload）。
-            if getattr(seg, "devoiced_phoneme", None):
+            #
+            # ── "-" / "ー" 延音占位符：显式锁定音素为 "-" ──────────────────
+            # "-"（辅音起始但未能与元音合并——见 phoneme_converter.py
+            # build_ja_merged_lab()/build_ja_hiragana_lab() 里"辅音后面
+            # 又是另一个不同辅音/结尾孤立辅音"的兜底输出）和 "ー"（片假名
+            # 长音符，见 phoneme_converter.katakana_to_romaji_moras() 对
+            # 长音的处理）都不是真实音节，语义上都是"延续上一个音符的
+            # 发音"——这恰好也是 VOCALOID4 官方对歌词 "-" 的定义（延音
+            # 记号）。留空 <p></p> 交给 VOCALOID 自带 G2P 处理这两个符号
+            # 会得到不可预期的结果（自带词典不认识 "-"/"ー"，可能整段
+            # 都被当成同一个默认元音演唱），必须显式写入并锁定音素 "-"，
+            # 让引擎按它自己的延音记号规则处理。USTX 分支已经有对应处理
+            # （见 _build_ustx... 附近 "ー"/"-" → "+" 的转换），这里是
+            # VSQX 分支缺失的同一处修复。
+            p_tag = '<p></p>'
+            if label in ("-", "ー"):
+                p_tag = '<p lock="1"><![CDATA[-]]></p>'
+            elif getattr(seg, "devoiced_phoneme", None):
                 p_tag = f'<p lock="1"><![CDATA[{seg.devoiced_phoneme}]]></p>'
-            elif (
-                (word_phoneme_map or _dict_selected)
-                and self._is_ascii_word_label(label)
+
+            if (
+                not getattr(seg, "devoiced_phoneme", None)
+                and label not in ("-", "ー")
+                and (word_phoneme_map or _dict_selected)
+                and self._is_dict_lookup_candidate(label)
             ):
                 try:
                     v4_phones: Optional[str] = None
@@ -2906,12 +3141,14 @@ class TsubakiProcessor:
 
                     # G2P 兜底（word_to_arpabet → arpabet_to_vocaloid4）：仅在
                     # 词典未命中、且用户开启了 word_phoneme_map 开关时才走，
-                    # 并且必须通过语言守卫（_label_is_english_word），防止
-                    # 拼音误判——这是唯一需要该守卫的地方。
+                    # 并且必须通过 ASCII 单词形态校验（_is_ascii_word_label）
+                    # 与语言守卫（_label_is_english_word），防止拼音/假名
+                    # 误判——这两层校验只需要应用在 G2P 兜底这一条路径上。
                     if (
                         v4_phones is None
                         and word_phoneme_map
                         and _word_to_arpabet is not None
+                        and self._is_ascii_word_label(label)
                         and self._label_is_english_word(label, language, native_english_words)
                     ):
                         arpabet_phones = _word_to_arpabet(label)
@@ -3099,7 +3336,7 @@ class TsubakiProcessor:
 
         # ── ③ 计算 vsPart 总长度 ─────────────────────────────────────────────
         if note_entries:
-            play_time = max(t_on + dur for t_on, dur, *_ in note_entries) + RESOLUTION
+            play_time = max(t_on + dur for t_on, dur, *_ in note_entries)
         else:
             play_time = RESOLUTION * 4   # 至少一小节
 

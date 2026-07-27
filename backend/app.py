@@ -22,7 +22,7 @@ from urllib.parse import quote
 from threading import Thread
 from time import sleep
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from flask import Flask, request, jsonify, send_from_directory, abort, Response
 from flask_cors import CORS
@@ -38,6 +38,7 @@ import tts_processor
 import text_processor
 import subtitle_processor
 import subtitle_import
+import commandline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -191,6 +192,11 @@ def _parse_box_override(form, index: int) -> Optional[Dict]:
     except (TypeError, ValueError):
         f0_ceil = 800.0
 
+    fill_short_rests = form.get(f"override_fill_short_rests_{index}", "false").lower() == "true"
+    fill_short_rests_max_length = form.get(f"override_fill_short_rests_max_length_{index}", "16")
+    if fill_short_rests_max_length not in ("8", "16", "32", "64", "128"):
+        fill_short_rests_max_length = "16"
+
     return {
         "aligner_backend": aligner_backend,
         "language": language,
@@ -211,7 +217,26 @@ def _parse_box_override(form, index: int) -> Optional[Dict]:
         "vsqx_pitch_smooth_window": vsqx_pitch_smooth_window,
         "f0_floor": f0_floor,
         "f0_ceil": f0_ceil,
+        "fill_short_rests": fill_short_rests,
+        "fill_short_rests_max_length": fill_short_rests_max_length,
     }
+
+
+def _parse_fill_short_rests(form) -> Tuple[bool, str]:
+    """解析"填充短休止符"开关及其"最大长度"阈值，供各条 form-data 路由
+    （/api/pipeline/full、/api/pipeline/project-only、/api/tts/process、
+    /api/subtitle-import/align、/api/dialogue/process 的整批默认值）复用，
+    避免五处重复同样的解析/校验代码。
+
+    form 可以是 request.form（Flask MultiDict）或普通 dict（如 TTS 的
+    JSON payload，调用方需先转换成同样支持 .get 的对象）。
+    """
+    fill_short_rests = str(form.get("fill_short_rests", "false")).lower() == "true"
+    fill_short_rests_max_length = str(form.get("fill_short_rests_max_length", "16"))
+    if fill_short_rests_max_length not in ("8", "16", "32", "64", "128"):
+        fill_short_rests_max_length = "16"
+    return fill_short_rests, fill_short_rests_max_length
+
 
 mfa_is_running = False
 
@@ -245,6 +270,36 @@ def set_job(job_id: str, **kwargs):
             **JOBS.get(job_id, {}),
             **kwargs,
         }
+
+
+def append_job_box_update(job_id: str, box_result: dict):
+    """
+    往 job["box_updates"] 追加一条对话框状态更新，而不是像 set_job() 那样
+    整体替换某个字段。
+
+    背景：对话文本框批量处理里，每个对话框各自完成对齐/F0 提取的时间点
+    可能非常接近（后端处理循环里几乎没有间隔），而前端轮询间隔是固定的
+    （目前 1.5 秒一次）。如果像之前那样只用 set_job(..., last_box=xxx)
+    把"最新一个对话框的结果"整体覆盖写入 job 对象，那么两次轮询之间如果
+    有多个对话框先后完成，前面几个的完成事件会被后面的直接覆盖掉、永远
+    不会被前端看到——用户就会看到"只有最后一个框被标记已完成，之前几个
+    明明也处理完了却一直停在处理中"。
+
+    这里改成维护一个只增不减的列表，每条更新都追加进去、任何时候都不会
+    被后面的更新覆盖掉；前端每次轮询时把 job_updates_cursor 之后的新增
+    条目全部取出来依次应用，就不会漏掉任何一个对话框的完成事件，也不用
+    依赖轮询频率与后端处理速度的相对快慢。
+    """
+    with JOB_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            job = {}
+            JOBS[job_id] = job
+        updates = job.get("box_updates")
+        if updates is None:
+            updates = []
+            job["box_updates"] = updates
+        updates.append(box_result)
 
 
 def get_job(job_id: str):
@@ -360,9 +415,24 @@ def _tts_preview_take(preview_id: str, expected: dict) -> Optional[dict]:
     with _TTS_PREVIEW_LOCK:
         entry = _TTS_PREVIEW_CACHE.get(preview_id)
     if not entry:
+        logger.info(f"[预览复用] preview_id={preview_id} 在缓存中不存在（可能已被 LRU 淘汰，或进程重启后缓存已清空）")
         return None
     for key, value in expected.items():
         if entry.get(key) != value:
+            # 诊断日志：把导致复用失败的具体字段和新旧值打出来，方便定位
+            # 是文本被前端悄悄改动了、还是某个联动 watcher 在用户不知情
+            # 的情况下重置了音色/参数（例如切了一下语种又切回来，但
+            # ttsConfig.voice 已经被清空重选）。仅在真正命中 mismatch 时
+            # 才打印，不影响正常复用路径的日志量。文本字段较长，只打印
+            # 长度 + 前后片段，避免刷屏。
+            old_v, new_v = entry.get(key), value
+            if key == "text" and isinstance(old_v, str) and isinstance(new_v, str):
+                logger.info(
+                    f"[预览复用] 字段 'text' 不一致（长度 {len(old_v)} → {len(new_v)}），"
+                    f"预览时='{old_v[:40]}...{old_v[-20:]}' 本次='{new_v[:40]}...{new_v[-20:]}'"
+                )
+            else:
+                logger.info(f"[预览复用] 字段 '{key}' 不一致：预览时={old_v!r} 本次={new_v!r}")
             with _TTS_PREVIEW_LOCK:
                 _TTS_PREVIEW_CACHE.pop(preview_id, None)
             _tts_preview_cleanup_dir(entry)
@@ -1153,6 +1223,8 @@ def run_pipeline_job(
     qwen3_batch_size: int = 8,
     aligner_device: str = "auto",
     align_pitch_shift_semitones: float = 0.0,
+    fill_short_rests: bool = False,
+    fill_short_rests_max_length: str = "16",
 ):
     try: # <--- Added the missing try block here
         class FileStorageWrapper:
@@ -1206,8 +1278,11 @@ def run_pipeline_job(
             word_phoneme_map=word_phoneme_map,
             dict_source=dict_source,
             align_pitch_shift_semitones=align_pitch_shift_semitones,
+            fill_short_rests=fill_short_rests,
+            fill_short_rests_max_length=fill_short_rests_max_length,
             cancel_check=lambda: is_job_cancel_requested(job_id),
             on_process_start=lambda proc: set_job_process_handle(job_id, proc),
+            stage_cb=lambda stage, status: set_job(job_id, stage=stage, stage_status=status),
         )
 
         if result.get("success"):
@@ -1285,6 +1360,8 @@ def pipeline_full_process():
 
         f0_floor = float(request.form.get("f0_floor", 71.0))
         f0_ceil = float(request.form.get("f0_ceil", 800.0))
+
+        fill_short_rests, fill_short_rests_max_length = _parse_fill_short_rests(request.form)
 
         # 【修复】前端发送的是 auto_note_pitch，而非 refine_pitch
         refine_pitch = (
@@ -1390,6 +1467,8 @@ def pipeline_full_process():
             job_id,
             status="queued",
             created_at=datetime.now().isoformat(),
+            stage="align",
+            stage_status="start",
         )
 
         Thread(
@@ -1433,6 +1512,8 @@ def pipeline_full_process():
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 qwen3_batch_size=qwen3_batch_size,
                 aligner_device=aligner_device,
+                fill_short_rests=fill_short_rests,
+                fill_short_rests_max_length=fill_short_rests_max_length,
             ),
         ).start()
 
@@ -1467,6 +1548,8 @@ def run_mfa_only_job(job_id: str, wav_path: str, text: str, language: str,
             job_id,
             status="running",
             started_at=datetime.now().isoformat(),
+            stage="align",
+            stage_status="start",
         )
 
         # 伪造 FileStorage 包装器，兼容 pipeline 的写入逻辑
@@ -1503,6 +1586,8 @@ def run_mfa_only_job(job_id: str, wav_path: str, text: str, language: str,
             set_job(
                 job_id,
                 status="done",
+                stage="align",
+                stage_status="done",
                 finished_at=datetime.now().isoformat(),
                 result=result,
             )
@@ -1670,12 +1755,16 @@ def run_project_only_job(
     dict_source: str = "default",
     vsqx_pitch_smooth_window: int = 5,
     ja_devoiced_phoneme: bool = False,
+    fill_short_rests: bool = False,
+    fill_short_rests_max_length: str = "16",
 ):
     try:
         set_job(
             job_id,
             status="running",
             started_at=datetime.now().isoformat(),
+            stage="f0",
+            stage_status="start",
         )
 
         result = pipeline.process_project_only(
@@ -1704,6 +1793,9 @@ def run_project_only_job(
             word_phoneme_map=word_phoneme_map,
             dict_source=dict_source,
             ja_devoiced_phoneme=ja_devoiced_phoneme,
+            fill_short_rests=fill_short_rests,
+            fill_short_rests_max_length=fill_short_rests_max_length,
+            stage_cb=lambda stage, status: set_job(job_id, stage=stage, stage_status=status),
         )
 
         if result.get("success"):
@@ -1760,6 +1852,7 @@ def pipeline_project_only():
         use_double_precision = request.form.get("precision", "single").lower() == "double"
         f0_floor = float(request.form.get("f0_floor", 71.0))
         f0_ceil = float(request.form.get("f0_ceil", 800.0))
+        fill_short_rests, fill_short_rests_max_length = _parse_fill_short_rests(request.form)
         f0_device = request.form.get("f0_device", "auto")
         crepe_model = request.form.get("crepe_model", "full")
         refine_pitch = request.form.get("auto_note_pitch", "false").lower() == "true"
@@ -1891,6 +1984,8 @@ def pipeline_project_only():
                 dict_source,
                 vsqx_pitch_smooth_window,
                 ja_devoiced_phoneme,
+                fill_short_rests,
+                fill_short_rests_max_length,
             ),
         ).start()
 
@@ -1981,6 +2076,9 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
             status="running",
             started_at=datetime.now().isoformat(),
             progress={"done": 0, "total": len(boxes)},
+            stage="tts" if input_mode == "tts" else "align",
+            stage_status="start",
+            box_index=None,
         )
 
         pre_failed: list = []
@@ -2006,6 +2104,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                     job_id, status="running",
                     progress={"done": 0, "total": len(boxes)},
                     tts_progress={"done": done_tts - 1, "total": total_tts},
+                    stage="tts", stage_status="start", box_index=box.get("index"),
                 )
                 stem = f"dlg_tts_{box.get('index', 0):03d}_{uuid.uuid4().hex[:6]}"
 
@@ -2020,6 +2119,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                     # tts_preview_id_i 一起提交）。这里同样只复制副本去对齐/
                     # 使用，不触碰缓存原件，原件的生命周期交给 _tts_preview_take
                     # 的过期校验或 LRU 淘汰处理。
+                    set_job(job_id, stage="align", stage_status="start", box_index=box.get("index"))
                     preview_segments_dir = tts_info["preview_segments_dir"]
                     job_segments_dir = str(WORK_DIR / f"{stem}_segs")
                     shutil.copytree(preview_segments_dir, job_segments_dir)
@@ -2032,6 +2132,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                     )
                     shutil.rmtree(job_segments_dir, ignore_errors=True)
+                    set_job(job_id, stage="align", stage_status="done", box_index=box.get("index"))
 
                     if align_result.get("success"):
                         final_wav_path = str(WORK_DIR / f"{stem}.wav")
@@ -2051,7 +2152,12 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         tts_result = align_result
                 else:
                     # 没有先手动预览（或预览已过期）：先合成分句音频，再
-                    # 整体交给 Qwen3-FA 对齐，一次做完。
+                    # 整体交给 Qwen3-FA 对齐，一次做完。stage_cb 在内部从
+                    # "合成"切到"对齐"时回调一次，让该框的 job.stage 与
+                    # 实际阶段保持同步（而不是整段过程都显示"TTS 合成中"）。
+                    def _box_stage_cb(stage: str, _idx=box.get("index")) -> None:
+                        set_job(job_id, stage=stage, stage_status="start", box_index=_idx)
+
                     tts_result = tts_processor.synthesize_and_align(
                         text=tts_info.get("text", ""), language=box_language,
                         voice=tts_info.get("voice", ""),
@@ -2064,7 +2170,9 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         english_word_align=box_english_word_align,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                         qwen3_tts_options=tts_info.get("qwen3_tts_options"),
+                        stage_cb=_box_stage_cb,
                     )
+                    set_job(job_id, stage="align", stage_status="done", box_index=box.get("index"))
 
                 if tts_result.get("success"):
                     box["audio_path"] = tts_result["wav_path"]
@@ -2084,28 +2192,51 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
 
             # TTS 合成/对齐失败的框直接标记为 failed，不再进入
             # process_dialogue_batch（它没有音频可用，会被当成"未提供音频"
-            # 静默跳过，丢失具体失败原因，这里提前拦下来显式报错）。
+            # 静默跳过，丢失具体失败原因，这里提前拦下来显式报错）。同时
+            # 通过 append_job_box_update 实时通知前端，不用等整批全部处理
+            # 完才在最终结果里看到这个框失败了。
             for box in tts_boxes:
                 if not box.get("audio_path"):
-                    pre_failed.append({
+                    failed_entry = {
                         "index": box.get("index"),
                         "status": "failed",
                         "error": box.get("_tts_error", "TTS 合成/对齐失败"),
-                    })
+                    }
+                    pre_failed.append(failed_entry)
+                    append_job_box_update(job_id, failed_entry)
             boxes = [b for b in boxes if not (b.get("tts") and not b.get("audio_path"))]
 
         def _progress_cb(done, total, box_result):
-            set_job(
-                job_id,
-                status="running",
-                progress={"done": done, "total": total},
-                last_box=box_result,
-            )
+            # process_dialogue_batch 里 F0 提取阶段复用了同一个 progress_cb，
+            # 调用形态有两种，用 box_result 的内容区分：
+            #   1) {"stage": "f0", "track_title": ...} —— 整批共享的
+            #      "正在提取第几个音轨"进度，没有 index 字段。
+            #   2) 某个对话框自己的最终结果字典（含 index，status 已经是
+            #      "done"/"failed"/"skipped_*"）—— 无论是对齐/LAB/MIDI
+            #      导入阶段就已经确定终态的框，还是音高提取真正做完后才
+            #      补发一次"done"的框，都在这里统一走 append_job_box_update，
+            #      追加进只增不减的 box_updates 列表，不会被后续更新覆盖掉。
+            if isinstance(box_result, dict) and box_result.get("stage") == "f0":
+                set_job(
+                    job_id,
+                    status="running",
+                    stage="f0",
+                    f0_progress={"done": done, "total": total, "track_title": box_result.get("track_title", "")},
+                )
+            else:
+                set_job(job_id, status="running", progress={"done": done, "total": total})
+                append_job_box_update(job_id, box_result)
+
+        def _stage_cb(stage, status, box_index):
+            set_job(job_id, status="running", stage=stage, stage_status=status, box_index=box_index)
+
+        set_job(job_id, status="running", stage="align", stage_status="start", box_index=None, box_updates=[])
 
         result = pipeline.process_dialogue_batch(
             boxes, progress_cb=_progress_cb,
             cancel_check=lambda: is_job_cancel_requested(job_id),
             on_process_start=lambda proc: set_job_process_handle(job_id, proc),
+            stage_cb=_stage_cb,
             **kwargs,
         )
 
@@ -2117,6 +2248,8 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
             set_job(
                 job_id,
                 status="done",
+                stage="done",
+                stage_status="done",
                 finished_at=datetime.now().isoformat(),
                 result=result,
             )
@@ -2228,8 +2361,8 @@ def dialogue_process():
         box_count = int(request.form.get("box_count", 0))
         if box_count <= 0:
             return jsonify({"error": "box_count 必须大于 0"}), 400
-        if box_count > 64:
-            return jsonify({"error": "对话框数量过多（上限 64）"}), 400
+        if box_count > 1000:
+            return jsonify({"error": "对话框数量过多（上限 1000）"}), 400
 
         input_mode = request.form.get("input_mode", "audio")
         if input_mode not in ("audio", "tts"):
@@ -2270,6 +2403,7 @@ def dialogue_process():
         use_double_precision = request.form.get("precision", "single").lower() == "double"
         f0_floor = float(request.form.get("f0_floor", 71.0))
         f0_ceil = float(request.form.get("f0_ceil", 800.0))
+        fill_short_rests, fill_short_rests_max_length = _parse_fill_short_rests(request.form)
         refine_pitch = request.form.get("auto_note_pitch", "false").lower() == "true"
         export_pitch_line = request.form.get("export_pitch_line", "true").lower() == "true"
         vsqx_pitch_smooth_window = int(request.form.get("vsqx_pitch_smooth_window", 5))
@@ -2562,6 +2696,8 @@ def dialogue_process():
                 vsqx_singer_bs=vsqx_singer_bs,
                 word_phoneme_map=word_phoneme_map,
                 dict_source=dict_source,
+                fill_short_rests=fill_short_rests,
+                fill_short_rests_max_length=fill_short_rests_max_length,
             ),
         ).start()
 
@@ -2682,11 +2818,16 @@ def tts_preview():
     """
     试听预览：只合成一小段音频（不切句、不对齐），直接返回音频字节流，
     前端用 <audio> 播放即可，不落盘到工作目录。
-    body: {text, engine?, voice, rate?, pitch?, volume?, qwen3_tts_options?}
+    body: {text, engine?, voice, rate?, pitch?, volume?, qwen3_tts_options?, language?}
 
     qwen3_tts_options：仅 engine="qwen3_tts" 时使用，见
     tts_processor._qwen3_tts_synth_to_file() 顶部说明，前端"语音预设管理"
     弹窗按当前选中的 Voice Design / Voice Clone / Custom Voice 模式组装。
+
+    language：可选，调用方有明确语种上下文时（如对话框批量处理里某一框
+    自己的\"有效语言\"）传入，用于 engine="qwen3_tts" 时的繁体转简体预处理
+    （仅普通话生效）；没有语种概念的场景（如语音预设试听）不传即可，行为
+    与之前完全一致。
     """
     try:
         payload = request.get_json(force=True, silent=True) or {}
@@ -2699,6 +2840,7 @@ def tts_preview():
             volume=payload.get("volume", "+0%"),
             pitch=payload.get("pitch", "+0Hz"),
             qwen3_tts_options=payload.get("qwen3_tts_options") or None,
+            language=payload.get("language") or None,
         )
         mimetype = "audio/wav" if engine in ("windows_sapi", "qwen3_tts") else "audio/mpeg"
         return Response(audio_bytes, mimetype=mimetype)
@@ -2893,6 +3035,8 @@ def run_tts_pipeline_job(
     word_phoneme_map: bool,
     dict_source: str,
     align_pitch_shift_semitones: float = 0.0,
+    fill_short_rests: bool = False,
+    fill_short_rests_max_length: str = "16",
     preview_segments_dir: Optional[str] = None,
     preview_sentences: Optional[list] = None,
     preview_wav_path: Optional[str] = None,
@@ -2900,7 +3044,7 @@ def run_tts_pipeline_job(
 ):
     try:
         set_job(job_id, status="running", started_at=datetime.now().isoformat(),
-                progress={"done": 0, "total": 0})
+                progress={"done": 0, "total": 0}, stage="tts", stage_status="start")
 
         def _progress_cb(done, total):
             set_job(job_id, status="running", progress={"done": done, "total": total})
@@ -2918,6 +3062,9 @@ def run_tts_pipeline_job(
             # 先复制一份到本次任务专属的临时路径，对齐/最终产物都只操作
             # 这份副本，不触碰缓存原件——原件的生命周期完全交给
             # _tts_preview_take 的 LRU 淘汰或被新预览覆盖时处理。
+            # 这条路径没有"合成"阶段（分句音频已就绪），直接进入对齐阶段。
+            set_job(job_id, status="running", stage="align", stage_status="start",
+                    progress={"done": 0, "total": len(preview_sentences)})
             job_segments_dir = str(WORK_DIR / f"{stem}_segs")
             shutil.copytree(preview_segments_dir, job_segments_dir)
             align_result = tts_processor.align_segments(
@@ -2928,6 +3075,7 @@ def run_tts_pipeline_job(
                 progress_cb=_progress_cb,
             )
             shutil.rmtree(job_segments_dir, ignore_errors=True)
+            set_job(job_id, stage="align", stage_status="done")
 
             if not align_result.get("success"):
                 set_job(
@@ -2952,7 +3100,14 @@ def run_tts_pipeline_job(
             }
         else:
             # 没有先手动预览（或预览已过期）：先合成分句音频，再整体交给
-            # Qwen3-FA 对齐，一次做完。
+            # Qwen3-FA 对齐，一次做完。synthesize_and_align 内部会在切换
+            # 到对齐阶段前调用 _stage_switch_cb("align")，这里据此更新
+            # job.stage，让轮询方能区分当前 progress 是"合成中"还是
+            # "对齐中"（两阶段都用同一个 _progress_cb 报 done/total）。
+            def _stage_switch_cb(stage: str) -> None:
+                set_job(job_id, status="running", stage=stage, stage_status="start",
+                        progress={"done": 0, "total": 0})
+
             tts_result = tts_processor.synthesize_and_align(
                 text=text, language=language, voice=voice, engine=engine,
                 work_dir=str(WORK_DIR), stem=stem,
@@ -2961,7 +3116,9 @@ def run_tts_pipeline_job(
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 progress_cb=_progress_cb,
                 qwen3_tts_options=qwen3_tts_options,
+                stage_cb=_stage_switch_cb,
             )
+            set_job(job_id, stage="align", stage_status="done")
 
         if not tts_result.get("success"):
             set_job(
@@ -2992,6 +3149,9 @@ def run_tts_pipeline_job(
             vsqx_singer_bs=vsqx_singer_bs,
             word_phoneme_map=word_phoneme_map,
             language=language, original_text=text, dict_source=dict_source,
+            fill_short_rests=fill_short_rests,
+            fill_short_rests_max_length=fill_short_rests_max_length,
+            stage_cb=lambda stage, status: set_job(job_id, stage=stage, stage_status=status),
         )
 
         merged_result = {
@@ -3102,6 +3262,7 @@ def tts_process():
         use_double_precision = payload.get("precision", "single").lower() == "double"
         f0_floor = float(payload.get("f0_floor", 71.0))
         f0_ceil = float(payload.get("f0_ceil", 800.0))
+        fill_short_rests, fill_short_rests_max_length = _parse_fill_short_rests(payload)
         refine_pitch = payload.get("auto_note_pitch", "false").lower() == "true"
         export_pitch_line = payload.get("export_pitch_line", "true").lower() == "true"
         vsqx_pitch_smooth_window = int(payload.get("vsqx_pitch_smooth_window", 5))
@@ -3171,6 +3332,8 @@ def tts_process():
                 vsqx_singer_bs=vsqx_singer_bs,
                 word_phoneme_map=word_phoneme_map, dict_source=dict_source,
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
+                fill_short_rests=fill_short_rests,
+                fill_short_rests_max_length=fill_short_rests_max_length,
                 preview_segments_dir=(preview_entry or {}).get("segments_dir"),
                 preview_sentences=(preview_entry or {}).get("sentences"),
                 preview_wav_path=(preview_entry or {}).get("wav_path"),
@@ -3381,27 +3544,91 @@ def download_work_file(filename: str):
 
 @app.route("/api/work-dir/clear", methods=["POST"])
 def clear_work_dir():
-    """清空工作目录"""
+    """清空工作目录缓存
+
+    覆盖范围：
+    - WORK_DIR 顶层的临时音频/标注/工程文件（wav/lab/mid/txt/TextGrid/vsqx，
+      以及 projects/ 下和其他子目录中的 ustx/svp）
+    - 已知的缓存子目录：_tts_ref_audio/（TTS 参考音频）、_tts_preview/（TTS
+      预览缓存）、subtitles/（字幕识别工作目录）
+    - 残留的临时会话目录：*_segs/（分段切片，正常流程结束后会自动删除，
+      这里兜底清理异常中断遗留的）、_subtitle_import_*/（字幕导入拆分会话）
+    - {stem}_orig.*（原始文件备份）
+
+    安全性：若当前有任务处于运行中（JOBS 中存在 status not in
+    done/failed/cancelled 的记录），拒绝执行，避免删除正在被使用的文件。
+    """
     try:
         import shutil
-        
-        # 只删除特定类型的文件
-        patterns = ["*.wav", "*.lab", "*.mid", "**/*.ustx", "**/*.svp", "*.vsqx", "*.txt", "*.TextGrid"]
-        
-        deleted_count = 0
-        for pattern in patterns:
+
+        with JOB_LOCK:
+            running_jobs = [
+                jid for jid, job in JOBS.items()
+                if job.get("status") not in ("done", "failed", "cancelled", None)
+            ]
+        if running_jobs:
+            return jsonify({
+                "success": False,
+                "error": "存在正在运行的任务，请等待任务完成或取消后再清空缓存",
+            }), 409
+
+        deleted_files = 0
+        deleted_dirs = 0
+
+        # 顶层散落文件（含 projects/ 等子目录中的工程文件，用 ** 递归匹配）
+        file_patterns = [
+            "*.wav", "*.lab", "*.mid", "*.vsqx", "*.txt", "*.TextGrid",
+            "*_orig.*",
+            "**/*.ustx", "**/*.svp",
+        ]
+        for pattern in file_patterns:
             for file_path in WORK_DIR.glob(pattern):
                 if file_path.is_file():
-                    file_path.unlink()
-                    deleted_count += 1
-        
-        logger.info(f"清空工作目录: 删除 {deleted_count} 个文件")
-        
+                    try:
+                        file_path.unlink()
+                        deleted_files += 1
+                    except OSError as e:
+                        logger.warning("删除文件失败 %s: %s", file_path, e)
+
+        # 已知的固定缓存子目录：整目录删除后不重建，下次使用时按需自动创建
+        known_cache_dirs = ["_tts_ref_audio", "_tts_preview", "subtitles"]
+        for name in known_cache_dirs:
+            dir_path = WORK_DIR / name
+            if dir_path.is_dir():
+                try:
+                    shutil.rmtree(dir_path, ignore_errors=True)
+                    deleted_dirs += 1
+                except OSError as e:
+                    logger.warning("删除目录失败 %s: %s", dir_path, e)
+
+        # 残留的临时会话目录（正常流程会自行清理，这里兜底处理异常中断遗留的）
+        dir_glob_patterns = ["*_segs", "_subtitle_import_*"]
+        for pattern in dir_glob_patterns:
+            for dir_path in WORK_DIR.glob(pattern):
+                if dir_path.is_dir():
+                    try:
+                        shutil.rmtree(dir_path, ignore_errors=True)
+                        deleted_dirs += 1
+                    except OSError as e:
+                        logger.warning("删除目录失败 %s: %s", dir_path, e)
+
+        # 若 projects/ 子目录清空后已无文件，一并移除空目录本身
+        projects_dir = WORK_DIR / "projects"
+        if projects_dir.is_dir() and not any(projects_dir.iterdir()):
+            try:
+                projects_dir.rmdir()
+            except OSError:
+                pass
+
+        logger.info(
+            "清空工作目录: 删除 %d 个文件, %d 个目录", deleted_files, deleted_dirs
+        )
+
         return jsonify({
             "success": True,
-            "message": f"已删除 {deleted_count} 个文件"
+            "message": f"已删除 {deleted_files} 个文件、{deleted_dirs} 个缓存目录",
         }), 200
-        
+
     except Exception as e:
         logger.error("清空工作目录失败: %s", e, exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -3721,9 +3948,16 @@ def subtitle_split_entry():
     磁盘或 job 状态（同 /api/subtitle/export 的"前端持有数据"模式）。
 
     body（JSON）：
-      - start : 该条字幕当前开始时间（秒，必填）
-      - end   : 该条字幕当前结束时间（秒，必填，需大于 start）
-      - text  : 该条字幕当前文本（必填，允许为空字符串）
+      - start       : 该条字幕当前开始时间（秒，必填）
+      - end         : 该条字幕当前结束时间（秒，必填，需大于 start）
+      - text        : 该条字幕当前文本（必填，允许为空字符串）
+      - split_ratio : 可选，0~1 之间的拆分位置比例（例如波形轴拆分按钮
+                      按播放头位置换算得到）；不传则使用后端默认的按
+                      文本长度比例估算。仅在文本中找不到合适的标点作为
+                      拆分点时才会真正生效（见 split_entry_manually
+                      文档字符串），仍然只影响“文本切分点”，不直接
+                      决定返回的时间边界——精确的播放头时间由前端在
+                      拿到返回结果后自行覆盖 left.end / right.start。
     """
     try:
         data = request.get_json(force=True, silent=True) or {}
@@ -3739,7 +3973,15 @@ def subtitle_split_entry():
         if not isinstance(text, str):
             return jsonify({"success": False, "error": "text 必须是字符串"}), 400
 
-        left, right = subtitle_processor.split_entry_manually(text, start, end)
+        split_ratio_raw = data.get("split_ratio", None)
+        kwargs = {}
+        if split_ratio_raw is not None:
+            try:
+                kwargs["split_ratio"] = max(0.0, min(1.0, float(split_ratio_raw)))
+            except (TypeError, ValueError):
+                pass
+
+        left, right = subtitle_processor.split_entry_manually(text, start, end, **kwargs)
         return jsonify({"success": True, "left": left, "right": right}), 200
 
     except Exception as e:
@@ -4225,7 +4467,7 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
     """
     try:
         set_job(job_id, status="running", started_at=datetime.now().isoformat(),
-                progress={"done": 0, "total": len(cues)})
+                progress={"done": 0, "total": len(cues)}, stage="align", stage_status="start")
 
         def _progress_cb(done, total):
             set_job(job_id, status="running", progress={"done": done, "total": total})
@@ -4239,6 +4481,7 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
             progress_cb=_progress_cb,
             skip_split_every_n=skip_split_every_n,
         )
+        set_job(job_id, stage="align", stage_status="done")
 
         if not align_result.get("success"):
             set_job(job_id, status="failed", finished_at=datetime.now().isoformat(),
@@ -4274,6 +4517,7 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
         project_result = pipeline.process_project_only(
             wav_path=wav_path, lab_path=lab_path, midi_path=None,
             language=language, original_text=original_text,
+            stage_cb=lambda stage, status: set_job(job_id, stage=stage, stage_status=status),
             **project_kwargs,
         )
 
@@ -4411,6 +4655,9 @@ def subtitle_import_align():
                 word_phoneme_map=request.form.get("word_phoneme_map", "false").lower() == "true",
                 dict_source=_normalize_dict_source(request.form.get("dict_source", "default")),
             )
+            fill_short_rests, fill_short_rests_max_length = _parse_fill_short_rests(request.form)
+            project_kwargs["fill_short_rests"] = fill_short_rests
+            project_kwargs["fill_short_rests_max_length"] = fill_short_rests_max_length
             if output_format == "vsqx":
                 vsqx_singer, vsqx_singer_id, vsqx_singer_bs = _select_vsqx_singer(language, "full")
                 project_kwargs["vsqx_singer"] = request.form.get("vsqx_singer", vsqx_singer)
@@ -4460,6 +4707,139 @@ def subtitle_import_align():
         return jsonify({"error": str(e)}), 500
 
 
+# ═════════════════════════════════════════════════════════════════════
+# 命令行等效接口（服务端直接执行，不经过子进程/命令行字符串）
+# ═════════════════════════════════════════════════════════════════════
+#
+# 背景：commandline.py 的 CmdUI 本来是给"真正的命令行调用"用的
+# （`python app.py cmd ...` / 打包后被 launcher.py 转发的 `exe cmd ...`，
+# 详见 commandline.py 顶部说明和 __main__ 里的分流逻辑）。这里额外开一个
+# HTTP 路由复用同一份 CmdUI，让前端也能以"参数是 JSON、结果是 JSON"的
+# 方式触发一次同样的操作，跑在当前 mfa_env 里，和网页版 /api/pipeline/*
+# 系列路由背后是同一个 pipeline 实例，行为、默认值完全一致。
+#
+# 与 /api/pipeline/* 系列路由的区别：那一组是"文件上传 + 异步任务轮询"，
+# 适合网页交互场景；这里是"服务端已有文件路径 + 同步执行 + 直接返回结果"，
+# 更贴近命令行脚本化调用的语义，两者并存、互不替代。
+
+_CMD_ARG_TYPE_HINTS: Dict[str, str] = {
+    # 参数名 -> "flag" 表示 argparse 里是 store_true 布尔开关（JSON 里传
+    # true/false，转 argv 时只在 true 时追加 --flag，不追加值）；
+    # 参数名 -> "positional" 表示 argparse 里是位置参数（没有 --前缀，
+    # 例如 dict-import/dict-export 的 name，dict-edit 的 name + action），
+    # 转 argv 时不加 "--key"，只追加裸值，且统一放在参数列表最后（位置
+    # 参数相对可选参数的位置在 argparse 里本就不敏感，放最后最简单，不会
+    # 被误当成某个 --key 的取值）——多个位置参数之间的相对顺序按它们在
+    # JSON args 对象里出现的先后决定（Python dict / JSON 对象保留插入
+    # 顺序），例如 dict-edit 需要 "name" 排在 "action" 前面，调用方在
+    # args 里按 {"name": ..., "action": ..., ...} 的顺序书写即可。
+    # 未在此列出的参数一律按"取值型"处理（--key value）。
+    "english_word_align": "flag",
+    "no_smooth": "flag",
+    "double_precision": "flag",
+    "auto_note_pitch": "flag",
+    "export_pitch_line": "flag",
+    "no_pitch_line": "flag",
+    "word_phoneme_map": "flag",
+    "ja_devoiced_phoneme": "flag",
+    "fill_short_rests": "flag",
+    "full": "flag",
+    "no_overwrite": "flag",
+    "split_at_sentence_end": "flag",
+    "allow_comma_split": "flag",
+    "remove_punctuation": "flag",
+    "close_vad_gaps": "flag",
+    "name": "positional",
+    "action": "positional",
+}
+
+
+def _cmd_json_to_argv(operation: str, params: Dict) -> list:
+    """
+    把 /api/cmd/exec 收到的 {"operation": "mfa-only", "args": {...}} 里的
+    args 字典，转成 CmdUI.run_args() 期望的 argv 列表。只做"键名下划线转
+    横线、值转字符串、布尔开关/位置参数按 _CMD_ARG_TYPE_HINTS 处理"这类
+    通用转换，非法/未知参数交给 argparse 自己在 run_args() 内部报错。
+
+    settings-set 是唯一的例外：命令行版的 --set 是可重复参数（每个
+    "--set key=value" 对应要改的一项设置），不是"每个参数名对应一个
+    --参数名 value"这种一对一映射，硬套通用转换规则会产出
+    "--hf-hub-offline True" 这种 argparse 根本不认识的选项。因此这里
+    单独处理：约定 HTTP 请求体用 {"operation": "settings-set",
+    "args": {"updates": {"hf_hub_offline": true, "download_mirror": false}}}
+    这种嵌套形式，内层 updates 字典的每个键值对展开成一个 "--set key=value"。
+    """
+    if operation == "settings-set":
+        updates = (params or {}).get("updates") or {}
+        argv = [operation]
+        for key, value in updates.items():
+            argv.append("--set")
+            argv.append(f"{key}={value}")
+        return argv
+
+    argv = [operation]
+    positionals = []
+    for key, value in (params or {}).items():
+        if value is None:
+            continue
+        kind = _CMD_ARG_TYPE_HINTS.get(key)
+        if kind == "flag":
+            if bool(value):
+                argv.append("--" + str(key).replace("_", "-"))
+            continue
+        if kind == "positional":
+            positionals.append(str(value))
+            continue
+        argv.append("--" + str(key).replace("_", "-"))
+        argv.append(str(value))
+    argv.extend(positionals)
+    return argv
+
+
+@app.route("/api/cmd/exec", methods=["POST"])
+def cmd_exec():
+    """
+    命令行等效操作的同步执行入口。
+
+    请求体 JSON:
+        {
+          "operation": "mfa-only" | "lab" | "f0-only" | "pitch" |
+                       "project-only" | "project" | "full" |
+                       "subtitle" | "sub" | "asr-subtitle" | "asr" |
+                       "subtitle-recognize" | "dialogue-batch" | "dialogue" |
+                       "dict-import" | "dict-load" | "dict-list" |
+                       "dict-export" | "dict-edit" |
+                       "settings-get" | "settings-set",
+          "args": { ... 与 commandline.py 对应子命令的 --参数 一一对应，
+                     键名用下划线，值直接传 JSON 原生类型 }
+        }
+
+    音频/LAB/字幕/MIDI 等文件必须是服务端本地已存在的路径，本接口不接收
+    文件上传。返回: commandline.py 各 _cmd_*() 方法产出的同一份结果 dict。
+    """
+    payload = request.get_json(silent=True) or {}
+    operation = str(payload.get("operation", "")).strip()
+    if not operation:
+        return jsonify({"success": False, "error": "缺少 operation 字段"}), 400
+
+    argv = _cmd_json_to_argv(operation, payload.get("args") or {})
+    cmd_ui = commandline.CmdUI(pipeline, select_vsqx_singer=_select_vsqx_singer)
+
+    try:
+        result = cmd_ui.run_args(argv)
+    except SystemExit:
+        return jsonify({
+            "success": False,
+            "error": f"参数错误（operation={operation}），请检查 args 是否完整/合法",
+        }), 400
+    except Exception as e:
+        logger.error("命令行等效操作异常 (operation=%s): %s", operation, e, exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+    status = 200 if result.get("success") else 422
+    return jsonify(result), status
+
+
 def open_browser(host: str, port: int):
     sleep(2)
     webbrowser.open(f"http://{host}:{port}")
@@ -4496,4 +4876,11 @@ def main(host: str = "127.0.0.1", port: int = 5000):
 
 
 if __name__ == "__main__":
-    main()
+    # 命令行一次性调用模式：`python app.py cmd <operation> ...`（或打包后被
+    # launcher.py 转发过来的 `启动器.exe cmd ...`）。判断规则（argv[1] 精确
+    # 等于 "cmd"）必须和 launcher.py 里的判断逻辑保持一致。
+    if commandline.is_cmd_mode():
+        cmd_ui = commandline.CmdUI(pipeline, select_vsqx_singer=_select_vsqx_singer)
+        sys.exit(cmd_ui.run(sys.argv))
+    else:
+        main()
