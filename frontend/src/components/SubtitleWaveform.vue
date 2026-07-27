@@ -9,6 +9,19 @@
         <span class="zoom-icon">＋</span>
       </el-button>
       <el-button size="small" @click="fitToWidth">{{ t('subtitle.waveformFit') }}</el-button>
+      <span v-if="selectedUids.size >= 2" class="multi-select-badge">
+        {{ t('subtitle.waveformMultiSelectCount', { count: selectedUids.size }) }}
+      </span>
+      <el-tooltip :content="t('subtitle.waveformSplitHint')" placement="top">
+        <el-button size="small" :disabled="activeIndex < 0 && !selectedUids.size" @click="splitActive">
+          ✂️ {{ t('subtitle.waveformSplit') }}
+        </el-button>
+      </el-tooltip>
+      <el-tooltip :content="t('subtitle.waveformDeleteHint')" placement="top">
+        <el-button size="small" type="danger" plain :disabled="activeIndex < 0 && !selectedUids.size" @click="deleteActive">
+          🗑️ {{ t('subtitle.waveformDelete') }}
+        </el-button>
+      </el-tooltip>
       <span class="waveform-hint">{{ t('subtitle.waveformHint') }}</span>
     </div>
 
@@ -44,15 +57,29 @@
           v-for="(en, idx) in entries"
           :key="en._uid"
           class="subtitle-region"
-          :class="{ active: idx === activeIndex }"
+          :class="{ active: idx === activeIndex, editing: editingUid === en._uid, 'multi-selected': isSelected(en._uid) }"
           :style="regionStyle(en)"
           @mousedown.stop="onRegionMouseDown($event, idx)"
+          @dblclick.stop="onRegionDblClick(en)"
         >
           <div
             class="region-handle region-handle-left"
             @mousedown.stop="onHandleMouseDown($event, idx, 'start')"
           />
-          <span class="region-text" :title="en.text">{{ en.text || t('subtitle.waveformEmptyText') }}</span>
+          <input
+            v-if="editingUid === en._uid"
+            ref="editInputRef"
+            v-model="editingText"
+            class="region-edit-input"
+            :class="{ wrap: shouldWrapEdit(en) }"
+            @mousedown.stop
+            @dblclick.stop
+            @keydown.stop
+            @keydown.enter.prevent="commitEdit"
+            @keydown.esc.prevent="cancelEdit"
+            @blur="commitEdit"
+          />
+          <span v-else class="region-text" :title="en.text">{{ en.text || t('subtitle.waveformEmptyText') }}</span>
           <div
             class="region-handle region-handle-right"
             @mousedown.stop="onHandleMouseDown($event, idx, 'end')"
@@ -106,6 +133,15 @@ const emit = defineEmits<{
   (e: 'seek', time: number): void
   (e: 'update-entry', payload: { uid: number; start?: number; end?: number }): void
   (e: 'add-entry', time: number): void
+  (e: 'select', uid: number | null): void
+  (e: 'select-multi', uids: number[]): void
+  (e: 'edit-text', payload: { uid: number; text: string }): void
+  (e: 'delete-entry', uid: number): void
+  (e: 'delete-entries', uids: number[]): void
+  (e: 'split-entry', payload: { uid: number; at: number }): void
+  (e: 'split-entries', payloads: Array<{ uid: number; at: number }>): void
+  (e: 'drag-start'): void
+  (e: 'drag-end'): void
 }>()
 
 // ─────────────────────────────────────────────────────────────────
@@ -326,6 +362,23 @@ const activeIndex = computed(() => {
   return props.entries.findIndex((e) => e._uid === props.activeUid)
 })
 
+// ─────────────────────────────────────────────────────────────────
+// 多选：Ctrl/Cmd+click 逐个加选或取消，Shift+click 从"锚点"（最近一次
+// 单击选中的块）到当前点击块之间做连续范围选择。activeUid（单选，由
+// 父组件持有，驱动拖拽/字幕列表高亮等既有逻辑）始终指向"锚点"本身；
+// selectedUids 是叠加的多选集合，两者独立维护——多选不影响单选相关的
+// 拖拽手柄等行为，只影响批量删除/拆分与视觉高亮。
+// 普通单击（不按修饰键）会清空多选集合，回到原有的单选行为。
+// ─────────────────────────────────────────────────────────────────
+const selectedUids = ref<Set<number>>(new Set())
+let selectionAnchorIndex = -1 // Shift 范围选择的起点，普通/Ctrl 点击时更新
+
+const isSelected = (uid: number) => selectedUids.value.has(uid)
+
+const emitSelectMulti = () => {
+  emit('select-multi', Array.from(selectedUids.value))
+}
+
 const regionStyle = (en: WaveformEntry) => ({
   left: `${en.start * pxPerSec.value}px`,
   width: `${Math.max(2, (en.end - en.start) * pxPerSec.value)}px`,
@@ -349,9 +402,53 @@ const xToTime = (clientX: number): number => {
   return Math.max(0, x / pxPerSec.value)
 }
 
+// 区分"单击选中"与"拖拽移动"：mousedown 时先只记录起点，真正开始拖拽
+// （鼠标移动超过阈值）后才在 onDragMove 里第一次触发 update-entry；
+// mouseup 时如果全程没有超过阈值，就当作一次单击，emit select。
+const CLICK_DRAG_THRESHOLD = 3
+let dragMoved = false
+
 const onRegionMouseDown = (evt: MouseEvent, index: number) => {
+  if (editingUid.value !== null) return // 正在内联编辑文字时，不响应块的选中/拖拽
   const en = props.entries[index]
+
+  // Ctrl/Cmd+click：不进入拖拽，直接切换该块的多选状态
+  if (evt.ctrlKey || evt.metaKey) {
+    const next = new Set(selectedUids.value)
+    if (next.has(en._uid)) {
+      next.delete(en._uid)
+    } else {
+      next.add(en._uid)
+      selectionAnchorIndex = index
+    }
+    selectedUids.value = next
+    emitSelectMulti()
+    // 多选场景下仍需要一个"主选中"用于列表高亮等既有逻辑：取多选集合
+    // 中最后加入的一个（即当前点击的块）；集合为空则清空单选。
+    emit('select', next.size ? en._uid : null)
+    return
+  }
+
+  // Shift+click：从锚点到当前索引做连续范围选择，替换整个多选集合
+  if (evt.shiftKey && selectionAnchorIndex >= 0) {
+    const [lo, hi] = selectionAnchorIndex <= index ? [selectionAnchorIndex, index] : [index, selectionAnchorIndex]
+    const next = new Set<number>()
+    for (let i = lo; i <= hi; i++) next.add(props.entries[i]._uid)
+    selectedUids.value = next
+    emitSelectMulti()
+    emit('select', en._uid)
+    return
+  }
+
+  // 普通点击：清空多选集合，回退到原有的"单击=选中，拖拽=移动"逻辑
+  if (selectedUids.value.size) {
+    selectedUids.value = new Set()
+    emitSelectMulti()
+  }
+  selectionAnchorIndex = index
+  dragMoved = false
   drag = { mode: 'move', index, startX: evt.clientX, origStart: en.start, origEnd: en.end }
+  emit('drag-start')
   window.addEventListener('mousemove', onDragMove)
   window.addEventListener('mouseup', onDragEnd)
 }
@@ -359,12 +456,14 @@ const onRegionMouseDown = (evt: MouseEvent, index: number) => {
 const onHandleMouseDown = (evt: MouseEvent, index: number, which: 'start' | 'end') => {
   const en = props.entries[index]
   drag = { mode: which, index, startX: evt.clientX, origStart: en.start, origEnd: en.end }
+  emit('drag-start')
   window.addEventListener('mousemove', onDragMove)
   window.addEventListener('mouseup', onDragEnd)
 }
 
 const onDragMove = (evt: MouseEvent) => {
   if (!drag) return
+  if (Math.abs(evt.clientX - drag.startX) > CLICK_DRAG_THRESHOLD) dragMoved = true
   const deltaSec = (evt.clientX - drag.startX) / pxPerSec.value
   const en = props.entries[drag.index]
   if (!en) return
@@ -372,6 +471,7 @@ const onDragMove = (evt: MouseEvent) => {
   const next = props.entries[drag.index + 1]
 
   if (drag.mode === 'move') {
+    if (!dragMoved) return // 未超过阈值前不移动，避免单击也被当成一次极小的拖拽
     const dur = drag.origEnd - drag.origStart
     let newStart = drag.origStart + deltaSec
     const lowerBound = prev ? prev.end : 0
@@ -394,17 +494,30 @@ const onDragMove = (evt: MouseEvent) => {
 }
 
 const onDragEnd = () => {
+  if (drag && drag.mode === 'move' && !dragMoved) {
+    const en = props.entries[drag.index]
+    if (en) emit('select', en._uid)
+  }
+  const wasDragging = drag !== null
   drag = null
   window.removeEventListener('mousemove', onDragMove)
   window.removeEventListener('mouseup', onDragEnd)
+  if (wasDragging) emit('drag-end')
 }
 
-// 点击空白轨道区域（非字幕块）→ 跳转播放头到该时间点
+// 点击空白轨道区域（非字幕块）→ 跳转播放头到该时间点，并取消选中
 const onTrackMouseDown = (evt: MouseEvent) => {
   const target = evt.target as HTMLElement
   if (target.closest('.subtitle-region')) return
+  if (editingUid.value !== null) commitEdit()
+  if (selectedUids.value.size) {
+    selectedUids.value = new Set()
+    emitSelectMulti()
+  }
+  selectionAnchorIndex = -1
   const time = xToTime(evt.clientX)
   emit('seek', time)
+  emit('select', null)
 }
 
 // 双击空白轨道区域 → 在该时间点新增一条字幕（交给父组件决定默认时长/文本）
@@ -413,6 +526,118 @@ const onTrackDblClick = (evt: MouseEvent) => {
   if (target.closest('.subtitle-region')) return
   const time = xToTime(evt.clientX)
   emit('add-entry', time)
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 双击字幕块 → 内联编辑文字：编辑框直接出现在块内（不弹独立对话框），
+// 块本身如果文字较长会临时变宽/换行显示，方便看清全文，参见
+// shouldWrapEdit() 与样式区 .region-edit-input.wrap。
+// ─────────────────────────────────────────────────────────────────
+const editingUid = ref<number | null>(null)
+const editingText = ref('')
+const editInputRef = ref<HTMLInputElement[] | HTMLInputElement | null>(null)
+
+const onRegionDblClick = (en: WaveformEntry) => {
+  if (selectedUids.value.size) {
+    selectedUids.value = new Set()
+    emitSelectMulti()
+  }
+  emit('select', en._uid)
+  editingUid.value = en._uid
+  editingText.value = en.text
+  nextTick(() => {
+    const el = Array.isArray(editInputRef.value) ? editInputRef.value[0] : editInputRef.value
+    el?.focus()
+    el?.select()
+  })
+}
+
+// 文字明显超过块宽度时，编辑框允许换行显示（块高度也会跟着撑开），
+// 短文字则维持单行、块只是略微变宽，避免每次编辑都跳成一大块。
+const shouldWrapEdit = (en: WaveformEntry): boolean => {
+  const widthPx = Math.max(2, (en.end - en.start) * pxPerSec.value)
+  return editingText.value.length * 7 > widthPx
+}
+
+const commitEdit = () => {
+  if (editingUid.value === null) return
+  emit('edit-text', { uid: editingUid.value, text: editingText.value })
+  editingUid.value = null
+}
+
+const cancelEdit = () => {
+  editingUid.value = null
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 删除选中字幕：Delete/Backspace 键、或工具栏"删除"按钮，二者共用同一
+// 个 emit，均无需二次确认（父组件已有撤销能力兜底误删）。正在内联编辑
+// 文字时不响应，避免和"删除输入框里的字符"冲突。存在多选集合时批量
+// 删除全部选中项，并清空多选状态；否则退回原有的单选删除逻辑。
+// ─────────────────────────────────────────────────────────────────
+const deleteActive = () => {
+  if (selectedUids.value.size) {
+    emit('delete-entries', Array.from(selectedUids.value))
+    selectedUids.value = new Set()
+    emitSelectMulti()
+    return
+  }
+  if (activeIndex.value < 0) return
+  const en = props.entries[activeIndex.value]
+  emit('delete-entry', en._uid)
+}
+
+const onKeyDown = (evt: KeyboardEvent) => {
+  if (editingUid.value !== null) return
+  if (activeIndex.value < 0 && !selectedUids.value.size) return
+  const activeEl = document.activeElement as HTMLElement | null
+  if (activeEl && ['INPUT', 'TEXTAREA'].includes(activeEl.tagName)) return
+
+  if (evt.key === 'Delete' || evt.key === 'Backspace') {
+    evt.preventDefault()
+    deleteActive()
+    return
+  }
+
+  // X 键：按播放头/块中点拆分当前选中字幕，与工具栏"拆分"按钮共用
+  // splitActive() 逻辑。避开修饰键组合（Ctrl/Alt/Meta+X 等系统/浏览器
+  // 快捷键），只响应裸按 X。
+  if ((evt.key === 'x' || evt.key === 'X') && !evt.ctrlKey && !evt.altKey && !evt.metaKey) {
+    evt.preventDefault()
+    splitActive()
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onKeyDown)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeyDown)
+})
+
+// ─────────────────────────────────────────────────────────────────
+// 拆分选中字幕：拆分点优先用播放头当前位置（若播放头落在选中块范围
+// 内），否则退回块中点，交给父组件的 splitEntry() 做实际的文本/
+// 时间切分。存在多选集合时，对每个选中块各自独立计算拆分点并批量
+// emit；否则退回原有的单选拆分逻辑。
+// ─────────────────────────────────────────────────────────────────
+const splitPointFor = (en: WaveformEntry): number => {
+  const inRange = props.currentTime > en.start && props.currentTime < en.end
+  return inRange ? props.currentTime : (en.start + en.end) / 2
+}
+
+const splitActive = () => {
+  if (selectedUids.value.size) {
+    const payloads = props.entries
+      .filter((en) => selectedUids.value.has(en._uid))
+      .map((en) => ({ uid: en._uid, at: splitPointFor(en) }))
+    if (!payloads.length) return
+    emit('split-entries', payloads)
+    return
+  }
+  if (activeIndex.value < 0) return
+  const en = props.entries[activeIndex.value]
+  emit('split-entry', { uid: en._uid, at: splitPointFor(en) })
 }
 
 // 播放头跟随时自动滚动到可视范围内
@@ -438,6 +663,23 @@ watch(() => props.activeUid, async () => {
     el.scrollLeft = Math.max(0, x - 60)
   }
 })
+
+// entries 列表变化（拆分/删除/外部增删等）后，多选集合里指向已不存在
+// 条目的 uid 需要清掉，避免残留导致后续批量操作误删/误拆已经不在的项
+watch(() => props.entries, (list) => {
+  if (!selectedUids.value.size) return
+  const liveUids = new Set(list.map((e) => e._uid))
+  let changed = false
+  const next = new Set<number>()
+  selectedUids.value.forEach((uid) => {
+    if (liveUids.has(uid)) next.add(uid)
+    else changed = true
+  })
+  if (changed) {
+    selectedUids.value = next
+    emitSelectMulti()
+  }
+}, { deep: false })
 
 defineExpose({ fitToWidth })
 </script>
@@ -475,6 +717,15 @@ defineExpose({ fitToWidth })
   margin-left: auto;
   font-size: 12px;
   color: #b0b3bf;
+}
+
+.multi-select-badge {
+  font-size: 12px;
+  color: #7c3aed;
+  background: rgba(124, 58, 237, 0.1);
+  border: 1px solid rgba(124, 58, 237, 0.3);
+  border-radius: 10px;
+  padding: 1px 8px;
 }
 
 .waveform-scroll {
@@ -542,8 +793,28 @@ defineExpose({ fitToWidth })
   z-index: 2;
 }
 
+/* 多选高亮：与单选的橙色区分开，用蓝紫色双层描边（box-shadow 叠加
+   border）表示"批量选中"，即便同时也是 active（锚点）也能看出叠加态 */
+.subtitle-region.multi-selected {
+  border-color: #7c3aed;
+  box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.45);
+  z-index: 2;
+}
+
 .subtitle-region:active {
   cursor: grabbing;
+}
+
+/* 双击进入内联编辑：块本身临时"浮"起来（不改变实际 start/end，只是视觉
+   上允许超出原宽度显示编辑框），避免短字幕块编辑时文字被挤成省略号看
+   不清楚。min-width 保证即使原块很窄，编辑框也有基本可用宽度。 */
+.subtitle-region.editing {
+  overflow: visible;
+  z-index: 5;
+  min-width: 90px;
+  background: rgba(255, 145, 77, 0.35);
+  border-color: #ff914d;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
 }
 
 .region-text {
@@ -556,6 +827,33 @@ defineExpose({ fitToWidth })
   overflow: hidden;
   text-overflow: ellipsis;
   pointer-events: none;
+}
+
+/* 编辑框默认单行、随文字内容自适应块的视觉宽度（由 .editing 的
+   overflow: visible 保证不被裁切）；文字较长时 shouldWrapEdit() 会加上
+   .wrap，改为允许换行显示，块高度也跟着一起变高（height: auto）。 */
+.region-edit-input {
+  flex: 1;
+  min-width: 78px;
+  height: 100%;
+  padding: 0 6px;
+  font-size: 12px;
+  color: #2c2f4a;
+  background: #fff;
+  border: 1px solid #ff914d;
+  border-radius: 3px;
+  outline: none;
+  box-sizing: border-box;
+  cursor: text;
+}
+
+.region-edit-input.wrap {
+  position: relative;
+  height: auto;
+  min-height: 100%;
+  white-space: normal;
+  word-break: break-all;
+  padding: 4px 6px;
 }
 
 .region-handle {

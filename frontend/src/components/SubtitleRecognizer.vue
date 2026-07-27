@@ -220,11 +220,26 @@
           @seek="onWaveformSeek"
           @update-entry="onWaveformUpdateEntry"
           @add-entry="onWaveformAddEntry"
+          @select="onWaveformSelect"
+          @select-multi="onWaveformSelectMulti"
+          @edit-text="onWaveformEditText"
+          @delete-entry="onWaveformDeleteEntry"
+          @delete-entries="onWaveformDeleteEntries"
+          @split-entry="onWaveformSplitEntry"
+          @split-entries="onWaveformSplitEntries"
+          @drag-start="history.beginGesture()"
+          @drag-end="history.commitGesture()"
         />
 
         <div class="section-heading subtitle-list-heading">
           <span>📝 {{ t('subtitle.subtitleListTitle') }}</span>
           <div class="list-actions">
+            <el-tooltip :content="t('subtitle.undoHint')" placement="top">
+              <el-button size="small" :disabled="!canUndo" @click="onUndo">↩️ {{ t('subtitle.undo') }}</el-button>
+            </el-tooltip>
+            <el-tooltip :content="t('subtitle.redoHint')" placement="top">
+              <el-button size="small" :disabled="!canRedo" @click="onRedo">↪️ {{ t('subtitle.redo') }}</el-button>
+            </el-tooltip>
             <el-button size="small" type="danger" plain :disabled="!entries.length" @click="clearAll">
               🗑️ {{ t('subtitle.clearAll') }}
             </el-button>
@@ -233,7 +248,15 @@
 
         <p v-if="!entries.length" class="empty-hint">{{ t('subtitle.subtitleListEmpty') }}</p>
 
-        <el-table v-else :data="entries" size="small" max-height="420" class="subtitle-table" row-key="_uid">
+        <el-table
+          v-else
+          :data="entries"
+          size="small"
+          max-height="420"
+          class="subtitle-table"
+          row-key="_uid"
+          :row-class-name="rowClassName"
+        >
           <el-table-column :label="t('subtitle.columnIndex')" width="50">
             <template #default="{ $index }">{{ $index + 1 }}</template>
           </el-table-column>
@@ -262,6 +285,8 @@
                 size="small"
                 type="textarea"
                 :autosize="{ minRows: 1, maxRows: 3 }"
+                @focus="history.beginGesture()"
+                @blur="history.commitGesture()"
               />
             </template>
           </el-table-column>
@@ -315,11 +340,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { useAppLocale } from '../i18n'
 import SubtitleWaveform from './SubtitleWaveform.vue'
+import { useSubtitleHistory } from './useSubtitleHistory'
 
 const { t } = useAppLocale()
 
@@ -425,6 +451,7 @@ const handleFileSelect = async (file: any) => {
 
     // 新媒体上传成功后，清空旧的识别结果，避免时间轴与新媒体错位
     entries.value = []
+    history.resetHistory()
     mediaInfo.value = {
       media_id: data.media_id,
       filename: data.filename,
@@ -455,6 +482,7 @@ const resetMedia = async () => {
   }
   mediaInfo.value = null
   entries.value = []
+  history.resetHistory()
   recognizeError.value = ''
 }
 
@@ -520,6 +548,7 @@ const startRecognize = async () => {
 
   recognizeError.value = ''
   entries.value = []
+  history.resetHistory()
   recognizing.value = true
   recognizeProgress.done = 0
   recognizeProgress.total = 0
@@ -663,6 +692,7 @@ const onTimeEdit = (row: SubtitleEntry, field: 'start' | 'end') => {
       row._startText = formatTimeInput(row.start)
       return
     }
+    history.recordBeforeChange()
     row.start = parsed
   } else {
     if (parsed <= row.start) {
@@ -670,6 +700,7 @@ const onTimeEdit = (row: SubtitleEntry, field: 'start' | 'end') => {
       row._endText = formatTimeInput(row.end)
       return
     }
+    history.recordBeforeChange()
     row.end = parsed
   }
 }
@@ -679,15 +710,14 @@ const insertAfter = (index: number) => {
   const next = entries.value[index + 1]
   const start = cur.end
   const end = next ? Math.min(next.start, cur.end + 2) : cur.end + 2
+  history.recordBeforeChange()
   entries.value.splice(index + 1, 0, toEditableEntry({ start, end: Math.max(end, start + 0.3), text: '' }))
 }
 
-const deleteEntry = async (index: number) => {
-  try {
-    await ElMessageBox.confirm(t('subtitle.deleteConfirm'), '', { type: 'warning' })
-  } catch {
-    return
-  }
+// 字幕列表行内"删除"按钮：无需二次确认，直接删除（与波形块的删除行为
+// 保持一致）；批量清空所有字幕仍然需要二次确认，见 clearAll()
+const deleteEntry = (index: number) => {
+  history.recordBeforeChange()
   entries.value.splice(index, 1)
 }
 
@@ -695,16 +725,19 @@ const mergeWithNext = (index: number) => {
   const cur = entries.value[index]
   const next = entries.value[index + 1]
   if (!next) return
+  history.recordBeforeChange()
   cur.end = next.end
   cur.text = `${cur.text}${next.text}`
   cur._endText = formatTimeInput(cur.end)
   entries.value.splice(index + 1, 1)
 }
 
-// 手动"拆分"某一行字幕为两行：交给后端按标点/文本长度比例算出拆分点
-// （这一行此时可能是识别结果，也可能已被用户编辑/合并过，早就没有
-// 逐字时间戳了，所以拆分点只能靠文本本身重新估算，与 /api/subtitle/export
-// 一样是无状态接口，不依赖 job）。
+// 手动"拆分"某一行字幕为两行——字幕列表里的 ✂️ 按钮专用：交给后端按
+// 标点/文本长度比例算出拆分点（这一行此时可能是识别结果，也可能已被
+// 用户编辑/合并过，早就没有逐字时间戳了，所以拆分点只能靠文本本身
+// 重新估算，与 /api/subtitle/export 一样是无状态接口，不依赖 job）。
+// 波形时间轴上的"拆分"按钮不走这个函数，见下方 splitEntryTimeOnly：
+// 那边只想按播放头位置切时间，不想让文本被自动拆分。
 const splitEntry = async (index: number) => {
   const cur = entries.value[index]
   if (!cur || cur._splitting) return
@@ -725,7 +758,9 @@ const splitEntry = async (index: number) => {
 
     const left = toEditableEntry(data.left)
     const right = toEditableEntry(data.right)
+    history.recordBeforeChange()
     entries.value.splice(index, 1, left, right)
+    activeUid.value = left._uid
   } catch (e: any) {
     ElMessage.error(`❌ ${e?.message || String(e)}`)
   } finally {
@@ -735,6 +770,29 @@ const splitEntry = async (index: number) => {
   }
 }
 
+// 波形时间轴上的"拆分"按钮：只在播放头位置把时间切成两段，完全不调用
+// 后端、不做任何文本拆分算法——左段保留原文本，右段留空，交给用户
+// 用波形块的双击内联编辑自行分配文字。纯前端计算，无需 loading 状态。
+// skipHistory：批量拆分（onWaveformSplitEntries）会在外层统一记一次撤销
+// 快照，代表"这一整批拆分"算一步，所以循环内部调这个函数时不再重复记录
+const splitEntryTimeOnly = (index: number, at: number, skipHistory = false) => {
+  const cur = entries.value[index]
+  if (!cur) return
+  if (cur.end - cur.start < 0.05) {
+    ElMessage.warning(t('subtitle.splitTooShort'))
+    return
+  }
+
+  const minSeg = Math.min(0.1, (cur.end - cur.start) / 2)
+  const splitAt = Math.max(cur.start + minSeg, Math.min(at, cur.end - minSeg))
+
+  const left = toEditableEntry({ start: cur.start, end: splitAt, text: cur.text })
+  const right = toEditableEntry({ start: splitAt, end: cur.end, text: '' })
+  if (!skipHistory) history.recordBeforeChange()
+  entries.value.splice(index, 1, left, right)
+  activeUid.value = left._uid
+}
+
 const clearAll = async () => {
   try {
     await ElMessageBox.confirm(t('subtitle.clearAllConfirm'), '', { type: 'warning' })
@@ -742,6 +800,8 @@ const clearAll = async () => {
     return
   }
   entries.value = []
+  selectedUids.value = new Set()
+  history.resetHistory()
   if (mediaInfo.value) {
     try {
       await fetch('/api/subtitle/cleanup', {
@@ -790,11 +850,78 @@ const jumpToEntry = (row: SubtitleEntry) => {
 // ─────────────────────────────────────────────────────────────────
 const activeUid = ref<number | null>(null)
 
+// ─────────────────────────────────────────────────────────────────
+// 撤销/恢复（Ctrl+Z / Ctrl+Y、Ctrl+Shift+Z）。历史记录本身在
+// useSubtitleHistory 里实现，这里只负责：
+// 1. 在每个"离散操作"修改 entries 之前调用 history.recordBeforeChange()
+// 2. 全局快捷键分发 undo()/redo()——聚焦在输入框/文本域时不拦截，交给
+//    浏览器原生的输入框撤销
+// ─────────────────────────────────────────────────────────────────
+const history = useSubtitleHistory(entries, activeUid)
+const canUndo = history.canUndo
+const canRedo = history.canRedo
+
+const onUndo = () => history.undo()
+const onRedo = () => history.redo()
+
+const onUndoRedoKeydown = (evt: KeyboardEvent) => {
+  if (!(evt.ctrlKey || evt.metaKey)) return
+  const activeEl = document.activeElement as HTMLElement | null
+  if (activeEl && ['INPUT', 'TEXTAREA'].includes(activeEl.tagName)) return // 交给原生输入框撤销
+  const key = evt.key.toLowerCase()
+  if (key === 'z' && !evt.shiftKey) {
+    evt.preventDefault()
+    onUndo()
+  } else if (key === 'y' || (key === 'z' && evt.shiftKey)) {
+    evt.preventDefault()
+    onRedo()
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onUndoRedoKeydown)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onUndoRedoKeydown)
+})
+
 const onWaveformSeek = (time: number) => {
   const el = videoRef.value || audioRef.value
   if (el) el.currentTime = time
   currentTime.value = time
 }
+
+// ─────────────────────────────────────────────────────────────────
+// 空格键播放/暂停：编辑文本（波形块内联编辑框、字幕列表里的时间/文本
+// 输入框等）时不响应，避免和"输入空格字符"冲突；其余情况下（包括焦点
+// 停在某个按钮上时）空格键一律用于切换播放/暂停，而不是触发按钮本身
+// 的点击——因此需要 preventDefault 来同时抑制浏览器默认的按钮激活和
+// <video>/<audio> 原生控件自身的空格键处理（否则会和这里的 play/pause
+// 重复触发，导致来回抖动）。
+// ─────────────────────────────────────────────────────────────────
+const onSpaceKeydown = (evt: KeyboardEvent) => {
+  if (evt.code !== 'Space' && evt.key !== ' ') return
+  const activeEl = document.activeElement as HTMLElement | null
+  const tag = activeEl?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || activeEl?.isContentEditable) return
+  const el = videoRef.value || audioRef.value
+  if (!el) return
+  evt.preventDefault()
+  if (el.paused) {
+    el.play().catch(() => {
+      // 部分浏览器要求用户手势才能自动播放，静默忽略
+    })
+  } else {
+    el.pause()
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onSpaceKeydown)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onSpaceKeydown)
+})
 
 const onWaveformUpdateEntry = (payload: { uid: number; start?: number; end?: number }) => {
   const row = entries.value.find((e) => e._uid === payload.uid)
@@ -830,8 +957,80 @@ const onWaveformAddEntry = (time: number) => {
   const end = Math.min(start + 2, maxEnd)
   if (end - start < 0.1) return // 相邻条目间隙太窄，放不下新字幕
   const newEntry = toEditableEntry({ start, end, text: '' })
+  history.recordBeforeChange()
   entries.value.splice(insertAt, 0, newEntry)
   activeUid.value = newEntry._uid
+}
+
+// 波形块单击选中 → 只更新 activeUid，联动列表高亮；点击空白处会传 null 取消选中
+const onWaveformSelect = (uid: number | null) => {
+  activeUid.value = uid
+}
+
+// 波形块内联编辑（双击）提交的文字，按 uid 定位对应行
+const onWaveformEditText = (payload: { uid: number; text: string }) => {
+  const row = entries.value.find((e) => e._uid === payload.uid)
+  if (!row) return
+  history.recordBeforeChange()
+  row.text = payload.text
+}
+
+// 波形块工具栏"删除"按钮 / 选中后按 Delete 键：无需二次确认，直接删除
+// （字幕列表里的 🗑️ 删除按钮同样不再二次确认，见 deleteEntry()）
+const onWaveformDeleteEntry = (uid: number) => {
+  const index = entries.value.findIndex((e) => e._uid === uid)
+  if (index === -1) return
+  history.recordBeforeChange()
+  entries.value.splice(index, 1)
+  if (activeUid.value === uid) activeUid.value = null
+}
+
+// 波形块多选后批量删除（Delete 键/工具栏"删除"按钮在多选状态下触发）：
+// 同样无需二次确认，与单选删除保持一致的即时删除体验
+const onWaveformDeleteEntries = (uids: number[]) => {
+  if (!uids.length) return
+  const uidSet = new Set(uids)
+  history.recordBeforeChange()
+  entries.value = entries.value.filter((e) => !uidSet.has(e._uid))
+  if (activeUid.value !== null && uidSet.has(activeUid.value)) activeUid.value = null
+  selectedUids.value = new Set()
+}
+
+// 波形块工具栏"拆分"按钮：按 uid 定位后复用 splitEntry 的按 index 实现
+const onWaveformSplitEntry = (payload: { uid: number; at: number }) => {
+  const index = entries.value.findIndex((e) => e._uid === payload.uid)
+  if (index === -1) return
+  splitEntryTimeOnly(index, payload.at)
+}
+
+// 波形块多选后批量拆分：每个 payload 各自按自己的拆分点独立处理。注意
+// 每次 splitEntryTimeOnly 都会 splice 替换 entries，导致后续 uid 对应的
+// index 失效，所以每次都重新按 uid 查找当前 index，而不是缓存一份索引表。
+// 整批拆分只在开头记一次撤销快照（skipHistory=true 让内部不再重复记录），
+// 让"一次多选拆分"作为一步撤销，而不是拆几条就要撤销几次
+const onWaveformSplitEntries = (payloads: Array<{ uid: number; at: number }>) => {
+  if (!payloads.length) return
+  history.recordBeforeChange()
+  for (const { uid, at } of payloads) {
+    const index = entries.value.findIndex((e) => e._uid === uid)
+    if (index === -1) continue
+    splitEntryTimeOnly(index, at, true)
+  }
+  selectedUids.value = new Set()
+}
+
+// 波形块多选集合同步：仅用于字幕列表的多选行高亮，不影响 activeUid
+// （单选锚点，仍然驱动拖拽/表格主高亮等既有逻辑）
+const selectedUids = ref<Set<number>>(new Set())
+const onWaveformSelectMulti = (uids: number[]) => {
+  selectedUids.value = new Set(uids)
+}
+
+// 字幕列表行高亮：单选（activeUid）用原有的橙色高亮，多选（selectedUids）
+// 用另一个 class 区分，与波形块的双色高亮方案保持一致
+const rowClassName = ({ row }: { row: SubtitleEntry }) => {
+  if (selectedUids.value.has(row._uid)) return 'row-multi-selected'
+  return row._uid === activeUid.value ? 'row-active' : ''
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1185,6 +1384,19 @@ onBeforeUnmount(() => {
   vertical-align: top;
   padding-top: 8px;
   padding-bottom: 8px;
+}
+
+/* 与波形轴选中态（.subtitle-region.active，橙色）保持一致的高亮色，
+   用 :deep 穿透 el-table 的 scoped 样式隔离；!important 是因为 element-plus
+   自带的 hover/stripe 背景色优先级较高，不加的话选中行 hover 时会被盖掉。 */
+.subtitle-table :deep(tr.row-active td.el-table__cell) {
+  background-color: rgba(255, 145, 77, 0.16) !important;
+}
+
+/* 多选行高亮：与波形时间轴的紫色多选描边（.multi-selected）呼应，
+   用不同色相和单选态区分开 */
+.subtitle-table :deep(tr.row-multi-selected td.el-table__cell) {
+  background-color: rgba(124, 58, 237, 0.14) !important;
 }
 
 .export-buttons {

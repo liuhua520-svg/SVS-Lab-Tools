@@ -346,7 +346,7 @@
 
         <!-- 语音预设管理弹窗：新增 / 编辑 / 删除；音色列表跟随本弹窗内选择的
              引擎（narratorFormVoices），与主面板当前引擎（ttsVoices）互相独立 -->
-        <el-dialog v-model="narratorManagerVisible" :title="t('processor.manageNarrators')" width="600px">
+        <el-dialog v-model="narratorManagerVisible" :title="t('processor.manageNarrators')" width="600px" :close-on-click-modal="!processing" :show-close="!processing">
           <el-table :data="narrators" size="small" style="margin-bottom: 16px" max-height="240">
             <el-table-column prop="name" :label="t('processor.narratorName')" width="110" />
             <el-table-column :label="t('processor.ttsEngine')" width="90">
@@ -370,13 +370,13 @@
             </el-table-column>
             <el-table-column width="110">
               <template #default="{ row }">
-                <el-button link size="small" @click="editNarrator(row)">{{ t('processor.edit') }}</el-button>
-                <el-button link size="small" type="danger" @click="deleteNarratorItem(row.id)">{{ t('processor.delete') }}</el-button>
+                <el-button link size="small" :disabled="processing" @click="editNarrator(row)">{{ t('processor.edit') }}</el-button>
+                <el-button link size="small" type="danger" :disabled="processing" @click="deleteNarratorItem(row.id)">{{ t('processor.delete') }}</el-button>
               </template>
             </el-table-column>
           </el-table>
 
-          <el-form label-position="top">
+          <el-form label-position="top" :disabled="processing">
             <el-form-item :label="t('processor.narratorName')">
               <el-input v-model="narratorForm.name" :placeholder="t('processor.narratorNamePlaceholder')" />
             </el-form-item>
@@ -456,7 +456,7 @@
                       :placeholder="t('processor.qwen3TtsPreviewTextPlaceholder')"
                     />
                     <div style="margin-top: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
-                      <el-button size="small" :loading="narratorFormPreviewLoading" @click="generateNarratorPreview">
+                      <el-button size="small" :disabled="processing" :loading="narratorFormPreviewLoading" @click="generateNarratorPreview">
                         🔊 {{ t('processor.qwen3TtsGeneratePreview') }}
                       </el-button>
                       <audio v-if="narratorFormPreviewUrl" :src="narratorFormPreviewUrl" controls style="height: 32px; vertical-align: middle" />
@@ -481,6 +481,7 @@
                         type="primary"
                         size="small"
                         style="margin-top: 8px"
+                        :disabled="processing"
                         :loading="narratorSaving"
                         @click="saveNarratorPreviewAsVoiceClone"
                       >
@@ -498,6 +499,7 @@
                     action="#"
                     :auto-upload="false"
                     :show-file-list="false"
+                    :disabled="processing"
                     accept="audio/*"
                     :on-change="(f: any) => { narratorFormQwen3RefAudioFile = f.raw; narratorForm.qwen3_tts_ref_audio_path = '' }"
                     class="compact-upload"
@@ -506,7 +508,7 @@
                   </el-upload>
                   <span v-if="narratorFormQwen3RefAudioName" style="margin-left: 10px; font-size: 13px; color: var(--el-text-color-secondary)">
                     {{ narratorFormQwen3RefAudioName }}
-                    <el-button link type="danger" size="small" @click="narratorFormQwen3RefAudioFile = null; narratorForm.qwen3_tts_ref_audio_path = ''">✖</el-button>
+                    <el-button link type="danger" size="small" :disabled="processing" @click="narratorFormQwen3RefAudioFile = null; narratorForm.qwen3_tts_ref_audio_path = ''">✖</el-button>
                   </span>
                 </el-form-item>
                 <el-form-item :label="t('processor.qwen3TtsXVectorOnly')">
@@ -558,11 +560,11 @@
               show-icon
               style="margin-bottom: 12px"
             />
-            <el-button @click="resetNarratorForm">{{ t('processor.reset') }}</el-button>
+            <el-button :disabled="processing" @click="resetNarratorForm">{{ t('processor.reset') }}</el-button>
             <el-button
               type="primary"
               :loading="narratorSaving"
-              :disabled="narratorForm.qwen3_tts_mode === 'voice_design' && narratorFormVoiceDesignSubMode === 'save_clone'"
+              :disabled="processing || (narratorForm.qwen3_tts_mode === 'voice_design' && narratorFormVoiceDesignSubMode === 'save_clone')"
               @click="saveNarrator"
             >{{ t('processor.save') }}</el-button>
           </template>
@@ -576,72 +578,74 @@
              不点"应用"直接关闭则不影响原文本。与 pipeline.py /
              text_processor.py 的其它转换规则完全独立，只调用
              /api/text/optimize，不经过 MFA / TTS / 对齐等任何其它后端。 -->
-        <el-dialog v-model="textOptimizer.visible" :title="t('processor.textOptimize')" width="640px">
+        <el-dialog v-model="textOptimizer.visible" :title="t('processor.textOptimize')" width="640px" :close-on-click-modal="!processing" :show-close="!processing">
           <el-input
             ref="textOptimizerTextareaRef"
             v-model="textOptimizer.draft"
             type="textarea"
             :rows="10"
+            :disabled="processing"
             :placeholder="t('processor.textOptimizePlaceholder')"
             @input="onTextOptimizerDraftInput"
           />
           <div class="text-optimize-toolbar">
-            <el-button size="small" :disabled="!textOptimizerHistory.canUndo.value" @click="undoTextOptimize">
+            <el-button size="small" :disabled="processing || !textOptimizerHistory.canUndo.value" @click="undoTextOptimize">
               ↶ {{ t('processor.undo') }}
             </el-button>
-            <el-button size="small" :disabled="!textOptimizerHistory.canRedo.value" @click="redoTextOptimize">
+            <el-button size="small" :disabled="processing || !textOptimizerHistory.canRedo.value" @click="redoTextOptimize">
               ↷ {{ t('processor.redo') }}
             </el-button>
           </div>
           <div class="text-optimize-toolbar">
-            <el-button size="small" :loading="textOptimizer.loading === 'smart'" @click="runTextOptimize('smart')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'smart'" @click="runTextOptimize('smart')">
               ✨ {{ t('processor.textOptimizeSmart') }}
             </el-button>
-            <el-button size="small" :loading="textOptimizer.loading === 'number_only'" @click="runTextOptimize('number_only')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'number_only'" @click="runTextOptimize('number_only')">
               🔢 {{ t('processor.textOptimizeNumberOnly') }}
             </el-button>
-            <el-button size="small" :loading="textOptimizer.loading === 'digit_to_words'" @click="runTextOptimize('digit_to_words')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'digit_to_words'" @click="runTextOptimize('digit_to_words')">
               🔠 {{ t('processor.textOptimizeDigitToWords') }}
             </el-button>
-            <el-button size="small" :loading="textOptimizer.loading === 'symbol_only'" @click="runTextOptimize('symbol_only')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'symbol_only'" @click="runTextOptimize('symbol_only')">
               ➕ {{ t('processor.textOptimizeSymbolOnly') }}
             </el-button>
-            <el-button size="small" :loading="textOptimizer.loading === 'add_spaces'" @click="runTextOptimize('add_spaces')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'add_spaces'" @click="runTextOptimize('add_spaces')">
               🔤 {{ t('processor.textOptimizeAddSpaces') }}
             </el-button>
-            <el-button size="small" :loading="textOptimizer.loading === 'strip_symbols'" @click="runTextOptimize('strip_symbols')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'strip_symbols'" @click="runTextOptimize('strip_symbols')">
               🧹 {{ t('processor.textOptimizeStripSymbols') }}
             </el-button>
-            <el-button size="small" :loading="textOptimizer.loading === 'hyphen_to_space'" @click="runTextOptimize('hyphen_to_space')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'hyphen_to_space'" @click="runTextOptimize('hyphen_to_space')">
               ➖ {{ t('processor.textOptimizeHyphenToSpace') }}
             </el-button>
-            <el-button size="small" :loading="textOptimizer.loading === 'add_spaces_uppercase'" @click="runTextOptimize('add_spaces_uppercase')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'add_spaces_uppercase'" @click="runTextOptimize('add_spaces_uppercase')">
               🔡 {{ t('processor.textOptimizeAddSpacesUppercase') }}
             </el-button>
-            <el-button size="small" :loading="textOptimizer.loading === 'uppercase_to_lowercase'" @click="runTextOptimize('uppercase_to_lowercase')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'uppercase_to_lowercase'" @click="runTextOptimize('uppercase_to_lowercase')">
               🔽 {{ t('processor.textOptimizeUppercaseToLowercase') }}
             </el-button>
-            <el-button size="small" :loading="textOptimizer.loading === 'lowercase_to_uppercase'" @click="runTextOptimize('lowercase_to_uppercase')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'lowercase_to_uppercase'" @click="runTextOptimize('lowercase_to_uppercase')">
               🔼 {{ t('processor.textOptimizeLowercaseToUppercase') }}
             </el-button>
-            <el-button size="small" :loading="textOptimizer.loading === 'capitalize_words'" @click="runTextOptimize('capitalize_words')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'capitalize_words'" @click="runTextOptimize('capitalize_words')">
               🔤 {{ t('processor.textOptimizeCapitalizeWords') }}
             </el-button>
-            <el-button size="small" :loading="textOptimizer.loading === 'newline_after_comma'" @click="runTextOptimize('newline_after_comma')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'newline_after_comma'" @click="runTextOptimize('newline_after_comma')">
               ↩️ {{ t('processor.textOptimizeNewlineAfterComma') }}
             </el-button>
-            <el-button size="small" :loading="textOptimizer.loading === 'newline_after_period'" @click="runTextOptimize('newline_after_period')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'newline_after_period'" @click="runTextOptimize('newline_after_period')">
               ↩️ {{ t('processor.textOptimizeNewlineAfterPeriod') }}
             </el-button>
           </div>
           <div class="text-optimize-toolbar" style="margin-top: 8px; align-items: center">
-            <el-button size="small" :loading="textOptimizer.loading === 'newline_every_n'" @click="runTextOptimize('newline_every_n')">
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'newline_every_n'" @click="runTextOptimize('newline_every_n')">
               ↩️ {{ t('processor.textOptimizeNewlineEveryN') }}
             </el-button>
             <el-input-number
               v-model="textOptimizer.everyN"
               :min="1"
               :max="99"
+              :disabled="processing"
               size="small"
               style="width: 100px; margin-left: 4px"
             />
@@ -653,8 +657,8 @@
             <el-text type="danger" size="small">{{ textOptimizer.error }}</el-text>
           </div>
           <template #footer>
-            <el-button @click="textOptimizer.visible = false">{{ t('processor.textOptimizeCancel') }}</el-button>
-            <el-button type="primary" @click="applyTextOptimize">{{ t('processor.textOptimizeApply') }}</el-button>
+            <el-button :disabled="processing" @click="textOptimizer.visible = false">{{ t('processor.textOptimizeCancel') }}</el-button>
+            <el-button type="primary" :disabled="processing" @click="applyTextOptimize">{{ t('processor.textOptimizeApply') }}</el-button>
           </template>
         </el-dialog>
 
@@ -663,52 +667,55 @@
              直接关闭则不影响原文本。纯前端字符串/正则替换，不调用任何
              后端接口。支持"区分大小写""正则表达式"两个开关，以及"查找
              下一个""替换""全部替换"三个操作，与 Ctrl+H 的行为对齐。 -->
-        <el-dialog v-model="findReplace.visible" :title="t('processor.findReplace')" width="640px">
+        <el-dialog v-model="findReplace.visible" :title="t('processor.findReplace')" width="640px" :close-on-click-modal="!processing" :show-close="!processing">
           <el-input
             ref="findReplaceTextareaRef"
             v-model="findReplace.draft"
             type="textarea"
             :rows="10"
+            :disabled="processing"
             :placeholder="t('processor.textOptimizePlaceholder')"
             @input="onFindReplaceDraftInput"
           />
           <div class="text-optimize-toolbar" style="margin-top: 8px">
-            <el-button size="small" :disabled="!findReplaceHistory.canUndo.value" @click="undoFindReplace">
+            <el-button size="small" :disabled="processing || !findReplaceHistory.canUndo.value" @click="undoFindReplace">
               ↶ {{ t('processor.undo') }}
             </el-button>
-            <el-button size="small" :disabled="!findReplaceHistory.canRedo.value" @click="redoFindReplace">
+            <el-button size="small" :disabled="processing || !findReplaceHistory.canRedo.value" @click="redoFindReplace">
               ↷ {{ t('processor.redo') }}
             </el-button>
           </div>
           <div class="text-optimize-toolbar" style="margin-top: 12px">
             <el-input
               v-model="findReplace.find"
+              :disabled="processing"
               :placeholder="t('processor.findReplaceFindPlaceholder')"
               style="flex: 1; min-width: 200px"
               size="small"
             />
             <el-input
               v-model="findReplace.replace"
+              :disabled="processing"
               :placeholder="t('processor.findReplaceReplacePlaceholder')"
               style="flex: 1; min-width: 200px"
               size="small"
             />
           </div>
           <div class="text-optimize-toolbar" style="margin-top: 8px; align-items: center">
-            <el-checkbox v-model="findReplace.caseSensitive">{{ t('processor.findReplaceCaseSensitive') }}</el-checkbox>
-            <el-checkbox v-model="findReplace.useRegex">{{ t('processor.findReplaceUseRegex') }}</el-checkbox>
+            <el-checkbox v-model="findReplace.caseSensitive" :disabled="processing">{{ t('processor.findReplaceCaseSensitive') }}</el-checkbox>
+            <el-checkbox v-model="findReplace.useRegex" :disabled="processing">{{ t('processor.findReplaceUseRegex') }}</el-checkbox>
             <span style="margin-left: auto; font-size: 13px; color: var(--el-text-color-secondary)">
               {{ t('processor.findReplaceMatchCount', { count: findReplaceMatchCount }) }}
             </span>
           </div>
           <div class="text-optimize-toolbar" style="margin-top: 8px">
-            <el-button size="small" :disabled="!findReplace.find" @click="findReplaceNext">
+            <el-button size="small" :disabled="processing || !findReplace.find" @click="findReplaceNext">
               ⏭️ {{ t('processor.findReplaceFindNext') }}
             </el-button>
-            <el-button size="small" :disabled="!findReplace.find" @click="runFindReplaceOne">
+            <el-button size="small" :disabled="processing || !findReplace.find" @click="runFindReplaceOne">
               🔁 {{ t('processor.findReplaceOne') }}
             </el-button>
-            <el-button size="small" :disabled="!findReplace.find" @click="runFindReplaceAll">
+            <el-button size="small" :disabled="processing || !findReplace.find" @click="runFindReplaceAll">
               🔁 {{ t('processor.findReplaceAll') }}
             </el-button>
           </div>
@@ -716,8 +723,8 @@
             <el-text type="danger" size="small">{{ findReplace.error }}</el-text>
           </div>
           <template #footer>
-            <el-button @click="findReplace.visible = false">{{ t('processor.textOptimizeCancel') }}</el-button>
-            <el-button type="primary" @click="applyFindReplace">{{ t('processor.textOptimizeApply') }}</el-button>
+            <el-button :disabled="processing" @click="findReplace.visible = false">{{ t('processor.textOptimizeCancel') }}</el-button>
+            <el-button type="primary" :disabled="processing" @click="applyFindReplace">{{ t('processor.textOptimizeApply') }}</el-button>
           </template>
         </el-dialog>
 
@@ -1141,7 +1148,7 @@
                     :max="300"
                     :step="1"
                     controls-position="right"
-                    :disabled="midiLoaded"
+                    :disabled="processing || midiLoaded"
                   />
                   <span v-if="midiLoaded && midiInfo.loaded" class="midi-lock-tip">
                     🔒 {{ midiInfo.bpm }} ({{ t('processor.midiImportedTitle') }})
@@ -1161,7 +1168,7 @@
                       :max="108"
                       :step="1"
                       controls-position="right"
-                      :disabled="midiLoaded"
+                      :disabled="processing || midiLoaded"
                   />
                     <span class="pitch-name">{{ midiNoteToName(advancedConfig.base_pitch) }}</span>
                     <span v-if="midiLoaded" class="midi-lock-tip">🔒 {{ t('processor.midiImportedMore') }}</span>
@@ -1179,7 +1186,7 @@
                     v-model="advancedConfig.auto_note_pitch"
                     :active-text="t('processor.autoNotePitchActive')"
                     :inactive-text="t('processor.autoNotePitchInactive')"
-                    :disabled="midiLoaded"
+                    :disabled="processing || midiLoaded"
                   />
                   <span v-if="midiLoaded" class="midi-lock-tip" style="display:block;margin-top:4px">
                     🔒 {{ t('processor.midiImportedTip') }}
@@ -1193,6 +1200,7 @@
                     v-model="advancedConfig.export_pitch_line"
                     :active-text="t('processor.exportPitchLineActive')"
                     :inactive-text="t('processor.exportPitchLineInactive')"
+                    :disabled="processing"
                   />
                 </el-form-item>
               </el-col>
@@ -1203,7 +1211,7 @@
 
               <el-col :xs="24" :sm="12">
                 <el-form-item :label="t('processor.f0Method')">
-                  <el-radio-group v-model="advancedConfig.f0_method" :disabled="!advancedConfig.export_pitch_line && !advancedConfig.auto_note_pitch">
+                  <el-radio-group v-model="advancedConfig.f0_method" :disabled="processing || (!advancedConfig.export_pitch_line && !advancedConfig.auto_note_pitch)">
                     <el-radio label="dio">
                       <span>{{ t('processor.f0Dio') }}</span>
                       <el-icon class="icon-tip"><InfoFilled /></el-icon>
@@ -1212,11 +1220,11 @@
                       <span>{{ t('processor.f0Harvest') }}</span>
                       <el-icon class="icon-tip"><InfoFilled /></el-icon>
                     </el-radio>
-                    <el-radio label="crepe" :disabled="(!advancedConfig.export_pitch_line && !advancedConfig.auto_note_pitch) || systemStatus.audio_processing?.f0_backends?.crepe?.available === false">
+                    <el-radio label="crepe" :disabled="processing || (!advancedConfig.export_pitch_line && !advancedConfig.auto_note_pitch) || systemStatus.audio_processing?.f0_backends?.crepe?.available === false">
                       <span>{{ t('processor.f0Crepe') }}</span>
                       <el-icon class="icon-tip"><InfoFilled /></el-icon>
                     </el-radio>
-                    <el-radio label="rmvpe" :disabled="(!advancedConfig.export_pitch_line && !advancedConfig.auto_note_pitch) || systemStatus.audio_processing?.f0_backends?.rmvpe?.available === false">
+                    <el-radio label="rmvpe" :disabled="processing || (!advancedConfig.export_pitch_line && !advancedConfig.auto_note_pitch) || systemStatus.audio_processing?.f0_backends?.rmvpe?.available === false">
                       <span>{{ t('processor.f0Rmvpe') }}</span>
                       <el-icon class="icon-tip"><InfoFilled /></el-icon>
                     </el-radio>
@@ -1232,7 +1240,7 @@
 
               <el-col v-if="advancedConfig.f0_method === 'crepe'" :xs="24" :sm="12">
                 <el-form-item :label="t('processor.crepeModelSpec')">
-                  <el-radio-group v-model="advancedConfig.crepe_model">
+                  <el-radio-group v-model="advancedConfig.crepe_model" :disabled="processing">
                     <el-radio label="full">{{ t('processor.crepeFull') }}</el-radio>
                     <el-radio label="tiny">{{ t('processor.crepeTiny') }}</el-radio>
                   </el-radio-group>
@@ -1241,7 +1249,7 @@
 
               <el-col v-if="advancedConfig.f0_method === 'crepe' || advancedConfig.f0_method === 'rmvpe'" :xs="24" :sm="12">
                 <el-form-item :label="t('processor.f0Device')">
-                  <el-radio-group v-model="advancedConfig.f0_device">
+                  <el-radio-group v-model="advancedConfig.f0_device" :disabled="processing">
                     <el-radio label="auto">{{ t('processor.deviceAuto') }}</el-radio>
                     <el-radio label="cpu">{{ t('processor.deviceCpu') }}</el-radio>
                     <el-radio label="cuda">{{ t('processor.deviceCuda') }}</el-radio>
@@ -1251,7 +1259,7 @@
 
               <el-col :xs="24" :sm="12">
                 <el-form-item :label="t('processor.precision')">
-                  <el-radio-group v-model="advancedConfig.precision">
+                  <el-radio-group v-model="advancedConfig.precision" :disabled="processing">
                     <el-radio label="single">{{ t('processor.precisionSingle') }}</el-radio>
                     <el-radio label="double">{{ t('processor.precisionDouble') }}</el-radio>
                   </el-radio-group>
@@ -1264,7 +1272,7 @@
                     v-model="advancedConfig.f0_smooth"
                     :active-text="t('processor.enabled')"
                     :inactive-text="t('processor.disabled')"
-                    :disabled="!advancedConfig.export_pitch_line"
+                    :disabled="processing || !advancedConfig.export_pitch_line"
                   />
                 </el-form-item>
               </el-col>
@@ -1277,7 +1285,7 @@
                     :max="21"
                     :step="2"
                     controls-position="right"
-                    :disabled="!advancedConfig.export_pitch_line"
+                    :disabled="processing || !advancedConfig.export_pitch_line"
                   />
                   <span class="help-text">{{ t('processor.smoothWindowTip') }}</span>
                 </el-form-item>
@@ -1291,7 +1299,7 @@
                     :max="21"
                     :step="2"
                     controls-position="right"
-                    :disabled="!advancedConfig.export_pitch_line"
+                    :disabled="processing || !advancedConfig.export_pitch_line"
                   />
                   <span class="help-text">{{ t('processor.vsqxPitchSmoothWindowTip') }}</span>
                 </el-form-item>
@@ -1305,6 +1313,7 @@
                     :max="200"
                     :step="5"
                     controls-position="right"
+                    :disabled="processing"
                   />
                 </el-form-item>
               </el-col>
@@ -1317,7 +1326,37 @@
                     :max="5000"
                     :step="50"
                     controls-position="right"
+                    :disabled="processing"
                   />
+                </el-form-item>
+              </el-col>
+
+              <el-col :xs="24">
+                <el-divider>✂️ {{ t('processor.fillShortRestsDivider') }}</el-divider>
+              </el-col>
+
+              <el-col :xs="24" :sm="12">
+                <el-form-item :label="t('processor.fillShortRests')">
+                  <el-switch
+                    v-model="advancedConfig.fill_short_rests"
+                    :active-text="t('processor.enabled')"
+                    :inactive-text="t('processor.disabled')"
+                  />
+                  <el-tooltip :content="t('processor.fillShortRestsHint')" placement="top">
+                    <el-icon class="icon-tip"><QuestionFilled /></el-icon>
+                  </el-tooltip>
+                </el-form-item>
+              </el-col>
+
+              <el-col v-if="advancedConfig.fill_short_rests" :xs="24" :sm="12">
+                <el-form-item :label="t('processor.fillShortRestsMaxLength')">
+                  <el-select v-model="advancedConfig.fill_short_rests_max_length" style="width: 100%">
+                    <el-option label="8" :value="'8'">{{ t('processor.noteLength8') }}</el-option>
+                    <el-option label="16" :value="'16'">{{ t('processor.noteLength16') }}</el-option>
+                    <el-option label="32" :value="'32'">{{ t('processor.noteLength32') }}</el-option>
+                    <el-option label="64" :value="'64'">{{ t('processor.noteLength64') }}</el-option>
+                    <el-option label="128" :value="'128'">{{ t('processor.noteLength128') }}</el-option>
+                  </el-select>
                 </el-form-item>
               </el-col>
 			</el-row>
@@ -1331,6 +1370,7 @@
               <p><strong>DIO / Harvest / CREPE / RMVPE：</strong>{{ t('processor.advancedHelpF0Method') }}</p>
               <p><strong>{{ t('processor.f0Device') }}：</strong>{{ t('processor.advancedHelpDevice') }}</p>
               <p><strong>{{ t('processor.f0Floor') }} / {{ t('processor.f0Ceil') }}:</strong> {{ t('processor.advancedHelpRange') }}</p>
+              <p><strong>{{ t('processor.fillShortRests') }}:</strong> {{ t('processor.advancedHelpFillShortRests') }}</p>
             </el-alert>
           </el-collapse-item>
         </el-collapse>
@@ -1412,9 +1452,24 @@
         <el-progress
           v-if="processing"
           :percentage="progressPercent"
-          :indeterminate="true"
           class="progress-bar"
         />
+        <div v-if="processing" class="stage-caption">⏱ {{ formatTime(clientElapsedMs) }}</div>
+        <div v-if="processing" class="details-box" style="margin-top: 10px">
+          <el-table :data="processingDetails" stripe style="width: 100%" size="small">
+            <el-table-column prop="stage" :label="t('processor.processingStage')" width="200" />
+            <el-table-column prop="status" :label="t('processor.status')" width="100">
+              <template #default="{ row }">
+                <el-tag v-if="row.status === '完成'" type="success">{{ t('processor.statusDone') }}</el-tag>
+                <el-tag v-else-if="row.status === '跳过'" type="warning">{{ t('processor.statusSkipped') }}</el-tag>
+                <el-tag v-else-if="row.status === '等待'" type="info">{{ t('processor.statusWaiting') }}</el-tag>
+                <el-tag v-else-if="row.status === '进行中'" type="warning">{{ t('processor.statusProcessing') }}</el-tag>
+                <el-tag v-else type="info">{{ row.status }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="message" :label="t('processor.detail')" show-overflow-tooltip />
+          </el-table>
+        </div>
       </el-form>
 
       <div v-if="result" class="result-section">
@@ -1672,8 +1727,8 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { ElMessage } from 'element-plus'
-import { UploadFilled, InfoFilled } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { UploadFilled, InfoFilled, QuestionFilled } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 
 const emit = defineEmits<{
@@ -1723,6 +1778,10 @@ interface AdvancedConfig {
   vsqx_pitch_smooth_window: number
   f0_floor: number
   f0_ceil: number
+  fill_short_rests: boolean                 // 填充短休止符：将两个音符之间较短的休止符
+                                              // 用前一个音符的延长来吞并，避免大量细碎断句
+  fill_short_rests_max_length: '8' | '16' | '32' | '64' | '128'  // 判定"短"的音符时值
+                                              // 阈值（不含），换算为绝对时长依赖 bpm
 }
 
 interface F0BackendStatus {
@@ -2416,6 +2475,13 @@ const applyFindReplace = () => {
 // 没有改动文本/参数，点击"开始处理"会带上它直接复用这份分句音频去对齐；
 // 一旦相关输入发生变化就会被清空，逼迫"开始处理"退回"先合成再对齐"的
 // 完整流程，避免用旧音频对新文本。
+// snapshotParams：生成预览那一刻，与后端 _tts_preview_take() 校验完全
+// 对应的一份"预览时参数"快照（text/engine/voice/rate/volume/pitch/
+// language/qwen3_tts_options_json）。提交前会用它和当前表单状态再比对
+// 一次——不只依赖下面那个 watch（watch 理论上应该已经把不一致的
+// previewId 清空了，但仍然可能有遗漏的联动路径没有覆盖到，例如状态被
+// 跳过响应式追踪的方式写入），一旦发现字段不一致，必须弹窗询问用户
+// 是否复用预览，而不是把这份可能对不上的音频悄悄提交给后端。
 const segmentPreview = ref<{
   loading: boolean
   audioUrl: string
@@ -2424,6 +2490,7 @@ const segmentPreview = ref<{
   warnings: string[]
   error: string
   progress: { done: number; total: number } | null
+  snapshotParams: Record<string, string> | null
 }>({
   loading: false,
   audioUrl: '',
@@ -2432,6 +2499,7 @@ const segmentPreview = ref<{
   warnings: [],
   error: '',
   progress: null,
+  snapshotParams: null,
 })
 let segmentPreviewRequestSeq = 0
 // 分段预览专用的轮询定时器：与"开始处理"用的 jobPollTimer/currentJobId
@@ -2594,7 +2662,9 @@ const advancedConfig = ref<AdvancedConfig>({
   f0_smooth_window: 5,
   vsqx_pitch_smooth_window: 5,
   f0_floor: 35,
-  f0_ceil: 2100
+  f0_ceil: 2100,
+  fill_short_rests: false,
+  fill_short_rests_max_length: '32'
 })
 
 const processing = ref(false)
@@ -2606,6 +2676,33 @@ const checkingStatus = ref(false)
 const downloadingLangs = ref<string[]>([])
 const downloadingRmvpe = ref<boolean>(false)
 const downloadingProject = ref(false)
+
+// 处理耗时改用前端墙钟计时：从用户点击"开始处理"那一刻算起，到收到
+// 最终结果为止——覆盖后端 result.processing_time（后端计时起点在
+// pipeline 函数体内部，不含 HTTP 提交/排队等待，也不含音高提取之前
+// 各阶段的耗时，与用户实际等待的时间感受不完全一致）。
+// clientElapsedMs 处理过程中每秒刷新一次，用于进度区域的实时显示。
+const clientStartTime = ref(0)
+const clientElapsedMs = ref(0)
+let clientElapsedTimer: number | null = null
+
+const startClientTimer = () => {
+  clientStartTime.value = Date.now()
+  clientElapsedMs.value = 0
+  if (clientElapsedTimer !== null) window.clearInterval(clientElapsedTimer)
+  clientElapsedTimer = window.setInterval(() => {
+    clientElapsedMs.value = Date.now() - clientStartTime.value
+  }, 1000)
+}
+
+const stopClientTimer = (): number => {
+  if (clientElapsedTimer !== null) {
+    window.clearInterval(clientElapsedTimer)
+    clientElapsedTimer = null
+  }
+  clientElapsedMs.value = clientStartTime.value ? Date.now() - clientStartTime.value : 0
+  return clientElapsedMs.value
+}
 
 const systemStatus = ref<SystemStatus>({
   mfa: {
@@ -3137,6 +3234,22 @@ const fileToBase64 = (file: File): Promise<string> => new Promise((resolve, reje
   reader.readAsDataURL(file)
 })
 
+// 与后端 app.py 的 _tts_preview_take() 里 expected 字典的 key/取值方式
+// 逐一对应（text/engine/voice/rate/volume/pitch/language/
+// qwen3_tts_options_json）。生成预览成功时用它存一份快照，提交前再用
+// 它算一份"当前值"去比对，两处都从这一个函数取值，避免各写一遍导致
+// 字段顺序/格式不小心对不上。
+const buildTtsReuseCompareParams = async (): Promise<Record<string, string>> => ({
+  text: (formData.value.text || '').trim(),
+  engine: ttsConfig.value.engine,
+  voice: ttsConfig.value.voice,
+  rate: `${ttsConfig.value.rateNum >= 0 ? '+' : ''}${ttsConfig.value.rateNum}%`,
+  volume: `${ttsConfig.value.volumeNum >= 0 ? '+' : ''}${ttsConfig.value.volumeNum}%`,
+  pitch: `${ttsConfig.value.pitchNum >= 0 ? '+' : ''}${ttsConfig.value.pitchNum}Hz`,
+  language: formData.value.language,
+  qwen3_tts_options_json: JSON.stringify((await buildQwen3TtsOptionsForPreview()) || {}),
+})
+
 const runSegmentPreview = async () => {
   if (inputMode.value !== 'tts') return
   const text = (formData.value.text || '').trim()
@@ -3144,6 +3257,7 @@ const runSegmentPreview = async () => {
     clearPreviewJobPolling()
     segmentPreview.value = {
       loading: false, audioUrl: '', previewId: '', sentenceCount: 0, warnings: [], error: '', progress: null,
+      snapshotParams: null,
     }
     return
   }
@@ -3177,6 +3291,7 @@ const runSegmentPreview = async () => {
       segmentPreview.value = {
         loading: false, audioUrl: '', previewId: '', sentenceCount: 0,
         warnings: [], error: data.error || t('processor.ttsSegmentPreviewFailed'), progress: null,
+        snapshotParams: null,
       }
       return
     }
@@ -3192,12 +3307,16 @@ const runSegmentPreview = async () => {
       segmentPreview.value = {
         loading: false, audioUrl: '', previewId: '', sentenceCount: 0,
         warnings: [], error: (result && result.error) || t('processor.ttsSegmentPreviewFailed'), progress: null,
+        snapshotParams: null,
       }
       return
     }
 
     if (segmentPreview.value.audioUrl) URL.revokeObjectURL(segmentPreview.value.audioUrl)
     const blob = await (await fetch(`data:audio/wav;base64,${result.audio_base64}`)).blob()
+    // 预览成功那一刻的参数快照——之后"开始处理"提交前会拿当前参数和
+    // 这份快照逐字段比对，任一字段不同就必须先弹窗询问用户。
+    const snapshotParams = await buildTtsReuseCompareParams()
     segmentPreview.value = {
       loading: false,
       audioUrl: URL.createObjectURL(blob),
@@ -3206,12 +3325,14 @@ const runSegmentPreview = async () => {
       warnings: result.warnings || [],
       error: '',
       progress: null,
+      snapshotParams,
     }
   } catch (e: any) {
     if (mySeq !== segmentPreviewRequestSeq) return
     segmentPreview.value = {
       loading: false, audioUrl: '', previewId: '', sentenceCount: 0,
       warnings: [], error: e?.message || String(e), progress: null,
+      snapshotParams: null,
     }
   } finally {
     clearPreviewJobPolling()
@@ -3224,13 +3345,19 @@ const runSegmentPreview = async () => {
 //     跟读对齐（等同于点击"开始处理"，会带上仍然有效的 previewId 给
 //     后端复用）。真正想要换一条新的预览音频，需要点旁边单独的"重新
 //     生成"小图标按钮（runSegmentPreview），不会被这里误触。
-// 文本 / 引擎 / 音色 / 语速·音调·音量 / 语种任一变化都会让已生成的预览
-// 音频与当前输入不再对应——清空 previewId 让"开始处理"退回完整流程，
-// 而不是悄悄拿旧音频去对齐新文本。注意：这里只清空 previewId 状态，
-// 不会自动重新生成预览（生成预览仍然只能靠用户手动点按钮触发）。
+// 引擎 / 音色 / 语速·音调·音量 / 语种 / Qwen3-TTS 选项任一变化都会让
+// 已生成的预览音频与当前输入不再对应——立即清空 previewId 让"开始
+// 处理"退回完整流程，而不是悄悄拿旧音频去对齐新参数。
+//
+// 注意：这里的监听列表故意不包含 formData.value.text——文本变化不在
+// 这里静默清空 previewId，而是留给 processAudio() 提交前的确认弹窗
+// 处理（用户可能只是想微调措辞，仍想复用原有预览音频的语气/停顿去
+// 对齐，需要弹窗询问是/否/取消，而不是像其它字段一样一变化就直接
+// 作废）。若这里也监听 text，会在用户打字的瞬间就把 previewId 清空，
+// 导致提交时永远读不到"预览时的文本快照"，弹窗判断也就永远不会触发。
 watch(
   () => [
-    formData.value.text, formData.value.language, ttsConfig.value.engine, ttsConfig.value.voice,
+    formData.value.language, ttsConfig.value.engine, ttsConfig.value.voice,
     ttsConfig.value.rateNum, ttsConfig.value.pitchNum, ttsConfig.value.volumeNum,
     qwen3TtsMode.value, qwen3TtsSize.value, qwen3TtsInstruct.value, qwen3TtsRefText.value,
     qwen3TtsXVectorOnly.value, qwen3TtsRefAudioFile.value, qwen3TtsRefAudioPath.value,
@@ -3238,6 +3365,7 @@ watch(
   () => {
     if (inputMode.value === 'tts' && segmentPreview.value.previewId) {
       segmentPreview.value.previewId = ''
+      segmentPreview.value.snapshotParams = null
     }
   },
 )
@@ -3504,18 +3632,82 @@ const clearJobPolling = () => {
   }
 }
 
-const resetProcessingSteps = () => {
+const resetProcessingSteps = (withTts = false) => {
   const stageLabel = alignerBackendLabel.value
-  processingDetails.value = [
-    { stage: `1. ${stageLabel}`, status: '等待', message: t('processor.stagePrepareAlign') },
-    { stage: t('processor.stageF0'), status: '等待', message: t('processor.stageExtractF0') },
-    { stage: t('processor.stageProject'), status: '等待', message: t('processor.stageGenerateProject') }
-  ]
+  const alignRow = { stage: `${withTts ? '2' : '1'}. ${stageLabel}`, status: '等待', message: t('processor.stagePrepareAlign') }
+  const f0Row = { stage: t('processor.stageF0'), status: '等待', message: t('processor.stageExtractF0') }
+  const projectRow = { stage: t('processor.stageProject'), status: '等待', message: t('processor.stageGenerateProject') }
+  processingDetails.value = withTts
+    ? [{ stage: `1. ${t('processor.stageTts')}`, status: '等待', message: t('processor.ttsSynthesizing') }, alignRow, f0Row, projectRow]
+    : [alignRow, f0Row, projectRow]
 }
 
 const updateProcessingStep = (index: number, status: string, message: string) => {
   if (!processingDetails.value[index]) return
   processingDetails.value[index] = { ...processingDetails.value[index], status, message }
+}
+
+// 权重估算：单文件模式下对齐通常最耗时，F0/工程生成较快；含 TTS 合成时
+// 再从对齐的权重里切一块出来给合成阶段。仅用于让进度条在真实阶段边界
+// 之间平滑过渡，不代表精确剩余时间。
+const STAGE_WEIGHTS_NO_TTS: Record<string, number> = { align: 0.65, f0: 0.2, project: 0.15 }
+const STAGE_WEIGHTS_WITH_TTS: Record<string, number> = { tts: 0.2, align: 0.5, f0: 0.18, project: 0.12 }
+
+// 根据后端轮询回来的 job 对象（含 stage / stage_status / progress /
+// tts_progress / f0_progress）驱动 progressPercent 与 processingDetails
+// 步骤列表的实时展示。withTts 决定用 4 段权重表还是 3 段权重表，
+// stepOffset 是 TTS 行占用 index 0 时，align/f0/project 三行的起始
+// 下标偏移（withTts=true 时为 1，否则为 0）。
+const driveStageProgress = (job: any, withTts: boolean) => {
+  const weights = withTts ? STAGE_WEIGHTS_WITH_TTS : STAGE_WEIGHTS_NO_TTS
+  const offset = withTts ? 1 : 0
+  const stage: string = job?.stage || ''
+  const stageStatus: string = job?.stage_status || ''
+
+  const cumBefore = (upto: string): number => {
+    const order = withTts ? ['tts', 'align', 'f0', 'project'] : ['align', 'f0', 'project']
+    let sum = 0
+    for (const s of order) {
+      if (s === upto) break
+      sum += weights[s] || 0
+    }
+    return sum
+  }
+
+  if (withTts && stage === 'tts') {
+    updateProcessingStep(0, t('processor.statusProcessing'), t('processor.ttsSynthesizing'))
+    let within = 0
+    if (job.progress?.total) within = (job.progress.done / job.progress.total) * weights.tts
+    progressPercent.value = Math.round((cumBefore('tts') + within) * 100)
+  } else if (stage === 'align') {
+    if (withTts && stageStatus === 'start') updateProcessingStep(0, t('processor.statusDone'), t('processor.ttsSynthesizeDone'))
+    updateProcessingStep(offset, t('processor.statusProcessing'), t('processor.stagePrepareAlign'))
+    let within = 0
+    if (stageStatus === 'done') {
+      within = weights.align
+      updateProcessingStep(offset, t('processor.statusDone'), t('processor.stagePrepareAlign'))
+    } else if (job.progress?.total) {
+      within = (job.progress.done / job.progress.total) * weights.align
+    }
+    progressPercent.value = Math.round((cumBefore('align') + within) * 100)
+  } else if (stage === 'f0') {
+    const label = job.f0_progress?.track_title
+      ? `${t('processor.stageExtractF0')} (${job.f0_progress.track_title} ${job.f0_progress.done}/${job.f0_progress.total})`
+      : t('processor.stageExtractF0')
+    updateProcessingStep(offset + 1, t('processor.statusProcessing'), label)
+    let within = 0
+    if (stageStatus === 'done') {
+      within = weights.f0
+      updateProcessingStep(offset + 1, t('processor.statusDone'), t('processor.stageExtractF0'))
+    } else if (job.f0_progress?.total) {
+      within = (job.f0_progress.done / job.f0_progress.total) * weights.f0
+    }
+    progressPercent.value = Math.round((cumBefore('f0') + within) * 100)
+  } else if (stage === 'project') {
+    updateProcessingStep(offset + 1, t('processor.statusDone'), t('processor.stageExtractF0'))
+    updateProcessingStep(offset + 2, t('processor.statusProcessing'), t('processor.stageGenerateProject'))
+    progressPercent.value = Math.round(cumBefore('project') * 100)
+  }
 }
 
 const extractProjectPath = (payload: any): string => {
@@ -3570,8 +3762,12 @@ class JobCancelledError extends Error {
   }
 }
 
-// 异步任务轮询（通用版，不含模式相关的步骤更新）
-const waitForJobFinished = (jobId: string): Promise<any> => {
+// 异步任务轮询（通用版，不含模式相关的步骤更新）。onStage 可选：每次
+// 轮询到 job 后都会调用一次（包括仍在 queued/running 时），把整个
+// job 对象透传出去，供调用方按 job.stage / job.stage_status /
+// job.progress / job.tts_progress / job.f0_progress 实时驱动进度条和
+// 步骤列表，而不必等到 resolve 才知道处理到哪一步了。
+const waitForJobFinished = (jobId: string, onStage?: (job: any) => void): Promise<any> => {
   clearJobPolling()
   currentJobId.value = jobId
 
@@ -3586,6 +3782,9 @@ const waitForJobFinished = (jobId: string): Promise<any> => {
         }
 
         const job = data.job || {}
+        if (onStage) {
+          try { onStage(job) } catch { /* 步骤展示回调本身不应该打断轮询 */ }
+        }
 
         if (job.status === 'done') {
           resolve(job.result || job)
@@ -3784,18 +3983,82 @@ const processAudio = async () => {
       return
     }
 
+    // 提交前的"预览复用"确认：
+    //   - 若"其它字段"（引擎/音色/语速/音调/音量/语种/Qwen3 选项）与生成
+    //     预览时的快照不一致 → 静默复用预览=否，不弹窗（这些字段一变化
+    //     就直接判定预览已经对不上，没有"仍然复用"的意义；正常情况下
+    //     上面的 watch 已经处理过了，这里是提交前最后一道保险）。
+    //   - 若只有 text 与快照不一致（其它字段都相同）→ 必须弹窗询问用户
+    //     三选一：
+    //       是   → 复用预览=是（沿用这份预览音频去对齐，忽略文本已变化）
+    //       否   → 复用预览=否（退回"先合成再对齐"的完整流程）
+    //       取消 → 中止本次提交，什么都不做
+    if (segmentPreview.value.previewId && segmentPreview.value.snapshotParams) {
+      const current = await buildTtsReuseCompareParams()
+      const snapshot = segmentPreview.value.snapshotParams
+      const otherFieldsMismatched = Object.keys(snapshot).some(
+        (key) => key !== 'text' && snapshot[key] !== (current as Record<string, string>)[key],
+      )
+      if (otherFieldsMismatched) {
+        // 其它字段已变化：静默作废，不弹窗。
+        segmentPreview.value.previewId = ''
+        segmentPreview.value.snapshotParams = null
+      } else if (snapshot.text !== current.text) {
+        let action: 'confirm' | 'cancel' | 'close'
+        try {
+          action = await new Promise<'confirm' | 'cancel' | 'close'>((resolve, reject) => {
+            ElMessageBox.confirm(
+              t('processor.ttsPreviewMismatchBody'),
+              t('processor.ttsPreviewMismatchTitle'),
+              {
+                type: 'warning',
+                distinguishCancelAndClose: true,
+                showClose: true,
+                closeOnClickModal: false,
+                closeOnPressEscape: false,
+                confirmButtonText: t('processor.ttsPreviewMismatchReuse'),
+                cancelButtonText: t('processor.ttsPreviewMismatchRegenerate'),
+              },
+            ).then(() => resolve('confirm')).catch((reason) => {
+              if (reason === 'cancel' || reason === 'close') resolve(reason)
+              else reject(reason)
+            })
+          })
+        } catch {
+          return
+        }
+        if (action === 'close') {
+          // 取消：中止本次提交，不做任何处理。
+          return
+        }
+        if (action === 'cancel') {
+          // 否：不复用旧预览，清空 previewId 让后端走完整合成+对齐流程。
+          segmentPreview.value.previewId = ''
+          segmentPreview.value.snapshotParams = null
+        }
+        // 是：什么都不做，继续往下走，previewId 原样带给后端复用。
+      }
+    }
+
     clearJobPolling()
     processing.value = true
     progressPercent.value = 0
     error.value = ''
     result.value = null
     currentJobId.value = ''
-    resetProcessingSteps()
+    startClientTimer()
+    const isFullMode = processingMode.value === 'full'
+    resetProcessingSteps(true)
     updateProcessingStep(0, t('processor.statusProcessing'), t('processor.ttsSynthesizing'))
-    updateProcessingStep(1, t('processor.statusWaiting'), t('processor.stageExtractF0'))
-    updateProcessingStep(2, t('processor.statusWaiting'), t('processor.projectModeWaitProject'))
-
-    let progressTimer: number | null = null
+    if (isFullMode) {
+      updateProcessingStep(1, t('processor.statusWaiting'), t('processor.stagePrepareAlign'))
+      updateProcessingStep(2, t('processor.statusWaiting'), t('processor.stageExtractF0'))
+      updateProcessingStep(3, t('processor.statusWaiting'), t('processor.projectModeWaitProject'))
+    } else {
+      updateProcessingStep(1, t('processor.statusWaiting'), t('processor.stagePrepareAlign'))
+      updateProcessingStep(2, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
+      updateProcessingStep(3, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
+    }
 
     try {
       const formDataObj = new FormData()
@@ -3860,15 +4123,13 @@ const processAudio = async () => {
         formDataObj.append('precision', advancedConfig.value.precision)
         formDataObj.append('f0_floor', advancedConfig.value.f0_floor.toString())
         formDataObj.append('f0_ceil', advancedConfig.value.f0_ceil.toString())
+        formDataObj.append('fill_short_rests', advancedConfig.value.fill_short_rests.toString())
+        formDataObj.append('fill_short_rests_max_length', advancedConfig.value.fill_short_rests_max_length)
         formDataObj.append('auto_note_pitch', advancedConfig.value.auto_note_pitch.toString())
         formDataObj.append('export_pitch_line', advancedConfig.value.export_pitch_line.toString())
         formDataObj.append('word_phoneme_map', wordPhonemeMapEffective.value.toString())
         formDataObj.append('dict_source', dictSource.value)
       }
-
-      progressTimer = window.setInterval(() => {
-        if (progressPercent.value < 30) progressPercent.value += 3
-      }, 400)
 
       const res = await fetch('/api/tts/process', { method: 'POST', body: formDataObj })
       const data = await res.json()
@@ -3881,32 +4142,34 @@ const processAudio = async () => {
       // 提交成功后就必须重新生成。previewId 真正失效的时机交给下面的
       // watch（输入变化）以及用户主动点击"生成预览"按钮时处理。
 
-      if (progressTimer !== null) { window.clearInterval(progressTimer); progressTimer = null }
-      progressPercent.value = 35
-
-      const finalPayload = await waitForJobFinished(data.job_id)
+      const finalPayload = await waitForJobFinished(data.job_id, (job) => driveStageProgress(job, true))
       const normalized = normalizeResult(finalPayload)
 
       if (processingMode.value === 'full') {
         if (!normalized.projectPath) throw new Error(t('processor.projectMissing'))
         updateProcessingStep(0, t('processor.statusDone'), t('processor.ttsSynthesizeDone'))
-        updateProcessingStep(1, t('processor.statusDone'), t('processor.projectModeF0Done'))
-        updateProcessingStep(2, t('processor.statusDone'), `${t('processor.projectFile')}: ${getFileName(normalized.projectPath)}`)
+        updateProcessingStep(1, t('processor.statusDone'), t('processor.stagePrepareAlign'))
+        updateProcessingStep(2, t('processor.statusDone'), t('processor.projectModeF0Done'))
+        updateProcessingStep(3, t('processor.statusDone'), `${t('processor.projectFile')}: ${getFileName(normalized.projectPath)}`)
       } else {
         if (!normalized.labContent) throw new Error(t('processor.labEmpty'))
         const segCount = countLabSegments(normalized.labContent)
-        updateProcessingStep(0, t('processor.statusDone'), `${segCount} ${t('processor.segmentCount')}`)
-        updateProcessingStep(1, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
+        updateProcessingStep(0, t('processor.statusDone'), t('processor.ttsSynthesizeDone'))
+        updateProcessingStep(1, t('processor.statusDone'), `${segCount} ${t('processor.segmentCount')}`)
         updateProcessingStep(2, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
+        updateProcessingStep(3, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
       }
 
+      // 处理耗时用前端墙钟计时覆盖后端自己算的 processing_time——语义
+      // 更符合用户对"从点击开始处理到完成，一共花了多久"的预期。
+      normalized.processingTime = stopClientTimer()
       result.value = normalized
       progressPercent.value = 100
       ElMessage.success(`✅ ${t('processor.success')}`)
     } catch (e: any) {
       handleJobError(e)
     } finally {
-      if (progressTimer !== null) window.clearInterval(progressTimer)
+      stopClientTimer()
       clearJobPolling()
       processing.value = false
     }
@@ -3937,12 +4200,11 @@ const processAudio = async () => {
     error.value = ''
     result.value = null
     currentJobId.value = ''
-    resetProcessingSteps()
+    startClientTimer()
+    resetProcessingSteps(false)
     updateProcessingStep(0, t('processor.statusProcessing'), `${alignerBackendLabel.value} ${t('processor.processing')}...`)
     updateProcessingStep(1, t('processor.statusWaiting'), t('processor.stageExtractF0'))
     updateProcessingStep(2, t('processor.statusWaiting'), t('processor.projectModeWaitProject'))
-
-    let progressTimer: number | null = null
 
     try {
       const formDataObj = new FormData()
@@ -3972,24 +4234,19 @@ const processAudio = async () => {
         formDataObj.append('precision', advancedConfig.value.precision)
         formDataObj.append('f0_floor', advancedConfig.value.f0_floor.toString())
         formDataObj.append('f0_ceil', advancedConfig.value.f0_ceil.toString())
+        formDataObj.append('fill_short_rests', advancedConfig.value.fill_short_rests.toString())
+        formDataObj.append('fill_short_rests_max_length', advancedConfig.value.fill_short_rests_max_length)
         formDataObj.append('auto_note_pitch', advancedConfig.value.auto_note_pitch.toString())
         formDataObj.append('export_pitch_line', advancedConfig.value.export_pitch_line.toString())
         formDataObj.append('word_phoneme_map', wordPhonemeMapEffective.value.toString())
         formDataObj.append('dict_source', dictSource.value)
       }
 
-      progressTimer = window.setInterval(() => {
-        if (progressPercent.value < 30) progressPercent.value += 3
-      }, 400)
-
       const res = await fetch('/api/subtitle-import/align', { method: 'POST', body: formDataObj })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || t('processor.submitFailed'))
 
-      if (progressTimer !== null) { window.clearInterval(progressTimer); progressTimer = null }
-      progressPercent.value = 35
-
-      const finalPayload = await waitForJobFinished(data.job_id)
+      const finalPayload = await waitForJobFinished(data.job_id, (job) => driveStageProgress(job, false))
       const normalized = normalizeResult(finalPayload)
 
       if (processingMode.value === 'full') {
@@ -4005,13 +4262,14 @@ const processAudio = async () => {
         updateProcessingStep(2, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
       }
 
+      normalized.processingTime = stopClientTimer()
       result.value = normalized
       progressPercent.value = 100
       ElMessage.success(`✅ ${t('processor.success')}`)
     } catch (e: any) {
       handleJobError(e)
     } finally {
-      if (progressTimer !== null) window.clearInterval(progressTimer)
+      stopClientTimer()
       clearJobPolling()
       processing.value = false
     }
@@ -4045,12 +4303,11 @@ if (processingMode.value === 'project-only') {
   error.value = ''
   result.value = null
   currentJobId.value = ''
-  resetProcessingSteps()
+  startClientTimer()
+  resetProcessingSteps(false)
   updateProcessingStep(0, t('processor.statusSkipped'), t('processor.projectModeSkipAlign'))
   updateProcessingStep(1, t('processor.statusProcessing'), t('processor.projectModeProcessing'))
   updateProcessingStep(2, t('processor.statusWaiting'), t('processor.projectModeWaitProject'))
-
-  let progressTimer: number | null = null
 
   try {
     const formDataObj = new FormData()
@@ -4078,6 +4335,8 @@ if (processingMode.value === 'project-only') {
     formDataObj.append('precision', advancedConfig.value.precision)
     formDataObj.append('f0_floor', advancedConfig.value.f0_floor.toString())
     formDataObj.append('f0_ceil', advancedConfig.value.f0_ceil.toString())
+    formDataObj.append('fill_short_rests', advancedConfig.value.fill_short_rests.toString())
+    formDataObj.append('fill_short_rests_max_length', advancedConfig.value.fill_short_rests_max_length)
     formDataObj.append('auto_note_pitch', advancedConfig.value.auto_note_pitch.toString())
     formDataObj.append('export_pitch_line', advancedConfig.value.export_pitch_line.toString())
     // word_phoneme_map（英语单词→音素映射）是"自动可见性条件 + 用户手动
@@ -4096,10 +4355,6 @@ if (processingMode.value === 'project-only') {
       formDataObj.append('midi_file', notationFile)
     }
 
-    progressTimer = window.setInterval(() => {
-      if (progressPercent.value < 30) progressPercent.value += 3
-    }, 400)
-
     const res = await fetch('/api/pipeline/project-only', {
       method: 'POST',
       body: formDataObj,
@@ -4109,14 +4364,12 @@ if (processingMode.value === 'project-only') {
     if (!res.ok) throw new Error(data.error || t('processor.submitFailed'))
 
     if (data.job_id) {
-      if (progressTimer !== null) { window.clearInterval(progressTimer); progressTimer = null }
-      progressPercent.value = 35
-
-      const finalPayload = await waitForJobFinished(data.job_id)
+      const finalPayload = await waitForJobFinished(data.job_id, (job) => driveStageProgress(job, false))
       const normalized = normalizeResult(finalPayload)
 
       if (!normalized.projectPath) throw new Error(t('processor.projectMissing'))
 
+      normalized.processingTime = stopClientTimer()
       result.value = normalized
       progressPercent.value = 100
       updateProcessingStep(0, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
@@ -4128,6 +4381,7 @@ if (processingMode.value === 'project-only') {
 
     if (!data.success) throw new Error(data.error || t('processor.submitFailed'))
     const normalized = normalizeResult(data)
+    normalized.processingTime = stopClientTimer()
     result.value = normalized
     progressPercent.value = 100
     updateProcessingStep(0, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
@@ -4137,7 +4391,7 @@ if (processingMode.value === 'project-only') {
   } catch (e: any) {
     handleJobError(e)
   } finally {
-    if (progressTimer !== null) window.clearInterval(progressTimer)
+    stopClientTimer()
     clearJobPolling()
     processing.value = false
   }
@@ -4171,9 +4425,8 @@ if (processingMode.value === 'project-only') {
   error.value = ''
   result.value = null
   currentJobId.value = ''
-  resetProcessingSteps()
-
-  let progressTimer: number | null = null
+  startClientTimer()
+  resetProcessingSteps(false)
 
   try {
     const formDataObj = new FormData()
@@ -4207,6 +4460,8 @@ if (processingMode.value === 'project-only') {
       formDataObj.append('precision', advancedConfig.value.precision)
       formDataObj.append('f0_floor', advancedConfig.value.f0_floor.toString())
       formDataObj.append('f0_ceil', advancedConfig.value.f0_ceil.toString())
+      formDataObj.append('fill_short_rests', advancedConfig.value.fill_short_rests.toString())
+      formDataObj.append('fill_short_rests_max_length', advancedConfig.value.fill_short_rests_max_length)
       formDataObj.append('auto_note_pitch', advancedConfig.value.auto_note_pitch.toString())
       formDataObj.append('export_pitch_line', advancedConfig.value.export_pitch_line.toString())
       // 同上：word_phoneme_map（英语单词→音素映射）为 wordPhonemeMapEffective
@@ -4217,10 +4472,6 @@ if (processingMode.value === 'project-only') {
       formDataObj.append('dict_source', dictSource.value)
     }
 
-    progressTimer = window.setInterval(() => {
-      if (progressPercent.value < 30) progressPercent.value += 3
-    }, 400)
-
     const endpoint = processingMode.value === 'full' ? '/api/pipeline/full' : '/api/pipeline/mfa-only'
     const res = await fetch(endpoint, { method: 'POST', body: formDataObj })
     const data = await res.json()
@@ -4229,20 +4480,27 @@ if (processingMode.value === 'project-only') {
 
     // full 和 mfa-only 均走异步轮询（后端返回 job_id）
     if (data.job_id) {
-      if (progressTimer !== null) { window.clearInterval(progressTimer); progressTimer = null }
-      progressPercent.value = 35
-
       if (processingMode.value === 'mfa-only') {
         updateProcessingStep(0, t('processor.statusProcessing'), `${alignerBackendLabel.value} ${t('processor.processing')}...`)
-        updateProcessingStep(1, t('processor.statusWaiting'), t('processor.projectModeNoAlign'))
-        updateProcessingStep(2, t('processor.statusWaiting'), t('processor.projectModeNoAlign'))
+        updateProcessingStep(1, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
+        updateProcessingStep(2, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
       } else {
         updateProcessingStep(0, t('processor.statusProcessing'), `${alignerBackendLabel.value} ${t('processor.projectModeProcessing')}`)
         updateProcessingStep(1, t('processor.statusWaiting'), t('processor.stageExtractF0'))
         updateProcessingStep(2, t('processor.statusWaiting'), t('processor.projectModeWaitProject'))
       }
 
-      const finalPayload = await waitForJobFinished(data.job_id)
+      const finalPayload = await waitForJobFinished(data.job_id, (job) => {
+        // mfa-only 模式没有 f0/project 阶段，只有 align——直接用 progress
+        // 驱动百分比即可，不需要 driveStageProgress 的多阶段加权。
+        if (processingMode.value === 'mfa-only') {
+          if (job.progress?.total) {
+            progressPercent.value = Math.round((job.progress.done / job.progress.total) * 100)
+          }
+        } else {
+          driveStageProgress(job, false)
+        }
+      })
       const normalized = normalizeResult(finalPayload)
 
       if (processingMode.value === 'full') {
@@ -4259,6 +4517,7 @@ if (processingMode.value === 'project-only') {
         updateProcessingStep(2, t('processor.statusSkipped'), t('processor.projectModeNoAlign'))
       }
 
+      normalized.processingTime = stopClientTimer()
       result.value = normalized
       progressPercent.value = 100
       ElMessage.success(`✅ ${t('processor.success')}`)
@@ -4272,6 +4531,7 @@ if (processingMode.value === 'project-only') {
         updateProcessingStep(0, t('processor.statusDone'), `${t('processor.backendMfa')} ${t('processor.statusDone')}`)
         updateProcessingStep(1, t('processor.statusDone'), t('processor.projectModeF0Done'))
         updateProcessingStep(2, t('processor.statusDone'), `${t('processor.projectFile')}: ${getFileName(normalized.projectPath)}`)
+        normalized.processingTime = stopClientTimer()
         result.value = normalized
         progressPercent.value = 100
         ElMessage.success(`✅ ${t('processor.success')}`)
@@ -4285,6 +4545,7 @@ if (processingMode.value === 'project-only') {
     const normalized = normalizeResult(data)
     if (!normalized.labContent) throw new Error(t('processor.labEmpty'))
     const segCount = countLabSegments(normalized.labContent)
+    normalized.processingTime = stopClientTimer()
     result.value = normalized
     progressPercent.value = 100
     updateProcessingStep(0, t('processor.statusDone'), `${segCount} ${t('processor.segmentCount')}`)
@@ -4294,7 +4555,7 @@ if (processingMode.value === 'project-only') {
   } catch (e: any) {
     handleJobError(e)
   } finally {
-    if (progressTimer !== null) window.clearInterval(progressTimer)
+    stopClientTimer()
     clearJobPolling()
     processing.value = false
   }
@@ -4562,6 +4823,12 @@ const newProcess = () => {
 
 .progress-bar {
   margin-top: 15px;
+}
+
+.stage-caption {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 .disabled-text {

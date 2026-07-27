@@ -53,12 +53,24 @@
           </ol>
         </el-tab-pane>
 
+        <el-tab-pane :label="t('help.tutorialInputModes')" name="inputModes">
+          <ol class="step-list">
+            <li>{{ t('help.tutorialInputModesStep1') }}</li>
+            <li>{{ t('help.tutorialInputModesStep2') }}</li>
+            <li>{{ t('help.tutorialInputModesStep3') }}</li>
+            <li>{{ t('help.tutorialInputModesStep4') }}</li>
+            <li>{{ t('help.tutorialInputModesStep5') }}</li>
+            <li>{{ t('help.tutorialInputModesStep6') }}</li>
+          </ol>
+        </el-tab-pane>
+
         <el-tab-pane :label="t('help.tutorialDialogue')" name="dialogue">
           <ol class="step-list">
             <li>{{ t('help.tutorialDialogueStep1') }}</li>
             <li>{{ t('help.tutorialDialogueStep2') }}</li>
             <li>{{ t('help.tutorialDialogueStep3') }}</li>
             <li>{{ t('help.tutorialDialogueStep4') }}</li>
+            <li>{{ t('help.tutorialDialogueStep5') }}</li>
           </ol>
         </el-tab-pane>
 
@@ -67,6 +79,38 @@
             <li>{{ t('help.tutorialDictionaryStep1') }}</li>
             <li>{{ t('help.tutorialDictionaryStep2') }}</li>
             <li>{{ t('help.tutorialDictionaryStep3') }}</li>
+          </ol>
+        </el-tab-pane>
+
+        <el-tab-pane :label="t('help.tutorialSubtitleRecognizer')" name="subtitleRecognizer">
+          <ol class="step-list">
+            <li>{{ t('help.tutorialSubtitleRecognizerStep1') }}</li>
+            <li>{{ t('help.tutorialSubtitleRecognizerStep2') }}</li>
+            <li>{{ t('help.tutorialSubtitleRecognizerStep3') }}</li>
+            <li>{{ t('help.tutorialSubtitleRecognizerStep4') }}</li>
+            <li>{{ t('help.tutorialSubtitleRecognizerStep5') }}</li>
+            <li>{{ t('help.tutorialSubtitleRecognizerStep6') }}</li>
+          </ol>
+        </el-tab-pane>
+
+        <el-tab-pane :label="t('help.tutorialSubtitleEditor')" name="subtitleEditor">
+          <ol class="step-list">
+            <li>{{ t('help.tutorialSubtitleEditorStep1') }}</li>
+            <li>{{ t('help.tutorialSubtitleEditorStep2') }}</li>
+            <li>{{ t('help.tutorialSubtitleEditorStep3') }}</li>
+            <li>{{ t('help.tutorialSubtitleEditorStep4') }}</li>
+            <li>{{ t('help.tutorialSubtitleEditorStep5') }}</li>
+          </ol>
+        </el-tab-pane>
+
+        <el-tab-pane :label="t('help.tutorialEnglishG2P')" name="englishG2P">
+          <ol class="step-list">
+            <li>{{ t('help.tutorialEnglishG2PStep1') }}</li>
+            <li>{{ t('help.tutorialEnglishG2PStep2') }}</li>
+            <li>{{ t('help.tutorialEnglishG2PStep3') }}</li>
+            <li>{{ t('help.tutorialEnglishG2PStep4') }}</li>
+            <li>{{ t('help.tutorialEnglishG2PStep5') }}</li>
+            <li>{{ t('help.tutorialEnglishG2PStep6') }}</li>
           </ol>
         </el-tab-pane>
       </el-tabs>
@@ -133,7 +177,7 @@ const scrollTo = (id: string) => {
 }
 
 // FAQ 条目直接从 i18n 读取问答对，key 命名为 help.faqQ1 / help.faqA1 ...
-const FAQ_COUNT = 10
+const FAQ_COUNT = 16
 const faqItems = computed(() =>
   Array.from({ length: FAQ_COUNT }, (_, i) => ({
     q: t(`help.faqQ${i + 1}`),

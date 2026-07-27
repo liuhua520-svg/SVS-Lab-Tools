@@ -374,6 +374,19 @@
           <template #title>{{ item.text }}</template>
         </el-alert>
 
+        <el-divider />
+
+        <div class="section-heading">
+          <span>🧹 {{ t('settings.cacheSectionTitle') }}</span>
+        </div>
+        <p class="page-subtitle">{{ t('settings.cacheSectionSubtitle') }}</p>
+
+        <el-form-item>
+          <el-button type="danger" plain :loading="clearingCache" @click="clearWorkDirCache">
+            🗑️ {{ t('settings.clearCacheButton') }}
+          </el-button>
+        </el-form-item>
+
         <el-form-item style="margin-top: 20px">
           <el-button type="primary" size="large" :loading="saving" @click="save">
             💾 {{ t('settings.saveButton') }}
@@ -386,7 +399,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
@@ -730,6 +743,31 @@ const save = async () => {
     ElMessage.error(t('settings.saveFailed', { error: e?.message || String(e) }))
   } finally {
     saving.value = false
+  }
+}
+
+const clearingCache = ref(false)
+
+const clearWorkDirCache = async () => {
+  try {
+    await ElMessageBox.confirm(
+      t('settings.clearCacheConfirm'),
+      t('settings.clearCacheConfirmTitle'),
+      { type: 'warning', confirmButtonText: t('settings.clearCacheButton') }
+    )
+  } catch {
+    return
+  }
+  clearingCache.value = true
+  try {
+    const res = await fetch('/api/work-dir/clear', { method: 'POST' })
+    const data = await res.json()
+    if (!res.ok || !data.success) throw new Error(data.error || res.statusText)
+    ElMessage.success(data.message || t('settings.clearCacheSuccess'))
+  } catch (e: any) {
+    ElMessage.error(t('settings.clearCacheFailed', { error: e?.message || String(e) }))
+  } finally {
+    clearingCache.value = false
   }
 }
 
