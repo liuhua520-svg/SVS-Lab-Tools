@@ -84,10 +84,11 @@ NeMo / Qwen3-ASR / Qwen3-TTS 各自对 `transformers`、`packaging`、`torch` �
 torch/nemo 等重依赖，PyInstaller 打包体积小）：
 
 - 读取 `backend/settings/app_settings.json` 里的 `skip_start_qwen3_server` /
-  `skip_start_nemo_server` 开关，决定本次是否要拉起对应子进程（这两个只影响下次完整
-  启动，不影响正在运行的进程）；
+  `skip_start_nemo_server` / `skip_start_qwen3tts_server` 开关，决定本次是否要拉起
+  对应子进程（这些开关只影响下次完整启动，不影响正在运行的进程）；
 - 用 `subprocess.Popen` 以各自 `runtime/<env>/python.exe` 解释器分别拉起
-  `app.py`（`mfa_env`）、`qwen3_server.py`（`qwen3_env`）、`nemo_server.py`（`nemo_env`）；
+  `app.py`（`mfa_env`）、`qwen3_server.py`（`qwen3_env`）、`nemo_server.py`（`nemo_env`）、
+  `qwen3tts_server.py`（`qwen3tts_env`）**四个**服务；
 - 轮询 `/api/health` 直到主服务就绪（最多 30s 超时，超时也会继续开窗口，前端自行重试）；
 - 用 `pywebview` 起一个原生窗口加载 `http://127.0.0.1:5000`，`pystray` 提供系统托盘
   图标（"打开界面" / "退出所有服务"）；
@@ -95,10 +96,16 @@ torch/nemo 等重依赖，PyInstaller 打包体积小）：
   兜底清理"设置页点过重启"产生的孤儿进程（因为 `/restart` 路由是
   "关端口 → 开新进程 → 旧进程 `os._exit(0)`"，PID 会变）。
 
-> **发现的一个不一致点**：`launcher.py` 的 `SERVICES` 列表（第 131-135 行）里只登记了
-> `app` / `qwen3` / `nemo` 三个服务，**没有 `qwen3tts_server.py`**。也就是说打包后的
-> "一键启动"目前不会自动拉起 5003 端口的 Qwen3-TTS 服务，需要手动另开一个进程；这大概率
-> 是 Qwen3-TTS 功能后加入、`launcher.py` 尚未同步更新导致的遗漏，详见 [§20](#20-已知技术债与可改进点)。
+> **历史修复记录**：`launcher.py` 的 `SERVICES` 列表早期只登记了 `app`/`qwen3`/`nemo`
+> 三项，遗漏了 `qwen3tts_server.py`（打包后的"一键启动"曾经不会自动拉起 5003 端口的
+> Qwen3-TTS 服务，需要手动另开进程）。这个遗漏已经修复，现在四个服务由 `start_all()`
+> 统一编排，行为对齐。
+
+launcher.py 同时是 **CLI 一次性调用模式**的转发入口：检测到 `argv[1] == "cmd"`
+（`_is_cmd_invocation()`）时，完全跳过托盘/原生窗口/四个服务的常规启动流程，只把整条
+命令行转发给 `runtime/mfa_env/python.exe backend/app.py cmd ...` 子进程并透传其
+stdout/stderr/退出码——这条路径与 [§16](#16-命令行入口commandlinepy) 描述的
+`commandline.py` 是同一套机制的两端。
 
 ### 2.3 前后端关系
 
@@ -558,7 +565,7 @@ PyWORLD 调用放进独立子进程（`_f0_worker`），主进程只通过 `Queu
 | 字幕识别 | `/api/subtitle/upload`、`/api/subtitle/recognize`、`/api/subtitle/job/<id>`、`/api/subtitle/export`、`/api/subtitle/split_entry`、`/api/subtitle/embed`、`/api/subtitle/embed-video`、`/api/subtitle/cleanup` | 识别→编辑→导出→封装/压制 全链路 |
 | 字幕导入对齐 | `/api/subtitle-editor/import`、`/api/subtitle-import/split`、`/api/subtitle-import/slice/<sid>/<idx>`、`/api/subtitle-import/align`、`/api/subtitle-import/cleanup` | 字幕驱动的逐句对齐 |
 | 底层对齐 | `/api/align`、`/api/mfa/process` | 单次对齐调用（不经过 job 队列的同步接口） |
-| CLI 桥接 | `/api/cmd/exec` | 供前端触发命令行风格操作 |
+| CLI 桥接 | `/api/cmd/exec` | 与命令行 `cmd` 子命令一一对应的 HTTP 版本，供外部脚本/工具链以网络调用方式触发同一批操作（详见 §16） |
 | 静态资源 | `/`、`/<path:path>` | 前端 SPA 托管 |
 
 所有耗时任务（对齐/F0/导出）都遵循"POST 提交拿 `job_id` → GET 轮询进度 → 完成后从
@@ -570,10 +577,81 @@ PyWORLD 调用放进独立子进程（`_f0_worker`），主进程只通过 `Queu
 
 ## 16. 命令行入口（commandline.py）
 
-`commandline.py` 让 `app.py` 除了作为常驻 HTTP 服务被 `launcher.py`/`run.bat` 拉起，
-还能被直接以命令行方式单次调用、执行完即退出（`is_cmd_mode()` 探测启动参数决定走哪条
-路径）。提供 `_scan_dialogue_folder` / `_load_dialogue_manifest` 等批量处理文件夹的
-能力，以及 `CmdUI` 类做命令行下的进度反馈，适合脚本化/自动化场景，不依赖浏览器界面。
+> 完整的参数级用户手册见 [Docs/README_CLI.md](./README_CLI.md)；本节只梳理这条
+> 支线在架构上是怎么接进主服务的，不重复罗列每个子命令的全部参数。
+
+`commandline.py`（1,384 行）让 `app.py` 除了作为常驻 HTTP 服务被 `launcher.py`/
+`run.bat` 拉起，还能被直接以命令行方式单次调用、执行完即退出。它不是一套独立实现，
+而是**同一个 `AudioProcessingPipeline` 实例**的另一层调用入口——网页版
+（`/api/pipeline/*` 路由）、CLI（`commandline.py`）、以及供外部脚本调用的
+`/api/cmd/exec` 路由，三者最终都落到同一批 `pipeline.py`/`dictionary_manager.py`/
+`app_settings.py`/`subtitle_processor.py` 函数上，不存在"网页一套逻辑、命令行另一套
+逻辑、久而久之行为分叉"的问题。
+
+### 16.1 三层调用入口
+
+```
+启动器.exe cmd ...                          （打包后，终端里敲）
+        │  launcher.py: argv[1]=="cmd" 检测到，转发子进程（见 §2.2）
+        ▼
+runtime\mfa_env\python.exe backend\app.py cmd ...
+        │  app.py: __main__ 里 commandline.is_cmd_mode() 检测到，
+        │  不调用 main() 起 Flask 服务
+        ▼
+commandline.CmdUI(pipeline).run(sys.argv)   （真正的参数解析 + 调用 pipeline）
+
+
+python app.py cmd ...                       （开发环境，跳过 launcher.py 直接跑）
+        └─ 同样落到 CmdUI(pipeline).run(...)
+
+POST /api/cmd/exec                          （HTTP，服务常驻时，供外部脚本调用）
+        └─ app.py 路由内部把 JSON body 的 {"operation", "args"} 拼成 argv 列表，
+           落到 CmdUI(pipeline).run_args(argv)
+```
+
+命令行模式**只依赖 `mfa_env`**：`launcher.py` 转发时固定用这一个环境的 Python
+解释器，不会拉起 `qwen3_env`/`nemo_env`/`qwen3tts_env` 对应的三个微服务，需要用到
+Qwen3-ASR/NeMo-FA/Qwen3-TTS 时（例如 `--aligner-backend qwen3_asr`、`asr-subtitle`
+子命令、`dialogue-batch` 里的 Qwen3-TTS 跟读框），得由用户自己预先启动好对应服务
+（正常双击 `启动器.exe` 走界面模式会自动拉起全部四个）。
+
+### 16.2 子命令一览
+
+`is_cmd_mode()` 判断 `argv[1] == "cmd"`；`argv[2]` 是子命令名，`CmdUI` 支持 13 个
+（含别名）：
+
+| 子命令 | 对应能力 | 底层调用 |
+|---|---|---|
+| `mfa-only`（`lab`） | 仅标注提取 | `pipeline.process_mfa_only()` |
+| `f0-only`（`pitch`） | 仅音高提取，落盘 CSV | 直接调用底层 F0 提取函数（不经过 `pipeline.process_f0_only()`，见下方说明） |
+| `project-only`（`project`） | 仅生成工程文件 | `pipeline.process_project_only()` |
+| `full` | 标注+F0+工程文件一步到位 | `pipeline.process_full()` |
+| `subtitle`（`sub`） | 字幕驱动的逐句强制对齐 | `subtitle_import` 系列函数 |
+| `asr-subtitle`（`asr`/`subtitle-recognize`） | ASR 识别生成字幕 | `subtitle_processor.transcribe_to_subtitles()` + `export_subtitles()` |
+| `dialogue-batch`（`dialogue`） | 多框批量处理（含 TTS 跟读预处理） | `pipeline.process_dialogue_batch()`（TTS 框先经 `tts_processor.synthesize_and_align()` 回填） |
+| `dict-import`（`dict-load`）/`dict-list`/`dict-export`/`dict-edit` | 词典 CRUD | `dictionary_manager` 各函数 |
+| `settings-get`/`settings-set` | 全局设置读写 | `app_settings.load_settings()`/`save_settings()` |
+
+`f0-only` 是主线里唯一的例外：网页版 `pipeline.process_f0_only()` 只返回帧数/采样率
+（供前端"测试"按钮展示概览用，不落盘曲线），命令行如果照搬这个方法用户就拿不到任何
+产物，因此这个子命令改为直接调用同一份底层 F0 提取函数，算法与参数完全一致，只是
+额外导出一份 `time_sec,freq_hz` 的 CSV。
+
+### 16.3 与网页版共享的行为细节
+
+- 产物默认落在 `backend/work/`（与网页版任务产物同一目录，复用既有清理/调试机制），
+  `-o/--output` 只是"额外复制一份"到指定路径，不影响 `backend/work/` 里的原件；
+- `--json` 开关在正常进度提示之外，额外打印一行机器可读 JSON（`success`/`error`
+  加操作专属字段），供脚本化解析；退出码约定 `0` 成功 / `1` 运行时失败 /
+  `2` 参数错误；
+- 词典大小写规则、TTS 引擎可用性探测、对齐后端选择等均直接复用对应模块的既有函数，
+  不重新实现一遍。
+
+`/api/cmd/exec` 的请求体 `{"operation": ..., "args": {...}}` 里 `args` 的键名与命令
+行参数一一对应（去掉 `-`/`--` 前缀、连字符转下划线），文件路径类参数
+（`args.audio`/`args.lab`/`args.midi` 等）要求是**服务端本地已存在的路径**，不接收
+文件上传——需要浏览器直传文件的场景仍然走 `/api/pipeline/*` 系列接口，两组并存、
+互不替代。
 
 ---
 
