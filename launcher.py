@@ -5,12 +5,13 @@ launcher.py — Tsubaki 多文件 EXE 启动器
 用途
 ────
 把 backend/app.py（.mfa_env）、backend/qwen3_server.py（qwen3_env）、
-backend/nemo_server.py（nemo_env）三个跑在各自独立 Python 环境里的服务
-拉起来，本身常驻系统托盘，不显示自己的控制台窗口。
+backend/nemo_server.py（nemo_env）、backend/qwen3tts_server.py
+（qwen3tts_env）四个跑在各自独立 Python 环境里的服务拉起来，本身常驻
+系统托盘，不显示自己的控制台窗口。
 
 这个脚本刻意做得很"薄"：不 import torch / nemo / montreal_forced_aligner
 等任何重依赖，只负责进程管理，所以用 PyInstaller 打包出来体积很小、打包
-速度很快，和三个后端环境（各自几百 MB～几 GB）完全解耦。
+速度很快，和四个后端环境（各自几百 MB～几 GB）完全解耦。
 
 发布目录结构（本脚本假设的布局，与 app.py 里 FRONTEND_DIST 的相对路径
 约定保持一致）：
@@ -22,13 +23,15 @@ backend/nemo_server.py（nemo_env）三个跑在各自独立 Python 环境里的
     │   ├─ app.py
     │   ├─ qwen3_server.py
     │   ├─ nemo_server.py
+    │   ├─ qwen3tts_server.py
     │   └─ ...
     ├─ frontend/
     │   └─ dist/            ← `npm run build` 产物
     └─ runtime/
        ├─ mfa_env/          ← 便携版 conda 环境（建议用 conda-pack 生成）
        ├─ qwen3_env/
-       └─ nemo_env/
+       ├─ nemo_env/
+       └─ qwen3tts_env/
 
 打包命令（见同目录 build_launcher.bat）：
     pip install pyinstaller pystray pillow psutil pywebview pythonnet
@@ -45,7 +48,7 @@ webbrowser.open() 在系统默认浏览器里开标签页的做法。相应地�
     注入环境变量 SVS_SKIP_AUTO_BROWSER=1 来关掉这个自动打开——否则每次
     启动会同时弹出"原生窗口 + 浏览器标签页"两个界面。单独调试 app.py 时
     不设这个环境变量，行为不受影响。
-  - 点窗口右上角关闭按钮（X）就是彻底退出整个程序：会清理三个后端子进程
+  - 点窗口右上角关闭按钮（X）就是彻底退出整个程序：会清理四个后端子进程
     （连同设置页触发 /restart 后产生的孤儿进程）并停掉托盘图标，效果和
     点托盘菜单"退出所有服务"完全一样——两个入口共用同一份清理逻辑，
     互相触发也不会重复执行或报错。
@@ -91,8 +94,9 @@ mfa_env 里的一整套重依赖（MFA/torch/pyworld 等），不适合塞进这
 与本文件的 _is_cmd_invocation() 完全一致）。本脚本检测到 cmd 模式后，
 只做一件事：把整条命令行原样转发给
 `runtime/mfa_env/python.exe backend/app.py cmd ...` 子进程，透传它的
-stdout/stderr/退出码，不起托盘、不开原生窗口、不拉 qwen3/nemo 两个
-微服务。用法及完整参数见 backend/commandline.py 顶部说明，或运行
+stdout/stderr/退出码，不起托盘、不开原生窗口、不拉 qwen3/nemo/
+qwen3tts 三个微服务。用法及完整参数见 backend/commandline.py 顶部说明，
+或运行
 `启动器.exe cmd <operation> --help`。
 """
 from __future__ import annotations
@@ -142,20 +146,32 @@ LOG_PATH = APP_ROOT / "launcher.log"
 HOST = "127.0.0.1"
 MAIN_PORT = 5000
 
-# 三个后端服务：脚本名 + 各自独立 Python 环境的目录名（对应 runtime/ 下）+
+# 四个后端服务：脚本名 + 各自独立 Python 环境的目录名（对应 runtime/ 下）+
 # 可选的"跳过启动"设置项键名（对应 app_settings.py 里的 DEFAULT_SETTINGS）。
 # app.py 是主服务，没有跳过选项，永远启动。
+#
+# 【修复】qwen3tts（backend/qwen3tts_server.py，:5003，Qwen3-TTS 三模式
+# 语音合成）此前一直没有登记在这个列表里，导致打包发布后的"一键启动"
+# 不会自动拉起它，只有 qwen3_server.py / nemo_server.py 两个微服务被
+# 拉起来了——现在补上，行为与另外两个可选微服务完全对齐：
+# skip_key 沿用现有命名规律取 "skip_start_qwen3tts_server"；如果
+# app_settings.py 的 DEFAULT_SETTINGS 里暂时还没有这个字段也不影响
+# 现在能用——_load_startup_settings() 读不到该键时 dict.get(skip_key,
+# False) 按 False（不跳过）处理，所以默认会正常启动，等设置页后续补上
+# 对应开关（参考 qwen3/nemo 两项的做法）即可让用户按需关闭。
 SERVICES: List[Dict[str, Optional[str]]] = [
-    {"name": "app",   "script": "app.py",          "env": "mfa_env",   "skip_key": None},
-    {"name": "qwen3", "script": "qwen3_server.py", "env": "qwen3_env", "skip_key": "skip_start_qwen3_server"},
-    {"name": "nemo",  "script": "nemo_server.py",  "env": "nemo_env",  "skip_key": "skip_start_nemo_server"},
+    {"name": "app",      "script": "app.py",            "env": "mfa_env",      "skip_key": None},
+    {"name": "qwen3",    "script": "qwen3_server.py",    "env": "qwen3_env",    "skip_key": "skip_start_qwen3_server"},
+    {"name": "nemo",     "script": "nemo_server.py",     "env": "nemo_env",     "skip_key": "skip_start_nemo_server"},
+    {"name": "qwen3tts", "script": "qwen3tts_server.py", "env": "qwen3tts_env", "skip_key": "skip_start_qwen3tts_server"},
 ]
 
 # 命令行一次性调用模式（`启动器.exe cmd <operation> ...`）固定转发给
 # app.py（mfa_env）——commandline.py 的 CmdUI 就是挂在 app.py 这个进程
 # 里的（backend/commandline.py + backend/app.py 的 __main__ 分流逻辑），
-# 三个后端服务里只有它认识 "cmd" 这个子命令，qwen3_server.py /
-# nemo_server.py 是纯常驻 HTTP 微服务，没有对应的命令行入口。
+# 四个后端服务里只有它认识 "cmd" 这个子命令，qwen3_server.py /
+# nemo_server.py / qwen3tts_server.py 都是纯常驻 HTTP 微服务，没有对应
+# 的命令行入口。
 CMD_TRIGGER = "cmd"
 CMD_SERVICE = SERVICES[0]  # {"name": "app", "script": "app.py", "env": "mfa_env", ...}
 
@@ -232,7 +248,7 @@ def _is_cmd_invocation(argv=None) -> bool:
 def _run_cmd_mode(argv: List[str]) -> int:
     """
     `启动器.exe cmd <operation> ...` 命令行一次性调用模式：不起托盘、
-    不开 pywebview 原生窗口、不拉起 qwen3/nemo 两个微服务，只把整条
+    不开 pywebview 原生窗口、不拉起 qwen3/nemo/qwen3tts 三个微服务，只把整条
     命令行原样转发给 runtime/mfa_env/python.exe backend/app.py，等它
     跑完，把它的 stdout/stderr/退出码原样透传回来，然后本进程退出。
 
@@ -525,7 +541,7 @@ def main() -> None:
 if __name__ == "__main__":
     if _is_cmd_invocation():
         # 命令行一次性调用：转发给 backend/app.py（mfa_env）执行，不启动
-        # 托盘/原生窗口/qwen3/nemo 微服务，跑完就退出。用法例如:
+        # 托盘/原生窗口/qwen3/nemo/qwen3tts 微服务，跑完就退出。用法例如:
         #   Tsubaki启动器.exe cmd mfa-only -a in.wav -t "参考文本" -o out.lab
         #   Tsubaki启动器.exe cmd full -a in.wav -t "参考文本" -f sv -o out.svp
         # 完整参数列表见 backend/commandline.py，或运行:
