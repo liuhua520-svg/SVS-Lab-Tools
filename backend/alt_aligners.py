@@ -1593,7 +1593,8 @@ class AltAlignerBase:
         self._mfa = MFAProcessor()
 
     def align(self, audio_path: str, text: Optional[str], language: str,
-              english_word_align: bool = False) -> Dict:
+              english_word_align: bool = False,
+              ja_disable_katakana: bool = False) -> Dict:
         raise NotImplementedError
 
     # ── 词语时间戳 → LAB（含静音间隙补全）────────────────────────────────
@@ -1604,11 +1605,16 @@ class AltAlignerBase:
         language: str,
         fill_silences: bool = False,
         english_word_align: bool = False,
+        ja_disable_katakana: bool = False,
     ) -> str:
         """
         将词语 / 字符级时间戳 → LAB 格式，复用 MFAProcessor 的音素转换逻辑。
         fill_silences=True 时自动在时间间隙中插入 SIL。
         english_word_align=True 时英语单词直接输出，不做 ARPABET 音素拆分。
+        ja_disable_katakana=True 时（仅日语有意义）：文本中的英语单词不再
+        经 sudachi 转换为片假名读音，转而按 english_word_align 决定是按
+        整词直接输出还是回退为 ARPABET 音素——与其它语种的"英语单词级对齐"
+        效果一致。
 
         关于标点：
           Qwen3 不产生标点字符的对齐时间戳（标点不可发音）。
@@ -1638,7 +1644,9 @@ class AltAlignerBase:
 
         # 日语 / 韩语需要特殊处理
         if lang == "ja":
-            lab = self._ja_entries_to_lab(word_entries, text)
+            lab = self._ja_entries_to_lab(word_entries, text,
+                                           english_word_align=english_word_align,
+                                           disable_katakana=ja_disable_katakana)
             return _fill_silences_lab(lab) if fill_silences else lab
         if lang == "ko":
             lab = self._ko_entries_to_lab(word_entries, text, english_word_align=english_word_align)
@@ -1665,7 +1673,20 @@ class AltAlignerBase:
         self,
         word_entries: List[Tuple[float, float, str]],
         text: str,
+        english_word_align: bool = False,
+        disable_katakana: bool = False,
     ) -> str:
+        """
+        english_word_align : "英语单词级对齐"开关（与其它语种语义一致）。
+            仅当 disable_katakana=True 时才会实际生效——正常流程下英语单词
+            会被 sudachi 转换为片假名读音，走的是普通假名分支。
+        disable_katakana : "关闭英语转片假名"开关。为 True 时，Sudachi
+            分词遇到的纯英语单词（surface 全为拉丁字母）不再取其
+            reading_form() 片假名读音，而是：
+              - english_word_align=True  → 按整词直接输出该英语单词；
+              - english_word_align=False → 回退为 ARPABET 音素（word_to_
+                arpabet_g2p_only），按该词占用的字符时间戳等比例分配。
+        """
         sil_entries: List[Tuple[int, int, str]] = []
         spoken_entries: List[Tuple[float, float, str]] = []
         for s, e, ch in word_entries:
@@ -1714,6 +1735,44 @@ class AltAlignerBase:
                     idx += n
                     if not piece:
                         continue
+
+                    # ★ 新增：用户已关闭"英语转片假名"，且该 morpheme 整体是
+                    # 纯英语单词（拉丁字母）——不再取 sudachi 的片假名读音。
+                    if disable_katakana and self._mfa._is_english_word(surface):
+                        piece_start = piece[0][0]
+                        piece_end = piece[-1][1]
+                        if english_word_align:
+                            # 英语单词级对齐：按整词直接输出，不做音素拆分。
+                            lines.append(
+                                f"{int(piece_start*10_000_000)} {int(piece_end*10_000_000)} "
+                                f"{surface.lower()}"
+                            )
+                        else:
+                            # 回退为 ARPABET：按该词的字符时间戳比例分配音素。
+                            # 与 _ko_entries_to_lab() 保持一致，使用
+                            # word_to_arpabet()（MFA 词典优先，未命中才用
+                            # g2p_en 兜底）而非仅用于 mfa_processor.py 内部
+                            # 对齐场景的 word_to_arpabet_g2p_only()。
+                            from phoneme_converter import word_to_arpabet, distribute_arpabet_phones
+                            g2p_phones = word_to_arpabet(surface)
+                            if g2p_phones:
+                                for ps, pe, ph in distribute_arpabet_phones(
+                                    int(piece_start * 10_000_000),
+                                    int(piece_end * 10_000_000),
+                                    g2p_phones,
+                                ):
+                                    lines.append(f"{ps} {pe} {ph}")
+                            else:
+                                logger.warning(
+                                    f"[ja] 英语词 '{surface}' 已关闭片假名转换，"
+                                    "但 g2p_en 未命中，按整词输出。"
+                                )
+                                lines.append(
+                                    f"{int(piece_start*10_000_000)} {int(piece_end*10_000_000)} "
+                                    f"{surface.lower()}"
+                                )
+                        continue
+
                     reading_kata = m.reading_form() or surface
                     reading_hira = _kata_to_hira(reading_kata)
 
@@ -2127,7 +2186,8 @@ class WhisperXAligner(AltAlignerBase):
 
     # ── 核心对齐（句子隔离版）────────────────────────────────────────────────
     def align(self, audio_path: str, text: Optional[str], language: str,
-              english_word_align: bool = False) -> Dict:
+              english_word_align: bool = False,
+              ja_disable_katakana: bool = False) -> Dict:
         """
         句子隔离强制对齐（Sentence-Isolated Alignment）。
 
@@ -2402,7 +2462,8 @@ class WhisperXAligner(AltAlignerBase):
                     continue
                 block = self._word_entries_to_lab(
                     seg_entries, seg_text, language, fill_silences=False,
-                    english_word_align=english_word_align
+                    english_word_align=english_word_align,
+                    ja_disable_katakana=ja_disable_katakana,
                 )
                 if block.strip():
                     lab_blocks.append(block)
@@ -2732,7 +2793,8 @@ class Qwen3ASRAligner(AltAlignerBase):
         return entries
 
     def align(self, audio_path: str, text: Optional[str], language: str,
-              english_word_align: bool = False) -> Dict:
+              english_word_align: bool = False,
+              ja_disable_katakana: bool = False) -> Dict:
         t0 = time.time()
         try:
             int_lang = _normalize_lang(language)
@@ -2842,6 +2904,7 @@ class Qwen3ASRAligner(AltAlignerBase):
                 language,
                 fill_silences=True,
                 english_word_align=english_word_align,
+                ja_disable_katakana=ja_disable_katakana,
             )
 
             return {
@@ -4073,7 +4136,8 @@ class Qwen3ForcedAligner(AltAlignerBase):
             self._cpu_fallback_sticky = True
 
     def align(self, audio_path: str, text: Optional[str], language: str,
-              english_word_align: bool = False) -> Dict:
+              english_word_align: bool = False,
+              ja_disable_katakana: bool = False) -> Dict:
         t0 = time.time()
         if not text:
             return {
@@ -4170,6 +4234,7 @@ class Qwen3ForcedAligner(AltAlignerBase):
             lab = self._word_entries_to_lab(
                 word_entries, text, language, fill_silences=True,
                 english_word_align=english_word_align,
+                ja_disable_katakana=ja_disable_katakana,
             )
 
             return {
@@ -5053,7 +5118,8 @@ class NeMoForcedAligner(AltAlignerBase):
 
     # ── 主对齐入口 ────────────────────────────────────────────────────────
     def align(self, audio_path: str, text: Optional[str], language: str,
-              english_word_align: bool = False) -> Dict:
+              english_word_align: bool = False,
+              ja_disable_katakana: bool = False) -> Dict:
         """
         执行 NeMo Forced Aligner 对齐，返回与 MFAProcessor.process()
         格式兼容的字典。NFA 必须提供参考文本（requires_text=True）。
@@ -5121,6 +5187,7 @@ class NeMoForcedAligner(AltAlignerBase):
                 token_entries, text, language,
                 fill_silences=False,
                 english_word_align=english_word_align,
+                ja_disable_katakana=ja_disable_katakana,
             )
 
             return {

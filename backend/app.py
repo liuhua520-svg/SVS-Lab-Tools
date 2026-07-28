@@ -133,10 +133,17 @@ def _parse_box_override(form, index: int) -> Optional[Dict]:
     language = form.get(f"override_language_{index}", "cmn")
 
     english_word_align = form.get(f"override_english_word_align_{index}", "false").lower() == "true"
+    # "关闭英语转片假名"：仅日语（jpn）有意义，非日语语种恒为 False。
+    ja_disable_katakana = (
+        language == "jpn"
+        and form.get(f"override_ja_disable_katakana_{index}", "false").lower() == "true"
+    )
     word_phoneme_map = form.get(f"override_word_phoneme_map_{index}", "false").lower() == "true"
-    if word_phoneme_map and language != "jpn":
+    if word_phoneme_map and (language != "jpn" or ja_disable_katakana):
         # 与整批全局提交逻辑一致：开启单词映射音素时自动补上英语单词级
-        # 对齐，确保对齐阶段产出整词级 LAB，词典查词才有意义。
+        # 对齐，确保对齐阶段产出整词级 LAB，词典查词才有意义。日语场景
+        # 下只有在用户已关闭"英语转片假名"时才生效（否则英语单词已被
+        # 转换为片假名读音，不再是可单独映射音素的英语单词）。
         english_word_align = True
 
     phoneme_mode = form.get(f"override_phoneme_mode_{index}", "none")
@@ -201,6 +208,7 @@ def _parse_box_override(form, index: int) -> Optional[Dict]:
         "aligner_backend": aligner_backend,
         "language": language,
         "english_word_align": english_word_align,
+        "ja_disable_katakana": ja_disable_katakana,
         "word_phoneme_map": word_phoneme_map,
         "phoneme_mode": phoneme_mode,
         "ja_devoiced_phoneme": ja_devoiced_phoneme,
@@ -1213,6 +1221,7 @@ def run_pipeline_job(
     whisperx_model: str = "large-v3",
     nemo_model: str = "",
     english_word_align: bool = False,
+    ja_disable_katakana: bool = False,
     vsqx_singer: str = "MIKU_V4_Chinese",
     vsqx_singer_id: str = "BNGE7CP7EMTRSNC3",
     vsqx_singer_bs: int = 4,
@@ -1272,6 +1281,7 @@ def run_pipeline_job(
             qwen3_batch_size=qwen3_batch_size,
             nemo_model=(nemo_model or None),
             english_word_align=english_word_align,
+            ja_disable_katakana=ja_disable_katakana,
             vsqx_singer=vsqx_singer,
             vsqx_singer_id=vsqx_singer_id,
             vsqx_singer_bs=vsqx_singer_bs,
@@ -1421,6 +1431,11 @@ def pipeline_full_process():
         nemo_model = request.form.get("nemo_model", "").strip()
 
         english_word_align = request.form.get("english_word_align", "false").lower() == "true"
+        # "关闭英语转片假名"：仅日语（jpn）有意义，其它语种恒为 False。
+        ja_disable_katakana = (
+            language == "jpn"
+            and request.form.get("ja_disable_katakana", "false").lower() == "true"
+        )
         word_phoneme_map   = request.form.get("word_phoneme_map",   "false").lower() == "true"
 
         # 对齐辅助移调（半音）：仅影响送入对齐后端的临时音频副本，不影响
@@ -1431,11 +1446,12 @@ def pipeline_full_process():
 
         # 【解耦】前端不再要求用户手动开启"英语单词级对齐"开关才能使用
         # "单词映射音素"/词典来源功能——只要用户开启了 word_phoneme_map，
-        # 就在后端自动补上 english_word_align=True（日语除外，前端本就不
-        # 提供该开关），确保对齐阶段产出整词级 LAB，词典查词才有意义；
-        # 用户仍可手动开启 english_word_align 以获得其独立效果（英语单词
-        # 直接输出而不拆分为 ARPABET），两者互不冲突，取或即可。
-        if word_phoneme_map and language != "jpn":
+        # 就在后端自动补上 english_word_align=True（日语场景下，只有在
+        # 用户已关闭"英语转片假名"时才会补，因为否则英语单词已被转换为
+        # 片假名读音，不再是可单独映射音素的英语单词）；用户仍可手动开启
+        # english_word_align 以获得其独立效果（英语单词直接输出而不拆分
+        # 为 ARPABET），两者互不冲突，取或即可。
+        if word_phoneme_map and (language != "jpn" or ja_disable_katakana):
             english_word_align = True
 
         dict_source = _normalize_dict_source(request.form.get("dict_source", "default"))
@@ -1514,6 +1530,7 @@ def pipeline_full_process():
                 aligner_device=aligner_device,
                 fill_short_rests=fill_short_rests,
                 fill_short_rests_max_length=fill_short_rests_max_length,
+                ja_disable_katakana=ja_disable_katakana,
             ),
         ).start()
 
@@ -1539,6 +1556,7 @@ def run_mfa_only_job(job_id: str, wav_path: str, text: str, language: str,
                      whisperx_model: str = "large-v3",
                      nemo_model: str = "",
                      english_word_align: bool = False,
+                     ja_disable_katakana: bool = False,
                      whisperx_batch_size: int = 16,
                      qwen3_batch_size: int = 8,
                      aligner_device: Optional[str] = None,
@@ -1578,6 +1596,7 @@ def run_mfa_only_job(job_id: str, wav_path: str, text: str, language: str,
                                            qwen3_batch_size=qwen3_batch_size,
                                            nemo_model=(nemo_model or None),
                                            english_word_align=english_word_align,
+                                           ja_disable_katakana=ja_disable_katakana,
                                            align_pitch_shift_semitones=align_pitch_shift_semitones,
                                            cancel_check=lambda: is_job_cancel_requested(job_id),
                                            on_process_start=lambda proc: set_job_process_handle(job_id, proc))
@@ -1661,6 +1680,11 @@ def pipeline_mfa_only():
         nemo_model = request.form.get("nemo_model", "").strip()
 
         english_word_align = request.form.get("english_word_align", "false").lower() == "true"
+        # "关闭英语转片假名"：仅日语（jpn）有意义。
+        ja_disable_katakana = (
+            language == "jpn"
+            and request.form.get("ja_disable_katakana", "false").lower() == "true"
+        )
 
         # 对齐辅助移调（半音）：仅影响送入对齐后端的临时音频副本。
         align_pitch_shift_semitones = _parse_align_pitch_shift(
@@ -1707,6 +1731,7 @@ def pipeline_mfa_only():
                 whisperx_model=whisperx_model,
                 nemo_model=nemo_model,
                 english_word_align=english_word_align,
+                ja_disable_katakana=ja_disable_katakana,
                 whisperx_batch_size=whisperx_batch_size,
                 qwen3_batch_size=qwen3_batch_size,
                 aligner_device=aligner_device,
@@ -2087,6 +2112,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
             language = kwargs.get("language", "cmn")
             aligner_device = kwargs.get("aligner_device")
             english_word_align = kwargs.get("english_word_align", False)
+            ja_disable_katakana = kwargs.get("ja_disable_katakana", False)
 
             tts_boxes = [b for b in boxes if b.get("tts")]
             total_tts = len(tts_boxes)
@@ -2100,6 +2126,10 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                 box_override = box.get("override") or {}
                 box_language = box_override.get("language", language)
                 box_english_word_align = box_override.get("english_word_align", english_word_align)
+                box_ja_disable_katakana = (
+                    box_override.get("ja_disable_katakana", ja_disable_katakana)
+                    if box_language == "jpn" else False
+                )
                 set_job(
                     job_id, status="running",
                     progress={"done": 0, "total": len(boxes)},
@@ -2129,6 +2159,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         language=box_language,
                         aligner_device=aligner_device,
                         english_word_align=box_english_word_align,
+                        ja_disable_katakana=box_ja_disable_katakana,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                     )
                     shutil.rmtree(job_segments_dir, ignore_errors=True)
@@ -2168,6 +2199,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         pitch=tts_info.get("pitch", "+0Hz"),
                         aligner_device=aligner_device,
                         english_word_align=box_english_word_align,
+                        ja_disable_katakana=box_ja_disable_katakana,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                         qwen3_tts_options=tts_info.get("qwen3_tts_options"),
                         stage_cb=_box_stage_cb,
@@ -2436,6 +2468,11 @@ def dialogue_process():
 
         nemo_model = request.form.get("nemo_model", "").strip()
         english_word_align = request.form.get("english_word_align", "false").lower() == "true"
+        # "关闭英语转片假名"：仅日语（jpn）有意义。
+        ja_disable_katakana = (
+            language == "jpn"
+            and request.form.get("ja_disable_katakana", "false").lower() == "true"
+        )
         word_phoneme_map   = request.form.get("word_phoneme_map",   "false").lower() == "true"
 
         # 对齐辅助移调（半音）：现为每个对话框独立生效，见下方
@@ -2452,11 +2489,11 @@ def dialogue_process():
 
         # 【解耦】前端不再要求用户手动开启"英语单词级对齐"开关才能使用
         # "单词映射音素"/词典来源功能——只要用户开启了 word_phoneme_map，
-        # 就在后端自动补上 english_word_align=True（日语除外，前端本就不
-        # 提供该开关），确保对齐阶段产出整词级 LAB，词典查词才有意义；
-        # 用户仍可手动开启 english_word_align 以获得其独立效果（英语单词
-        # 直接输出而不拆分为 ARPABET），两者互不冲突，取或即可。
-        if word_phoneme_map and language != "jpn":
+        # 就在后端自动补上 english_word_align=True（日语场景下，只有在
+        # 用户已关闭"英语转片假名"时才会补）；用户仍可手动开启
+        # english_word_align 以获得其独立效果（英语单词直接输出而不拆分
+        # 为 ARPABET），两者互不冲突，取或即可。
+        if word_phoneme_map and (language != "jpn" or ja_disable_katakana):
             english_word_align = True
 
         dict_source = _normalize_dict_source(request.form.get("dict_source", "default"))
@@ -2691,6 +2728,7 @@ def dialogue_process():
                 phoneme_mode=phoneme_mode,
                 ja_devoiced_phoneme=ja_devoiced_phoneme,
                 english_word_align=english_word_align,
+                ja_disable_katakana=ja_disable_katakana,
                 vsqx_singer=vsqx_singer,
                 vsqx_singer_id=vsqx_singer_id,
                 vsqx_singer_bs=vsqx_singer_bs,
@@ -3029,11 +3067,12 @@ def run_tts_pipeline_job(
     crepe_model: str,
     aligner_device: str,
     english_word_align: bool,
-    vsqx_singer: str,
-    vsqx_singer_id: str,
-    vsqx_singer_bs: int,
-    word_phoneme_map: bool,
-    dict_source: str,
+    ja_disable_katakana: bool = False,
+    vsqx_singer: str = "MIKU_V4_Chinese",
+    vsqx_singer_id: str = "BNGE7CP7EMTRSNC3",
+    vsqx_singer_bs: int = 4,
+    word_phoneme_map: bool = False,
+    dict_source: str = "default",
     align_pitch_shift_semitones: float = 0.0,
     fill_short_rests: bool = False,
     fill_short_rests_max_length: str = "16",
@@ -3071,6 +3110,7 @@ def run_tts_pipeline_job(
                 segments_dir=job_segments_dir, sentences=preview_sentences,
                 language=language, aligner_device=aligner_device,
                 english_word_align=english_word_align,
+                ja_disable_katakana=ja_disable_katakana,
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 progress_cb=_progress_cb,
             )
@@ -3113,6 +3153,7 @@ def run_tts_pipeline_job(
                 work_dir=str(WORK_DIR), stem=stem,
                 rate=rate, volume=volume, pitch=pitch,
                 aligner_device=aligner_device, english_word_align=english_word_align,
+                ja_disable_katakana=ja_disable_katakana,
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 progress_cb=_progress_cb,
                 qwen3_tts_options=qwen3_tts_options,
@@ -3272,8 +3313,13 @@ def tts_process():
         aligner_device = payload.get("aligner_device", "").strip() or "auto"
 
         english_word_align = payload.get("english_word_align", "false").lower() == "true"
+        # "关闭英语转片假名"：仅日语（jpn）有意义。
+        ja_disable_katakana = (
+            language == "jpn"
+            and payload.get("ja_disable_katakana", "false").lower() == "true"
+        )
         word_phoneme_map = payload.get("word_phoneme_map", "false").lower() == "true"
-        if word_phoneme_map and language != "jpn":
+        if word_phoneme_map and (language != "jpn" or ja_disable_katakana):
             english_word_align = True
 
         # 对齐辅助移调（半音）：TTS跟读固定使用 Qwen3-FA，高音色（尤其是
@@ -3328,6 +3374,7 @@ def tts_process():
                 f0_device=f0_device, crepe_model=crepe_model,
                 aligner_device=aligner_device,
                 english_word_align=english_word_align,
+                ja_disable_katakana=ja_disable_katakana,
                 vsqx_singer=vsqx_singer, vsqx_singer_id=vsqx_singer_id,
                 vsqx_singer_bs=vsqx_singer_bs,
                 word_phoneme_map=word_phoneme_map, dict_source=dict_source,
@@ -4458,7 +4505,8 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
                             aligner_device, english_word_align: bool,
                             align_pitch_shift_semitones: float, audio_duration_sec: float,
                             processing_mode: str, original_text: str = "",
-                            skip_split_every_n: int = 1, **project_kwargs):
+                            skip_split_every_n: int = 1,
+                            ja_disable_katakana: bool = False, **project_kwargs):
     """
     单文件"字幕跟读"后台任务：整段音频按字幕时间轴逐句（或按
     skip_split_every_n 合并成块）Qwen3-FA 对齐，产出完整 LAB；"完整处理"
@@ -4476,6 +4524,7 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
             wav_path, cues, language,
             aligner_device=aligner_device,
             english_word_align=english_word_align,
+            ja_disable_katakana=ja_disable_katakana,
             align_pitch_shift_semitones=align_pitch_shift_semitones,
             audio_duration_sec=audio_duration_sec,
             progress_cb=_progress_cb,
@@ -4583,6 +4632,11 @@ def subtitle_import_align():
         language = request.form.get("language", "cmn")
         aligner_device = request.form.get("aligner_device", "").strip() or None
         english_word_align = request.form.get("english_word_align", "false").lower() == "true"
+        # "关闭英语转片假名"：仅日语（jpn）有意义。
+        ja_disable_katakana = (
+            language == "jpn"
+            and request.form.get("ja_disable_katakana", "false").lower() == "true"
+        )
         # word_phoneme_map（"英语单词→音素映射"，把混在文本中的英语单词
         # 写入 SVP/VSQX 的 phonemes 字段）依赖对齐阶段已经把这些英语单词
         # 作为独立单元切分对齐好——这一步正是 english_word_align 在做的事
@@ -4591,11 +4645,11 @@ def subtitle_import_align():
         # "音节" 的 LAB，再被当作拼音音素写进工程文件，导致发音错乱）。
         # 因此这里必须和其它路由（TTS跟读 /api/tts/process、音频跟读
         # /api/pipeline/full、/mfa-only、对话批量 /api/dialogue/process）
-        # 保持完全一致的联动：只要用户打开了 word_phoneme_map 且语言不是
-        # 日语，就自动一并打开 english_word_align，不要求用户重复勾选两个
-        # 开关。此前字幕跟读遗漏了这一步，是本次要修复的问题。
+        # 保持完全一致的联动：只要用户打开了 word_phoneme_map，且（语言
+        # 不是日语，或语言是日语但已关闭"英语转片假名"），就自动一并打开
+        # english_word_align，不要求用户重复勾选两个开关。
         word_phoneme_map_probe = request.form.get("word_phoneme_map", "false").lower() == "true"
-        if word_phoneme_map_probe and language != "jpn":
+        if word_phoneme_map_probe and (language != "jpn" or ja_disable_katakana):
             english_word_align = True
         align_pitch_shift_semitones = _parse_align_pitch_shift(
             request.form.get("align_pitch_shift_semitones", 0)
@@ -4692,6 +4746,7 @@ def subtitle_import_align():
             kwargs=dict(
                 job_id=job_id, wav_path=wav_path, cues=cues, language=language,
                 aligner_device=aligner_device, english_word_align=english_word_align,
+                ja_disable_katakana=ja_disable_katakana,
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 audio_duration_sec=audio_duration, processing_mode=processing_mode,
                 original_text=subtitle_original_text,
@@ -4735,6 +4790,7 @@ _CMD_ARG_TYPE_HINTS: Dict[str, str] = {
     # args 里按 {"name": ..., "action": ..., ...} 的顺序书写即可。
     # 未在此列出的参数一律按"取值型"处理（--key value）。
     "english_word_align": "flag",
+    "ja_disable_katakana": "flag",
     "no_smooth": "flag",
     "double_precision": "flag",
     "auto_note_pitch": "flag",

@@ -1220,6 +1220,7 @@ def align_segments(
     language: str,
     aligner_device: Optional[str] = None,
     english_word_align: bool = False,
+    ja_disable_katakana: bool = False,
     sentence_gap_sec: float = DEFAULT_SENTENCE_GAP_SEC,
     align_pitch_shift_semitones: float = 0.0,
     progress_cb: Optional[Callable[[int, int], None]] = None,
@@ -1292,7 +1293,8 @@ def align_segments(
 
         try:
             align_result = aligner.align(align_target, sentence, language,
-                                          english_word_align=english_word_align)
+                                          english_word_align=english_word_align,
+                                          ja_disable_katakana=ja_disable_katakana)
         except Exception as e:
             align_result = {"success": False, "error": str(e)}
         finally:
@@ -1344,6 +1346,7 @@ def synthesize_and_align(
     pitch: str = "+0Hz",
     aligner_device: Optional[str] = None,
     english_word_align: bool = False,
+    ja_disable_katakana: bool = False,
     sentence_gap_sec: float = DEFAULT_SENTENCE_GAP_SEC,
     sentences: Optional[List[str]] = None,
     align_pitch_shift_semitones: float = 0.0,
@@ -1400,6 +1403,7 @@ def synthesize_and_align(
         align_result = align_segments(
             segments_dir=segments_dir, sentences=seg_result["sentences"], language=language,
             aligner_device=aligner_device, english_word_align=english_word_align,
+            ja_disable_katakana=ja_disable_katakana,
             sentence_gap_sec=sentence_gap_sec,
             align_pitch_shift_semitones=align_pitch_shift_semitones,
             progress_cb=progress_cb,

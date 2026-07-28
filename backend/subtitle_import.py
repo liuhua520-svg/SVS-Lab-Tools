@@ -498,6 +498,7 @@ def align_subtitle_audio(
     language: str,
     aligner_device: Optional[str] = None,
     english_word_align: bool = False,
+    ja_disable_katakana: bool = False,
     align_pitch_shift_semitones: float = 0.0,
     audio_duration_sec: Optional[float] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
@@ -597,7 +598,8 @@ def align_subtitle_audio(
 
             try:
                 align_result = aligner.align(align_target, group_text, language,
-                                              english_word_align=english_word_align)
+                                              english_word_align=english_word_align,
+                                              ja_disable_katakana=ja_disable_katakana)
             except Exception as e:
                 align_result = {"success": False, "error": str(e)}
             finally:

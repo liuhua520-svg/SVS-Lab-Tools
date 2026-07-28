@@ -431,6 +431,8 @@ class CmdUI:
         p.add_argument("--qwen3-batch-size", type=int, default=8)
         p.add_argument("--nemo-model", default=None, help="NeMo Forced Aligner 模型覆盖（可选）")
         p.add_argument("--english-word-align", action="store_true", help="启用英语单词级对齐")
+        p.add_argument("--ja-disable-katakana", action="store_true",
+                        help="关闭英语转片假名（仅日语 jpn 有意义）：文本中的英语单词不再转换为片假名读音")
         p.add_argument("--align-pitch-shift", type=float, default=0.0, metavar="SEMITONES", help="对齐辅助移调（半音）")
         p.add_argument("-o", "--output", help="LAB 输出路径（不传则只保留在 backend/work/ 下）")
         p.set_defaults(func=self._cmd_mfa_only)
@@ -516,6 +518,8 @@ class CmdUI:
         p.add_argument("--qwen3-batch-size", type=int, default=8)
         p.add_argument("--nemo-model", default=None)
         p.add_argument("--english-word-align", action="store_true")
+        p.add_argument("--ja-disable-katakana", action="store_true",
+                        help="关闭英语转片假名（仅日语 jpn 有意义）：文本中的英语单词不再转换为片假名读音")
         p.add_argument("--word-phoneme-map", action="store_true")
         p.add_argument("--align-pitch-shift", type=float, default=0.0, metavar="SEMITONES")
         p.add_argument("--dict-source", default="default")
@@ -541,6 +545,8 @@ class CmdUI:
         p.add_argument("--aligner-device", default="auto", choices=F0_DEVICES,
                         help="Qwen3-ForcedAligner 运行设备，默认 auto（字幕跟读固定使用该后端，无 --aligner-backend 选项）")
         p.add_argument("--english-word-align", action="store_true", help="启用英语单词级对齐")
+        p.add_argument("--ja-disable-katakana", action="store_true",
+                        help="关闭英语转片假名（仅日语 jpn 有意义）：文本中的英语单词不再转换为片假名读音")
         p.add_argument("--align-pitch-shift", type=float, default=0.0, metavar="SEMITONES", help="对齐辅助移调（半音）")
         p.add_argument("--skip-split-every-n", type=int, default=None,
                         help="每 N 条字幕合并成一个对齐块（不传则读取设置页保存的全局值，"
@@ -651,6 +657,9 @@ class CmdUI:
         p.add_argument("--qwen3-batch-size", type=int, default=8)
         p.add_argument("--nemo-model", default=None)
         p.add_argument("--english-word-align", action="store_true")
+        p.add_argument("--ja-disable-katakana", action="store_true",
+                        help="关闭英语转片假名（仅日语 jpn 有意义）：文本中的英语单词不再转换为片假名读音；"
+                             "整批全局默认值，可被每个对话框的 manifest override 覆盖")
         p.add_argument("--word-phoneme-map", action="store_true")
         p.add_argument("--dict-source", default="default")
         p.add_argument("--vsqx-singer", default=None)
@@ -779,6 +788,7 @@ class CmdUI:
             qwen3_batch_size=args.qwen3_batch_size,
             nemo_model=args.nemo_model,
             english_word_align=args.english_word_align,
+            ja_disable_katakana=args.ja_disable_katakana,
             align_pitch_shift_semitones=args.align_pitch_shift,
         )
         if result.get("success"):
@@ -910,6 +920,7 @@ class CmdUI:
             qwen3_batch_size=args.qwen3_batch_size,
             nemo_model=args.nemo_model,
             english_word_align=args.english_word_align,
+            ja_disable_katakana=args.ja_disable_katakana,
             vsqx_singer=vsqx_singer or "MIKU_V4_Chinese",
             vsqx_singer_id=vsqx_singer_id or "BNGE7CP7EMTRSNC3",
             vsqx_singer_bs=vsqx_singer_bs if vsqx_singer_bs is not None else 4,
@@ -974,6 +985,7 @@ class CmdUI:
             wav_path, cues, args.language,
             aligner_device=args.aligner_device,
             english_word_align=args.english_word_align,
+            ja_disable_katakana=args.ja_disable_katakana,
             align_pitch_shift_semitones=args.align_pitch_shift,
             audio_duration_sec=audio_duration,
             progress_cb=_progress_cb,
@@ -1174,6 +1186,7 @@ class CmdUI:
                     pitch=tts_info.get("pitch", "+0Hz"),
                     aligner_device=args.aligner_device,
                     english_word_align=args.english_word_align,
+                    ja_disable_katakana=args.ja_disable_katakana,
                     align_pitch_shift_semitones=box.get("align_pitch_shift_semitones", 0.0),
                     qwen3_tts_options=tts_info.get("qwen3_tts_options"),
                 )
@@ -1226,6 +1239,7 @@ class CmdUI:
             qwen3_batch_size=args.qwen3_batch_size,
             nemo_model=args.nemo_model,
             english_word_align=args.english_word_align,
+            ja_disable_katakana=args.ja_disable_katakana,
             vsqx_singer=args.vsqx_singer or default_singer,
             vsqx_singer_id=args.vsqx_singer_id or default_singer_id,
             vsqx_singer_bs=args.vsqx_singer_bs if args.vsqx_singer_bs is not None else default_bs,

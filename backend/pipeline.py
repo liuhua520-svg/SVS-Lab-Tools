@@ -201,6 +201,7 @@ def _run_alignment(
     whisperx_batch_size: int = 16,      # 新增
     qwen3_batch_size: int = 8,          # 新增：Qwen3-ASR / Qwen3-FA / NeMo-FA 共用
     english_word_align: bool = False,
+    ja_disable_katakana: bool = False,  # 新增："关闭英语转片假名"开关，仅日语有意义
     nemo_model: Optional[str] = None,
     aligner_device: Optional[str] = None,   # 新增：对齐工具（WhisperX/Qwen3/NeMo）运行设备，
                                              # 与 f0_device（F0 提取设备，CREPE/RMVPE 专用）
@@ -235,6 +236,7 @@ def _run_alignment(
             processor = MFAProcessor()
             return processor.process(audio_file, text, language,
                                      english_word_align=english_word_align,
+                                     ja_disable_katakana=ja_disable_katakana,
                                      on_process_start=on_process_start,
                                      cancel_check=cancel_check)
 
@@ -251,6 +253,7 @@ def _run_alignment(
                 return processor.process(
                     _LocalFileAdapter(shifted_path), text, language,
                     english_word_align=english_word_align,
+                    ja_disable_katakana=ja_disable_katakana,
                     on_process_start=on_process_start,
                     cancel_check=cancel_check,
                 )
@@ -305,7 +308,8 @@ def _run_alignment(
         aligner = get_aligner(backend, device=resolved_aligner_device, **extra)
         try:
             return aligner.align(align_target_path, text or None, language,
-                                 english_word_align=english_word_align)
+                                 english_word_align=english_word_align,
+                                 ja_disable_katakana=ja_disable_katakana)
         finally:
             if shifted_path:
                 try:
@@ -361,6 +365,7 @@ class AudioProcessingPipeline:
         qwen3_batch_size: int = 8,                # ← Qwen3-ASR/Qwen3-FA/NeMo-FA 共用批大小设置
         nemo_model: Optional[str] = None,        # ← NeMo Forced Aligner 模型覆盖（可选）
         english_word_align: bool = False,        # ← 英语单词级对齐
+        ja_disable_katakana: bool = False,       # ← 关闭英语转片假名（仅日语有意义）
         vsqx_singer: str = "MIKU_V4_Chinese",           # ← VSQX 声库名（由 app.py 按语种注入）
         vsqx_singer_id: str = "BNGE7CP7EMTRSNC3",       # ← VSQX 声库 ID
         vsqx_singer_bs: int = 4,                         # ← VSQX 声库 Bank Select（VOCALOID4 内部编号）
@@ -441,6 +446,7 @@ class AudioProcessingPipeline:
                                            whisperx_batch_size=whisperx_batch_size,
                                            qwen3_batch_size=qwen3_batch_size,
                                            english_word_align=english_word_align,
+                                           ja_disable_katakana=ja_disable_katakana,
                                            nemo_model=nemo_model,
                                            aligner_device=aligner_device,
                                            align_pitch_shift_semitones=align_pitch_shift_semitones,
@@ -566,6 +572,7 @@ class AudioProcessingPipeline:
         qwen3_batch_size: int = 8,                # ← Qwen3-ASR/Qwen3-FA/NeMo-FA 共用批大小设置
         nemo_model: Optional[str] = None,        # ← NeMo Forced Aligner 模型覆盖（可选）
         english_word_align: bool = False,        # ← 英语单词级对齐
+        ja_disable_katakana: bool = False,       # ← 关闭英语转片假名（仅日语有意义）
         align_pitch_shift_semitones: float = 0.0,   # ← 对齐辅助移调（半音），不影响 LAB 时间戳换算
         cancel_check: Optional[Callable[[], bool]] = None,       # ← 协作式取消（MFA 分支运行期间轮询）
         on_process_start: Optional[Callable[[object], None]] = None,   # ← MFA 子进程句柄回调
@@ -582,6 +589,7 @@ class AudioProcessingPipeline:
                                     whisperx_batch_size=whisperx_batch_size,
                                     qwen3_batch_size=qwen3_batch_size,
                                     english_word_align=english_word_align,
+                                    ja_disable_katakana=ja_disable_katakana,
                                     nemo_model=nemo_model,
                                     aligner_device=aligner_device,
                                     align_pitch_shift_semitones=align_pitch_shift_semitones,
@@ -783,6 +791,7 @@ class AudioProcessingPipeline:
         qwen3_batch_size: int = 8,                # ← Qwen3-ASR/Qwen3-FA/NeMo-FA 共用批大小设置
         nemo_model: Optional[str] = None,
         english_word_align: bool = False,
+        ja_disable_katakana: bool = False,       # ← 关闭英语转片假名（仅日语有意义）
         vsqx_singer: str = "MIKU_V4_Chinese",
         vsqx_singer_id: str = "BNGE7CP7EMTRSNC3",
         vsqx_singer_bs: int = 4,
@@ -931,6 +940,7 @@ class AudioProcessingPipeline:
             box_aligner_backend      = box_override.get("aligner_backend", aligner_backend)
             box_language             = box_override.get("language", language)
             box_english_word_align   = box_override.get("english_word_align", english_word_align)
+            box_ja_disable_katakana  = box_override.get("ja_disable_katakana", ja_disable_katakana)
             box_word_phoneme_map     = box_override.get("word_phoneme_map", word_phoneme_map)
             box_phoneme_mode         = box_override.get("phoneme_mode", phoneme_mode)
             box_dict_source          = box_override.get("dict_source", dict_source)
@@ -1031,6 +1041,7 @@ class AudioProcessingPipeline:
                         whisperx_batch_size=whisperx_batch_size,
                         qwen3_batch_size=qwen3_batch_size,
                         english_word_align=box_english_word_align,
+                        ja_disable_katakana=box_ja_disable_katakana,
                         nemo_model=nemo_model,
                         aligner_device=aligner_device,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,

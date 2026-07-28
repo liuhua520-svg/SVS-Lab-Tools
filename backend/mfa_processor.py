@@ -376,7 +376,7 @@ class MFAProcessor:
             return None
         return reading
 
-    def _normalize_japanese_text_for_mfa(self, text: str) -> str:
+    def _normalize_japanese_text_for_mfa(self, text: str, disable_katakana: bool = False) -> str:
         """
         MFA 对齐前的日语文本预处理：把文本中夹杂的英语单词替换成 sudachipy
         给出的片假名读音，写入 MFA 语料 txt 之前调用。
@@ -384,9 +384,18 @@ class MFAProcessor:
         只替换 sudachi 词典里确实有片假名读音的词；sudachi 不认识的生僻词/
         专有名词原样保留英语，交给 _process_ja_words() 里的兜底逻辑处理
         （那样至少在日志里能看到，而不是被静默替换成错误读音）。
+
+        disable_katakana : "关闭英语转片假名"开关。为 True 时完全跳过本函数
+            的转换，原样保留文本中的英语单词——它们会被 japanese_mfa 词典判定
+            为 OOV（音素层面标注为 spn），但 MFA 仍会给出正确的词级时间戳；
+            后续 _process_ja_words() 在 english_word_align=True 时会把这些
+            英语单词按整词直接输出（与其它语种的"英语单词级对齐"效果一致），
+            不再要求 sudachi 必须能给出片假名读音。
         """
         global _ja_tokenizer
         if not text:
+            return text
+        if disable_katakana:
             return text
 
         try:
@@ -967,9 +976,22 @@ class MFAProcessor:
         self,
         word_tier,
         phone_items: List[Tuple[int, int, str]],
-        text: str
+        text: str,
+        english_word_align: bool = False,
+        disable_katakana: bool = False,
     ) -> List[str]:
-        """处理日语 Word Tier → ROMAJI（IPA→Romaji 自动转换）"""
+        """处理日语 Word Tier → ROMAJI（IPA→Romaji 自动转换）
+
+        english_word_align : "英语单词级对齐"开关（与其它语种语义一致）。
+            仅当 disable_katakana=True（用户已关闭"英语转片假名"）时才会
+            实际生效——正常流程下英语单词已在预处理阶段被转换为片假名读音，
+            走的是纯日语假名分支，根本不会再被判定为英语单词。
+        disable_katakana : "关闭英语转片假名"开关。为 True 时，遇到的英语
+            单词不再尝试 sudachi 片假名转换/ARPABET 兜底，而是（当
+            english_word_align=True 时）按整词直接输出，与其它语种的
+            "英语单词级对齐"效果一致；english_word_align=False 时则回退到
+            旧的 ARPABET 音素拆分（不再尝试片假名转换）。
+        """
         lines: List[str] = []
 
         for interval in word_tier:
@@ -995,15 +1017,26 @@ class MFAProcessor:
                     continue
                 
             if self._is_english_word(mark):
+                # ★ 新增：用户已关闭"英语转片假名"（disable_katakana=True）
+                # 且开启了"英语单词级对齐"——不再尝试片假名转换，直接把该
+                # 英语单词按整词输出，与中/英/韩/粤语种的"英语单词级对齐"
+                # 效果保持一致。
+                if disable_katakana and english_word_align:
+                    lines.append(f"{start} {end} {mark.lower()}")
+                    continue
+
                 # ① 首选：sudachi 片假名读音 → romaji 音素序列。
                 # 正常情况下文本已经在 process() 里被 _normalize_japanese_text_
                 # for_mfa() 预处理过，这里基本不会再遇到英语单词；会走到这条
                 # 分支通常是：(a) sudachi 在预处理阶段没认出这个词，或 (b) 调
                 # 用方是复用本类逻辑的替代对齐后端（WhisperX / Qwen3 等），从
-                # 未经过那一步预处理。两种情况都先再查一次片假名读音——只要
-                # sudachi 认得，就能展开成 build_ja_hiragana_lab() 能正确处理
-                # 的日语罗马音，而不是 ARPABET。
-                katakana = self._get_katakana_reading_for_word(mark)
+                # 未经过那一步预处理，或 (c) 用户主动关闭了"英语转片假名"
+                # （disable_katakana=True）但未开启"英语单词级对齐"。两种
+                # 情况都先再查一次片假名读音——只要 sudachi 认得，就能展开成
+                # build_ja_hiragana_lab() 能正确处理的日语罗马音，而不是
+                # ARPABET；但 disable_katakana=True 时跳过这一步，直接走
+                # ARPABET 兜底，尊重用户"不要转换为片假名"的明确意愿。
+                katakana = None if disable_katakana else self._get_katakana_reading_for_word(mark)
                 if katakana:
                     moras = katakana_to_romaji_moras(katakana)
                     mora_entries = self._distribute_katakana_mora_phones(start, end, moras)
@@ -1012,10 +1045,11 @@ class MFAProcessor:
                             lines.append(f"{s} {e} {p}")
                         continue
 
-                # ② sudachi 也无法识别（生僻词/专有名词）：保留旧的 ARPABET
-                # 兜底，至少不丢时间轴；但明确告警——音素体系不是日语罗马音，
-                # build_ja_hiragana_lab() 无法正确转换，对应位置在最终 LAB
-                # 里可能变成 '-' 占位或被吞掉，建议检查该词。
+                # ② sudachi 也无法识别（生僻词/专有名词），或用户已关闭片假名
+                # 转换：保留旧的 ARPABET 兜底，至少不丢时间轴；但明确告警——
+                # 音素体系不是日语罗马音，build_ja_hiragana_lab() 无法正确
+                # 转换，对应位置在最终 LAB 里可能变成 '-' 占位或被吞掉，
+                # 建议检查该词。
                 entries = self._get_arpabet_entries(start, end, phone_items)
                 if entries:
                     for s, e, p in entries:
@@ -1031,11 +1065,12 @@ class MFAProcessor:
                             "G2P 词典 / g2p_en 均未命中），按整词输出。"
                         )
                         lines.append(f"{start} {end} {mark.lower()}")
-                logger.warning(
-                    f"[ja] 英语词 '{mark}' sudachipy 未能给出片假名读音，已退回 "
-                    "ARPABET 兜底；由于音素体系不是日语罗马音，最终 LAB 中对应"
-                    "位置可能不是有效假名，建议检查该词是否为生僻外来语/专有名词。"
-                )
+                if not disable_katakana:
+                    logger.warning(
+                        f"[ja] 英语词 '{mark}' sudachipy 未能给出片假名读音，已退回 "
+                        "ARPABET 兜底；由于音素体系不是日语罗马音，最终 LAB 中对应"
+                        "位置可能不是有效假名，建议检查该词是否为生僻外来语/专有名词。"
+                    )
                 continue
 
             entries = self._get_romaji_entries(start, end, phone_items)
@@ -1367,6 +1402,7 @@ class MFAProcessor:
         text: str,
         lang: str = 'zh',
         english_word_align: bool = False,
+        disable_katakana: bool = False,
     ) -> str:
         """Word Tier 对齐主逻辑（含 LAB 后处理）"""
         try:
@@ -1396,7 +1432,9 @@ class MFAProcessor:
             elif lang == 'en':
                 lines = self._process_en_words(word_tier, phone_items, text, english_word_align=english_word_align)
             elif lang == 'ja':
-                lines = self._process_ja_words(word_tier, phone_items, text)
+                lines = self._process_ja_words(word_tier, phone_items, text,
+                                                english_word_align=english_word_align,
+                                                disable_katakana=disable_katakana)
             elif lang == 'ko':
                 lines = self._process_ko_words(word_tier, phone_items, text, english_word_align=english_word_align)
             elif lang == 'yue':
@@ -1409,7 +1447,9 @@ class MFAProcessor:
             return "\n".join(lines)
             
         except ImportError:
-            return self._parse_textgrid_manual(textgrid_path, text, lang, english_word_align=english_word_align)
+            return self._parse_textgrid_manual(textgrid_path, text, lang,
+                                                english_word_align=english_word_align,
+                                                disable_katakana=disable_katakana)
         except Exception as e:
             logger.error(f"对齐失败: {e}", exc_info=True)
             return ""
@@ -1463,6 +1503,7 @@ class MFAProcessor:
         text: str,
         lang: str = 'zh',
         english_word_align: bool = False,
+        disable_katakana: bool = False,
     ) -> str:
         """手工解析 TextGrid"""
         try:
@@ -1505,7 +1546,9 @@ class MFAProcessor:
             elif lang == 'en':
                 lines = self._process_en_words(word_tier, phone_items, text, english_word_align=english_word_align)
             elif lang == 'ja':
-                lines = self._process_ja_words(word_tier, phone_items, text)
+                lines = self._process_ja_words(word_tier, phone_items, text,
+                                                english_word_align=english_word_align,
+                                                disable_katakana=disable_katakana)
             elif lang == 'ko':
                 lines = self._process_ko_words(word_tier, phone_items, text, english_word_align=english_word_align)
             elif lang == 'yue':
@@ -1522,9 +1565,11 @@ class MFAProcessor:
             return ""
 
     def _textgrid_to_lab(self, textgrid_path: str, text: str, lang: str = 'zh',
-                          english_word_align: bool = False) -> str:
+                          english_word_align: bool = False,
+                          disable_katakana: bool = False) -> str:
         return self._textgrid_to_lab_word_tier_primary(textgrid_path, text, lang,
-                                                        english_word_align=english_word_align)
+                                                        english_word_align=english_word_align,
+                                                        disable_katakana=disable_katakana)
 
     def _get_audio_duration(self, audio_path: str) -> int:
         try:
@@ -1549,10 +1594,16 @@ class MFAProcessor:
     # =====================================================================
     def process(self, audio_file, text: str, language: str = "cmn",
                 english_word_align: bool = False,
+                ja_disable_katakana: bool = False,
                 on_process_start: Optional[Callable[[subprocess.Popen], None]] = None,
                 cancel_check: Optional[Callable[[], bool]] = None) -> Dict:
         """处理单个音频文件
 
+        english_word_align : 英语单词级对齐（不做 ARPABET 音素拆分）。
+        ja_disable_katakana : "关闭英语转片假名"开关，仅日语（ja）有意义。
+            为 True 时，送入 MFA 前不再把文本中的英语单词转换为 sudachipy
+            片假名读音，原样保留英语拼写；配合 english_word_align=True，
+            日语场景下也能像其它语种一样展示"英语单词级对齐"效果。
         on_process_start : 可选回调，在 MFA 子进程启动后立刻收到该 Popen
             句柄——供调用方（如 app.py 的任务取消机制）登记，需要时可以
             直接 terminate，无需等待 subprocess 自然结束。
@@ -1585,7 +1636,11 @@ class MFAProcessor:
                 # ★ 新增：送入 MFA 之前，把文本里的英语单词换成 sudachipy 给出
                 # 的片假名读音——japanese_mfa 词典不认识拉丁字母拼写，原样送
                 # 进去只会被判定为 OOV（spn），完全拿不到音素级对齐结果。
-                text_for_mfa = self._normalize_japanese_text_for_mfa(text.strip())
+                # ja_disable_katakana=True 时跳过该转换（见函数内说明），
+                # 尊重用户"关闭英语转片假名"的选择。
+                text_for_mfa = self._normalize_japanese_text_for_mfa(
+                    text.strip(), disable_katakana=ja_disable_katakana
+                )
                 phoneme_text = text.strip()
             elif raw_lang in ("ko", "korean", "kor"):
                 lang = "ko"
@@ -1709,7 +1764,8 @@ class MFAProcessor:
             textgrid_path = str(textgrid_files[0])
 
             lab_content = self._textgrid_to_lab(textgrid_path, text, lang=lang,
-                                                  english_word_align=english_word_align)
+                                                  english_word_align=english_word_align,
+                                                  disable_katakana=ja_disable_katakana)
 
             if not lab_content:
                 return {
