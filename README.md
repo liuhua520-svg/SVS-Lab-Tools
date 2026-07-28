@@ -16,6 +16,9 @@
 
 [**简体中文**](./README.md) | [**繁體中文**](./Docs/README/README_ZH_TW.md) | [**English**](./Docs/README/README_EN.md) | [**日本語**](./Docs/README/README_JP.md) | [**한국어**](./Docs/README/README_KR.md) 
 
+📐 想了解代码内部是怎么组织的（微服务架构、模块职责、核心算法、已知技术债）？
+请看 [**Docs/ARCHITECTURE.md — 技术架构与代码剖析报告**](./Docs/ARCHITECTURE.md)。
+
 ---
 
 ## ✨ 主要功能
@@ -189,13 +192,19 @@ mfa model download acoustic yue  # 粤语
 
 ### 📁 目录结构
 ```
-backend/    后端服务
-frontend/   前端界面
-setup.bat   Windows 环境安装脚本
-run.bat     Windows 启动脚本
-setup.sh    Linux / Mac 环境安装脚本
-run.sh      Linux / Mac 启动脚本
+backend/                后端：4 个 Flask 进程（app.py 主服务 :5000，
+                         qwen3_server.py :5001，nemo_server.py :5002，
+                         qwen3tts_server.py :5003），各自独立虚拟环境，
+                         通过本地 HTTP 通信，避免依赖冲突
+frontend/                前端界面（Vue 3 + Element Plus + TypeScript）
+launcher.py               打包发布形态下的进程编排 / 系统托盘 / 原生窗口
+setup.bat / run.bat        Windows 环境安装 / 启动脚本
+setup.sh / run.sh          Linux / Mac 环境安装 / 启动脚本
+Docs/ARCHITECTURE.md      详细技术架构与代码剖析报告
 ```
+
+> 更完整的模块级目录说明（每个文件负责什么、彼此如何调用）见
+> [Docs/ARCHITECTURE.md](./Docs/ARCHITECTURE.md#3-目录结构详解)。
 
 ## ⚠️ 免责声明
 
