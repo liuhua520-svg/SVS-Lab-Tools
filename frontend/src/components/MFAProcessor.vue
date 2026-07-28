@@ -1031,6 +1031,21 @@
           </el-select>
         </el-form-item>
 
+        <!-- 关闭英语转片假名：仅日语（jpn）显示。开启后，日语文本中夹杂的
+             英语单词不再经 sudachipy 转换为片假名读音，改为按"英语单词级
+             对齐"的方式处理（与其它语种一致），因此开启后会一并显示下方
+             的"英语单词级对齐"开关（该开关平时对日语隐藏，因为日语默认
+             走片假名转换、没有"整词直接输出"这个概念）。 -->
+        <el-form-item
+          v-if="processingMode !== 'project-only' && formData.language === 'jpn'"
+          :label="t('processor.jaDisableKatakana')"
+        >
+          <el-switch v-model="jaDisableKatakana" />
+          <span class="option-hint">
+            {{ t('processor.jaDisableKatakanaHint') }}
+          </span>
+        </el-form-item>
+
         <!-- 对齐辅助移调：只生成一份临时移调音频副本喂给对齐后端做时间戳
              识别，不影响最终 WAV / F0 / 工程文件的音高，也不影响 LAB 时间
              戳（纯移调不改变时长）。高音音频/高音色 TTS 偶发导致对齐模型
@@ -1050,9 +1065,11 @@
           </span>
         </el-form-item>
 
-        <!-- 英语单词级对齐：仅当语言非日语时显示 -->
+        <!-- 英语单词级对齐：非日语始终显示；日语仅在用户已关闭"英语转
+             片假名"时才显示（否则日语文本里的英语单词默认走片假名转换，
+             没有"整词直接输出/拆 ARPABET"的选择余地）。 -->
         <el-form-item
-          v-if="processingMode !== 'project-only' && formData.language !== 'jpn'"
+          v-if="processingMode !== 'project-only' && (formData.language !== 'jpn' || jaDisableKatakana)"
           :label="t('processor.englishWordAlign')"
         >
           <el-switch v-model="englishWordAlign" />
@@ -1060,6 +1077,7 @@
             {{ t('processor.englishWordAlignHint') }}
           </span>
         </el-form-item>
+
 
         <el-form-item :label="t('processor.processingMode')">
           <el-radio-group v-model="processingMode">
@@ -1815,6 +1833,26 @@ interface SystemStatus {
 // 核心表单与模式状态（合并唯一声明）
 const processingMode = ref<ProcessingMode>('mfa-only')
 const englishWordAlign = ref<boolean>(false)  // 英语单词级对齐（不做 ARPABET 音素拆分）
+const jaDisableKatakana = ref<boolean>(false)  // 关闭英语转片假名（仅日语 jpn 有意义）：
+                                                // 关闭 sudachipy 把文本中英语单词转换为片假名
+                                                // 读音这一步，改为按"英语单词级对齐"处理；
+                                                // 默认 false（保持现状：日语默认转换为片假名）
+// 实际提交给后端的"关闭英语转片假名"值：该开关仅日语（jpn）有意义，
+// 切到其它语种时即便底层状态未及时重置（理论上不会，watch 已处理），
+// 提交时也显式 AND 一次语言条件兜底。
+const jaDisableKatakanaEffective = computed(() => formData.value.language === 'jpn' && jaDisableKatakana.value)
+
+// 实际提交给后端的"英语单词级对齐"值：非日语时直接使用开关状态；日语时
+// 仅在用户已开启 jaDisableKatakanaEffective 时才可能为 true（与上方 v-if
+// 的显示条件保持一致），否则强制为 false——即使底层状态因为某种边缘情况
+// 未被 watch 及时重置，提交时依然不会误传 true。
+const englishWordAlignEffective = computed(() => {
+  if (formData.value.language === 'jpn') {
+    return jaDisableKatakanaEffective.value && englishWordAlign.value
+  }
+  return englishWordAlign.value
+})
+
 const wordPhonemeMap    = ref<boolean>(false)  // 英语单词→音素映射手动开关，默认关闭；
                                                 // 仅在 showWordPhonemeMap（自动可见性条件）
                                                 // 满足时才会展示给用户，需用户主动开启后
@@ -2811,15 +2849,17 @@ const isTextOptional = computed(() =>
 // （showDictSource）完全独立，互不影响彼此的显示/隐藏。
 // - 必须是"完整处理"（full）：mfa-only 不产出工程文件，project-only 跳过
 //   对齐，两者都不会走到 g2p_en / 音素映射这一步；
-// - 语言切到日语时下方 watch(formData.value.language) 会主动把
+// - 语言切到日语且未开启"关闭英语转片假名"（jaDisableKatakana）时，下方
+//   watch(formData.value.language) / watch(jaDisableKatakana) 会主动把
 //   englishWordAlign 重置为 false（仅靠上面的 v-if 隐藏开关不会重置其
-//   底层状态，之前这里错误地假设"隐藏 = 恒为 false"，导致语言切到日语
-//   后本开关未同步隐藏——已改为显式 watch 重置，而不是依赖 v-if）；
+//   底层状态）；这里额外使用 englishWordAlignEffective（而非直接读取
+//   englishWordAlign.value）做二次兜底，日语下即便用户已关闭"关闭英语转
+//   片假名"、英语单词已回到走片假名转换，也不会误显示本开关；
 // - 输出格式需支持 SVP/VSQX（UTAU 没有 phonemes 字段可写）。
 const showWordPhonemeMap = computed(() => {
   const format = formData.value.outputFormat?.toLowerCase() || ''
   const isSupportedFormat = format.includes('sv') || format.includes('vsqx')
-  return processingMode.value === 'full' && englishWordAlign.value && isSupportedFormat
+  return processingMode.value === 'full' && englishWordAlignEffective.value && isSupportedFormat
 })
 
 // 实际提交给后端的"英语单词→音素映射"值：只有在开关控件可见
@@ -2912,13 +2952,31 @@ watch(alignerBackend, (backend) => {
   }
 })
 
-// 语言切到日语时，"英语单词级对齐"开关对日语没有意义（上方 v-if 会隐藏
-// 该开关），但仅隐藏控件不会重置其底层状态——这里显式重置为 false，
-// showWordPhonemeMap 依赖 englishWordAlign.value，会跟着自动隐藏；同时
-// 顺手把 wordPhonemeMap 本身也重置掉，避免用户切回非日语语种时，该开关
-// 无声无息地沿用切换前遗留的开启状态。
+// 语言切到日语时，"英语单词级对齐"开关默认对日语没有意义（上方 v-if 会
+// 隐藏该开关）——除非用户在日语下主动开启了"关闭英语转片假名"
+// （jaDisableKatakana），此时该开关会重新显示、允许继续开启。因此这里不
+// 再无条件重置 englishWordAlign，只在"日语且未开启关闭片假名转换"时才
+// 重置（showWordPhonemeMap 依赖 englishWordAlign.value，会跟着自动
+// 隐藏）；同时顺手把 wordPhonemeMap 也一并重置，避免用户切回非日语语种、
+// 或关闭 jaDisableKatakana 后，该开关无声无息地沿用切换前遗留的开启状态。
+// 语言切离日语时，"关闭英语转片假名"对其它语种没有意义，一并重置为
+// false，避免残留状态在切回日语时被误认为用户重新开启过。
 watch(() => formData.value.language, (lang) => {
-  if (lang === 'jpn') {
+  if (lang !== 'jpn') {
+    jaDisableKatakana.value = false
+  }
+  if (lang === 'jpn' && !jaDisableKatakana.value) {
+    englishWordAlign.value = false
+    wordPhonemeMap.value = false
+  }
+})
+
+// jaDisableKatakana 关闭时（用户在日语下手动关掉"关闭英语转片假名"），
+// 同样需要重置 englishWordAlign / wordPhonemeMap，逻辑与上面的语言切换
+// 完全一致（该开关本身只在 formData.value.language === 'jpn' 时可见，
+// 因此这里不需要再判断语言）。
+watch(jaDisableKatakana, (enabled) => {
+  if (!enabled) {
     englishWordAlign.value = false
     wordPhonemeMap.value = false
   }
@@ -4071,7 +4129,8 @@ const processAudio = async () => {
       formDataObj.append('volume', `${ttsConfig.value.volumeNum >= 0 ? '+' : ''}${ttsConfig.value.volumeNum}%`)
       formDataObj.append('aligner_device', advancedConfig.value.aligner_device)
       formDataObj.append('align_pitch_shift_semitones', advancedConfig.value.align_pitch_shift_semitones.toString())
-      formDataObj.append('english_word_align', (englishWordAlign.value && formData.value.language !== 'jpn').toString())
+      formDataObj.append('english_word_align', englishWordAlignEffective.value.toString())
+      formDataObj.append('ja_disable_katakana', jaDisableKatakanaEffective.value.toString())
       formDataObj.append('processing_mode', processingMode.value === 'full' ? 'full' : 'mfa-only')
 
       // Qwen3-TTS 专用参数：走 multipart 表单，所以参考音频直接作为文件
@@ -4213,7 +4272,8 @@ const processAudio = async () => {
       formDataObj.append('language', formData.value.language)
       formDataObj.append('aligner_device', advancedConfig.value.aligner_device)
       formDataObj.append('align_pitch_shift_semitones', advancedConfig.value.align_pitch_shift_semitones.toString())
-      formDataObj.append('english_word_align', (englishWordAlign.value && formData.value.language !== 'jpn').toString())
+      formDataObj.append('english_word_align', englishWordAlignEffective.value.toString())
+      formDataObj.append('ja_disable_katakana', jaDisableKatakanaEffective.value.toString())
       formDataObj.append('processing_mode', processingMode.value === 'full' ? 'full' : 'mfa-only')
 
       if (processingMode.value === 'full') {
@@ -4440,7 +4500,8 @@ if (processingMode.value === 'project-only') {
     formDataObj.append('whisperx_batch_size', advancedConfig.value.whisperx_batch_size.toString())
     formDataObj.append('qwen3_batch_size', advancedConfig.value.qwen3_batch_size.toString())
     formDataObj.append('nemo_model', advancedConfig.value.nemo_model || '')
-    formDataObj.append('english_word_align', (englishWordAlign.value && formData.value.language !== 'jpn').toString())
+    formDataObj.append('english_word_align', englishWordAlignEffective.value.toString())
+    formDataObj.append('ja_disable_katakana', jaDisableKatakanaEffective.value.toString())
 
     if (processingMode.value === 'full') {
       formDataObj.append('format', formData.value.outputFormat)

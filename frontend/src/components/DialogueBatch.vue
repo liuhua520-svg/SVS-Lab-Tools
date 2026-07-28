@@ -156,7 +156,15 @@
           </el-select>
         </el-form-item>
 
-        <el-form-item v-if="sharedLanguage !== 'jpn' && processingMode !== 'project-only'" :label="t('processor.englishWordAlign')">
+        <!-- 关闭英语转片假名：仅日语（jpn）显示，语义与 MFAProcessor.vue 单
+             文件页面完全一致。开启后会一并显示下方的"英语单词级对齐"开关
+             （该开关平时对日语隐藏）。 -->
+        <el-form-item v-if="sharedLanguage === 'jpn' && processingMode !== 'project-only'" :label="t('processor.jaDisableKatakana')">
+          <el-switch v-model="jaDisableKatakana" :disabled="processing" />
+          <span class="option-hint">{{ t('processor.jaDisableKatakanaHint') }}</span>
+        </el-form-item>
+
+        <el-form-item v-if="(sharedLanguage !== 'jpn' || jaDisableKatakana) && processingMode !== 'project-only'" :label="t('processor.englishWordAlign')">
           <el-switch v-model="englishWordAlign" :disabled="processing" />
           <span class="option-hint">{{ t('processor.englishWordAlignHint') }}</span>
         </el-form-item>
@@ -1395,11 +1403,17 @@
                 </el-select>
               </el-form-item>
 
-              <el-form-item v-if="boxSettings.draft.language !== 'jpn'" :label="t('processor.englishWordAlign')">
+              <el-form-item v-if="boxSettings.draft.language === 'jpn'" :label="t('processor.jaDisableKatakana')">
+                <el-switch v-model="boxSettings.draft.jaDisableKatakana" />
+                <span class="option-hint">{{ t('processor.jaDisableKatakanaHint') }}</span>
+              </el-form-item>
+
+              <el-form-item v-if="boxSettings.draft.language !== 'jpn' || boxSettings.draft.jaDisableKatakana" :label="t('processor.englishWordAlign')">
                 <el-switch v-model="boxSettings.draft.englishWordAlign" />
                 <span class="option-hint">{{ t('processor.englishWordAlignHint') }}</span>
               </el-form-item>
             </template>
+
 
             <!-- ============== 仅生成工程模式专属 ============== -->
             <template v-else>
@@ -1868,6 +1882,7 @@ interface BoxOverride {
   alignerBackend: string
   language: string
   englishWordAlign: boolean
+  jaDisableKatakana: boolean     // 关闭英语转片假名（仅日语 jpn 有意义）
   wordPhonemeMap: boolean
   // ── 仅生成工程模式专属 ──
   phonemeMode: 'none' | 'merge' | 'hiragana' | 'katakana'
@@ -2311,6 +2326,21 @@ const narratorsForEngine = (engine: string) =>
 
 const sharedLanguage = ref('cmn')
 const englishWordAlign = ref(false)
+const jaDisableKatakana = ref(false)  // 关闭英语转片假名（仅日语 jpn 有意义）：
+                                       // 语义与 MFAProcessor.vue 完全一致，默认 false
+                                       // （保持现状：日语默认将英语单词转换为片假名）。
+// 实际提交给后端的"关闭英语转片假名"值：该开关仅日语（jpn）有意义，提交
+// 时显式 AND 一次语言条件兜底。
+const jaDisableKatakanaEffective = computed(() => sharedLanguage.value === 'jpn' && jaDisableKatakana.value)
+// 实际提交给后端的"英语单词级对齐"值：非日语时直接使用开关状态；日语时
+// 仅在用户已开启 jaDisableKatakanaEffective 时才可能为 true，与模板里
+// 该开关的显示条件保持一致。
+const englishWordAlignEffective = computed(() => {
+  if (sharedLanguage.value === 'jpn') {
+    return jaDisableKatakanaEffective.value && englishWordAlign.value
+  }
+  return englishWordAlign.value
+})
 // 英语单词→音素映射手动开关：与 MFAProcessor.vue 保持一致，默认关闭，仅在
 // showWordPhonemeMap（自动可见性条件）满足时展示，用户需主动开启后才
 // 会随表单一起提交为 true（见 wordPhonemeMapEffective）。
@@ -2393,7 +2423,7 @@ const altBackends = computed(() => {
 const showWordPhonemeMap = computed(() => {
   const isSupportedFormat = outputFormat.value === 'sv' || outputFormat.value === 'vsqx'
   const hasAlignableBox = boxes.value.length === 0 || boxes.value.some((b) => !b.labFile && !b.midiFile)
-  return processingMode.value === 'full' && englishWordAlign.value && isSupportedFormat && hasAlignableBox
+  return processingMode.value === 'full' && englishWordAlignEffective.value && isSupportedFormat && hasAlignableBox
 })
 
 // 实际提交给后端的"英语单词→音素映射"值：只有在开关控件可见
@@ -2401,17 +2431,33 @@ const showWordPhonemeMap = computed(() => {
 // true，与 MFAProcessor.vue 一致。
 const wordPhonemeMapEffective = computed(() => showWordPhonemeMap.value && wordPhonemeMap.value)
 
-// 语种切到日语时，"英语单词级对齐"开关对日语没有意义（上方 v-if 会隐藏
-// 该开关），但仅隐藏控件不会重置其底层状态——这里显式重置为 false，
-// showWordPhonemeMap 依赖 englishWordAlign.value，会跟着自动隐藏；同时
-// 顺手把 wordPhonemeMap 本身也重置掉，避免切回非日语语种时该开关无声无息
-// 地沿用切换前遗留的开启状态。与 MFAProcessor.vue 保持一致。
+// 语种切到日语时，"英语单词级对齐"开关默认对日语没有意义——除非用户在
+// 日语下主动开启了"关闭英语转片假名"（jaDisableKatakana），此时该开关
+// 会重新显示、允许继续开启。因此这里不再无条件重置 englishWordAlign，
+// 只在"日语且未开启关闭片假名转换"时才重置（showWordPhonemeMap 依赖
+// englishWordAlign.value，会跟着自动隐藏）；同时顺手把 wordPhonemeMap
+// 也一并重置。语种切离日语时，"关闭英语转片假名"对其它语种没有意义，
+// 一并重置为 false，避免残留状态在切回日语时被误认为用户重新开启过。
+// 与 MFAProcessor.vue 保持一致。
 watch(sharedLanguage, (lang) => {
-  if (lang === 'jpn') {
+  if (lang !== 'jpn') {
+    jaDisableKatakana.value = false
+  }
+  if (lang === 'jpn' && !jaDisableKatakana.value) {
     englishWordAlign.value = false
     wordPhonemeMap.value = false
   }
   if (inputMode.value === 'tts') fetchAllBoxTtsVoices()
+})
+
+// jaDisableKatakana 关闭时（用户在日语下手动关掉"关闭英语转片假名"），
+// 同样需要重置 englishWordAlign / wordPhonemeMap，逻辑与上面的语言切换
+// 完全一致（该开关本身只在 sharedLanguage === 'jpn' 时可见）。
+watch(jaDisableKatakana, (enabled) => {
+  if (!enabled) {
+    englishWordAlign.value = false
+    wordPhonemeMap.value = false
+  }
 })
 
 // TTS跟读模式下没有"复用已有音频"的概念（音频当场合成），不存在
@@ -3115,6 +3161,7 @@ const createBoxOverride = (): BoxOverride => ({
   alignerBackend: 'mfa',
   language: 'cmn',
   englishWordAlign: false,
+  jaDisableKatakana: false,
   wordPhonemeMap: false,
   phonemeMode: 'none',
   jaDevoicedPhoneme: false,
@@ -3223,15 +3270,33 @@ const resetBoxSettings = () => {
 // 弹窗内"英语单词→音素映射"开关的可见性：与页面顶部 showWordPhonemeMap
 // 同样的判定条件，但基于弹窗草稿里的语言/英语单词级对齐状态，而不是
 // 全局的 sharedLanguage / englishWordAlign（该框可能覆盖了不同的语言）。
+// 日语场景下，只有草稿已开启 jaDisableKatakana 时 englishWordAlign 才可能
+// 为 true（与模板里该开关的显示条件一致），故这里直接复用
+// draft.englishWordAlign 的值即可，无需额外再判断一次 jaDisableKatakana。
 const showBoxWordPhonemeMap = computed(() => {
   const isSupportedFormat = outputFormat.value === 'sv' || outputFormat.value === 'vsqx'
   return boxSettings.value.draft.englishWordAlign && isSupportedFormat
 })
 
-// 语言切到日语时，弹窗草稿里的"英语单词级对齐"/"英语单词→音素映射"同样
-// 没有意义，随之重置，与页面顶部 watch(sharedLanguage) 逻辑一致。
+// 语言切到日语时，弹窗草稿里的"英语单词级对齐"/"英语单词→音素映射"默认
+// 也没有意义——除非用户已经在草稿里开启了 jaDisableKatakana（关闭英语转
+// 片假名），此时该开关会重新显示、允许继续开启，因此不再无条件重置。
+// 语言切离日语时，jaDisableKatakana 对其它语种没有意义，一并重置，与
+// 页面顶部 watch(sharedLanguage) 逻辑保持一致。
 watch(() => boxSettings.value.draft.language, (lang) => {
-  if (lang === 'jpn') {
+  if (lang !== 'jpn') {
+    boxSettings.value.draft.jaDisableKatakana = false
+  }
+  if (lang === 'jpn' && !boxSettings.value.draft.jaDisableKatakana) {
+    boxSettings.value.draft.englishWordAlign = false
+    boxSettings.value.draft.wordPhonemeMap = false
+  }
+})
+
+// jaDisableKatakana 在弹窗草稿里被关闭时，同样需要重置
+// englishWordAlign / wordPhonemeMap，逻辑与上面的语言切换完全一致。
+watch(() => boxSettings.value.draft.jaDisableKatakana, (enabled) => {
+  if (!enabled) {
     boxSettings.value.draft.englishWordAlign = false
     boxSettings.value.draft.wordPhonemeMap = false
   }
@@ -3792,13 +3857,17 @@ const buildFormData = async (): Promise<FormData> => {
     if (ov.enabled) {
       fd.append(`override_aligner_backend_${i}`, ov.alignerBackend)
       fd.append(`override_language_${i}`, ov.language)
+      // 该框的"关闭英语转片假名"仅日语（jpn）有意义。
+      const ovJaDisableKatakana = ov.language === 'jpn' && ov.jaDisableKatakana
+      fd.append(`override_ja_disable_katakana_${i}`, String(ovJaDisableKatakana))
       fd.append(
         `override_english_word_align_${i}`,
-        String(processingMode.value === 'full' && ov.englishWordAlign && ov.language !== 'jpn')
+        String(processingMode.value === 'full' && ov.englishWordAlign && (ov.language !== 'jpn' || ovJaDisableKatakana))
       )
       const boxShowWordPhonemeMap =
         processingMode.value === 'full' &&
         ov.englishWordAlign &&
+        (ov.language !== 'jpn' || ovJaDisableKatakana) &&
         (outputFormat.value === 'sv' || outputFormat.value === 'vsqx')
       fd.append(`override_word_phoneme_map_${i}`, String(boxShowWordPhonemeMap && ov.wordPhonemeMap))
       fd.append(`override_phoneme_mode_${i}`, processingMode.value === 'project-only' ? ov.phonemeMode : 'none')
@@ -3919,8 +3988,9 @@ const buildFormData = async (): Promise<FormData> => {
   fd.append('nemo_model', advanced.value.nemo_model || '')
   fd.append(
     'english_word_align',
-    String(processingMode.value === 'full' && englishWordAlign.value && sharedLanguage.value !== 'jpn')
+    String(processingMode.value === 'full' && englishWordAlignEffective.value)
   )
+  fd.append('ja_disable_katakana', String(processingMode.value === 'full' && jaDisableKatakanaEffective.value))
   // word_phoneme_map（英语单词→音素映射）与 dict_source（选择词典）彼此
   // 解耦、独立提交，见 MFAProcessor.vue 同名注释。USTX 没有 phonemes
   // 字段，后端也会对 format === 'ustx' 时强制关闭 word_phoneme_map，
