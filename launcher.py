@@ -77,6 +77,23 @@ subprocess.Popen 拉一个全新进程，旧进程 os._exit(0)”，重启之后
 Popen 对象，还要按命令行特征（脚本文件名）再扫一遍进程列表，把设置页
 触发重启后产生的“孤儿”进程也清理掉，否则每次在设置页点过一次“应用
 更改”，退出按钮就会漏杀一个进程，只能靠任务管理器强杀。
+
+关于命令行调用模式（`启动器.exe cmd ...`）
+──────────────────────────────────────────
+参考 VVTALK 项目 reliance/interface/commandline.py 的模式：用
+sys.argv[1] 是否等于 "cmd" 来判断这次启动到底是"正常跑起来"（托盘 +
+pywebview 原生窗口 + 三个后端服务）还是"命令行调用一次就退"。
+
+本脚本自己不实现具体的标注提取/音高提取/工程文件生成逻辑——那些依赖
+mfa_env 里的一整套重依赖（MFA/torch/pyworld 等），不适合塞进这个刻意
+做得很薄的 exe 里。真正的实现在 backend/commandline.py（CmdUI 类），
+挂在 backend/app.py 的 `if __name__ == "__main__":` 分支里（判断逻辑
+与本文件的 _is_cmd_invocation() 完全一致）。本脚本检测到 cmd 模式后，
+只做一件事：把整条命令行原样转发给
+`runtime/mfa_env/python.exe backend/app.py cmd ...` 子进程，透传它的
+stdout/stderr/退出码，不起托盘、不开原生窗口、不拉 qwen3/nemo 两个
+微服务。用法及完整参数见 backend/commandline.py 顶部说明，或运行
+`启动器.exe cmd <operation> --help`。
 """
 from __future__ import annotations
 
@@ -134,6 +151,14 @@ SERVICES: List[Dict[str, Optional[str]]] = [
     {"name": "nemo",  "script": "nemo_server.py",  "env": "nemo_env",  "skip_key": "skip_start_nemo_server"},
 ]
 
+# 命令行一次性调用模式（`启动器.exe cmd <operation> ...`）固定转发给
+# app.py（mfa_env）——commandline.py 的 CmdUI 就是挂在 app.py 这个进程
+# 里的（backend/commandline.py + backend/app.py 的 __main__ 分流逻辑），
+# 三个后端服务里只有它认识 "cmd" 这个子命令，qwen3_server.py /
+# nemo_server.py 是纯常驻 HTTP 微服务，没有对应的命令行入口。
+CMD_TRIGGER = "cmd"
+CMD_SERVICE = SERVICES[0]  # {"name": "app", "script": "app.py", "env": "mfa_env", ...}
+
 # 与 app_settings.py 里 SETTINGS_PATH 的约定保持一致：设置文件固定放在
 # backend/settings/app_settings.json。launcher.py 在拉起子进程之前，
 # app.py 还没启动，没有 HTTP 接口可用，所以这里直接读文件，不发请求。
@@ -170,6 +195,95 @@ def _env_python(env_name: str) -> Optional[Path]:
     if candidate2.exists():
         return candidate2
     return None
+
+
+def _cmd_eprint(message: str) -> None:
+    """
+    命令行模式下打印错误信息给用户看，同时兼顾 --noconsole 打包出来的
+    exe：正常从终端调用 `exe cmd ...` 时 sys.stderr 是那个终端的句柄，
+    print() 没问题；但 PyInstaller --noconsole/--windowed 在某些版本/
+    某些启动路径下会把 sys.stdout / sys.stderr 设为 None（本文件顶部
+    logging 配置那里也提到了同样的原因，所以日志改成只写文件）。这里
+    做一次判空，None 时退化为只写日志文件，不让一次简单的错误提示反而
+    因为 print(..., file=None) 抛 AttributeError 把真正的错误信息盖掉。
+    """
+    if sys.stderr is not None:
+        try:
+            print(message, file=sys.stderr)
+            return
+        except Exception:
+            pass
+    logger.error(message)
+
+
+def _is_cmd_invocation(argv=None) -> bool:
+    """
+    判断规则必须和 backend/commandline.py 里 is_cmd_mode() 的判断逻辑
+    完全一致（都是"argv[1] 精确等于 'cmd'"）——这里先判断一次决定要不要
+    转发，转发过去之后 app.py 那边再判断一次决定要不要走 CmdUI，两处
+    任何一处放宽/收紧匹配规则都要同步改另一处，否则会出现"已经被
+    launcher 转发过来了，但 app.py 自己又判断不是 cmd 模式，转而去启动
+    整个 HTTP 服务"这类不一致。
+    """
+    argv = sys.argv if argv is None else argv
+    return len(argv) > 1 and argv[1] == CMD_TRIGGER
+
+
+def _run_cmd_mode(argv: List[str]) -> int:
+    """
+    `启动器.exe cmd <operation> ...` 命令行一次性调用模式：不起托盘、
+    不开 pywebview 原生窗口、不拉起 qwen3/nemo 两个微服务，只把整条
+    命令行原样转发给 runtime/mfa_env/python.exe backend/app.py，等它
+    跑完，把它的 stdout/stderr/退出码原样透传回来，然后本进程退出。
+
+    参考 VVTALK 项目 reliance/interface/commandline.py 的 "argv[1]=='cmd'
+    则不启动 GUI，转而走命令行分支" 的判断模式；这里额外多一层"转发"，
+    是因为本项目的命令行实现（CmdUI）依赖 mfa_env 里的一整套重依赖
+    （pipeline.py / tsubaki_processor.py 等），不适合塞进 launcher.py
+    自己这个刻意做得很薄、不引入重依赖的 exe 里（见文件顶部说明）。
+
+    转发细节：
+      - argv[0]（启动器.exe 自身路径）替换成 backend/app.py 的路径，
+        argv[1:]（"cmd" 及后面所有参数）原样保留，拼成
+        [python.exe, app.py, "cmd", ...] 交给 mfa_env 的 Python 执行——
+        与 backend/commandline.is_cmd_mode() 里"argv[1] 是否等于 cmd"
+        的判断逻辑天然对齐，app.py 收到后会自己再判断一次走 CmdUI 分支。
+      - 不用 CREATE_NEW_CONSOLE：命令行调用场景下用户就是从现有的
+        cmd/PowerShell 窗口敲的这条命令，期望输出直接打印在当前窗口里，
+        而不是像托盘模式那样每个服务弹一个新控制台。--noconsole 打包出的
+        启动器.exe 自身没有控制台子系统，但从已有终端窗口调用时，子进程
+        默认继承的标准输入/输出/错误句柄仍然是那个终端的，stdout/stderr
+        直接透传，不需要额外配置。
+      - 不注入 SVS_SKIP_AUTO_BROWSER：那个环境变量是给"常驻 HTTP 服务 +
+        pywebview 原生窗口"场景用的，commandline.py 的 CmdUI 分支根本
+        不会走到 main()/app.run()，不受影响，但保留默认环境变量传递
+        （env=None 即继承当前进程环境）更简单、也没有副作用。
+    """
+    py = _env_python(str(CMD_SERVICE["env"]))
+    script = BACKEND_DIR / str(CMD_SERVICE["script"])
+
+    if py is None:
+        _cmd_eprint(
+            f"[错误] 找不到命令行功能依赖的 Python 运行时 "
+            f"(runtime/{CMD_SERVICE['env']}/python.exe 不存在)。\n"
+            f"请确认本 exe 与 backend/ frontend/ runtime/ 三个目录放在同一层级下，"
+            f"且 runtime/{CMD_SERVICE['env']}/ 已经用 pack_runtime.bat 打包好。"
+        )
+        return 1
+    if not script.exists():
+        _cmd_eprint(f"[错误] 找不到 {script}，命令行功能不可用。")
+        return 1
+
+    forwarded = [str(py), str(script), *argv[1:]]  # argv[1:] = ["cmd", operation, ...]
+    logger.info("命令行模式，转发到: %s", forwarded)
+
+    try:
+        result = subprocess.run(forwarded, cwd=str(BACKEND_DIR))
+        return result.returncode
+    except Exception as e:
+        logger.error("命令行转发失败: %s", e)
+        _cmd_eprint(f"[错误] 命令行转发失败: {e}")
+        return 1
 
 
 def _spawn(service: Dict[str, str]) -> Optional[subprocess.Popen]:
@@ -409,4 +523,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if _is_cmd_invocation():
+        # 命令行一次性调用：转发给 backend/app.py（mfa_env）执行，不启动
+        # 托盘/原生窗口/qwen3/nemo 微服务，跑完就退出。用法例如:
+        #   Tsubaki启动器.exe cmd mfa-only -a in.wav -t "参考文本" -o out.lab
+        #   Tsubaki启动器.exe cmd full -a in.wav -t "参考文本" -f sv -o out.svp
+        # 完整参数列表见 backend/commandline.py，或运行:
+        #   Tsubaki启动器.exe cmd <operation> --help
+        sys.exit(_run_cmd_mode(sys.argv))
     main()
