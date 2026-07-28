@@ -80,15 +80,16 @@ NeMo / Qwen3-ASR / Qwen3-TTS 各自对 `transformers`、`packaging`、`torch` �
 
 ### 2.2 进程编排：launcher.py
 
-`launcher.py`（534 行）是打包发布形态下的总控进程，职责很"薄"（刻意不 import
+`launcher.py`（550 行）是打包发布形态下的总控进程，职责很"薄"（刻意不 import
 torch/nemo 等重依赖，PyInstaller 打包体积小）：
 
 - 读取 `backend/settings/app_settings.json` 里的 `skip_start_qwen3_server` /
-  `skip_start_nemo_server` 开关，决定本次是否要拉起对应子进程（这些开关只影响下次
-  完整启动，不影响正在运行的进程）；
+  `skip_start_nemo_server` / `skip_start_qwen3tts_server` 开关，决定本次是否要拉起
+  对应子进程（这些开关只影响下次完整启动，不影响正在运行的进程）；
 - 用 `subprocess.Popen` 以各自 `runtime/<env>/python.exe` 解释器分别拉起
-  `app.py`（`mfa_env`）、`qwen3_server.py`（`qwen3_env`）、`nemo_server.py`（`nemo_env`）
-  **三个**服务（`SERVICES` 列表，`launcher.py:148-152`）；
+  `app.py`（`mfa_env`）、`qwen3_server.py`（`qwen3_env`）、`nemo_server.py`（`nemo_env`）、
+  `qwen3tts_server.py`（`qwen3tts_env`）**四个**服务（`SERVICES` 列表，
+  `launcher.py:162-167`）；
 - 轮询 `/api/health` 直到主服务就绪（`_wait_for_backend_ready(timeout=30.0)`，最多
   30s 超时，超时也会继续开窗口，前端自行重试）；
 - 用 `pywebview` 起一个原生窗口加载 `http://127.0.0.1:5000`，`pystray` 提供系统托盘
@@ -97,13 +98,15 @@ torch/nemo 等重依赖，PyInstaller 打包体积小）：
   兜底清理"设置页点过重启"产生的孤儿进程（因为 `/restart` 路由是
   "关端口 → 开新进程 → 旧进程 `os._exit(0)`"，PID 会变）。
 
-> **已知遗漏（截至本次审阅仍未修复）**：`launcher.py` 的 `SERVICES` 列表只登记了
-> `app`/`qwen3`/`nemo` 三项，**没有** `qwen3tts_server.py`。打包发布形态下的
-> "一键启动"不会自动拉起 5003 端口的 Qwen3-TTS 服务，需要用户手动另外启动
-> `qwen3tts_server.py`，或修改 `launcher.py` 补上第四项（详见
-> [§20](#20-已知技术债与可改进点)）。`app_settings.py` 里仍保留着
-> `skip_start_qwen3tts_server` 这个设置字段，但 `launcher.py` 从未读取它，是一处
-> "设置项存在、但对应启动逻辑缺失"的不一致点，容易被误以为已经接好。
+> **历史修复记录**：`launcher.py` 的 `SERVICES` 列表早期只登记了 `app`/`qwen3`/`nemo`
+> 三项，遗漏了 `qwen3tts_server.py`（打包后的"一键启动"曾经不会自动拉起 5003 端口的
+> Qwen3-TTS 服务，需要手动另开进程）。经核对最新源码，这个遗漏**现已修复**：`SERVICES`
+> 补上了第四项 `{"name": "qwen3tts", "script": "qwen3tts_server.py", "env":
+> "qwen3tts_env", "skip_key": "skip_start_qwen3tts_server"}`，与另外两个可选微服务
+> 的注册方式完全对齐，`skip_start_qwen3tts_server` 这个此前"存在但没被读取"的设置
+> 字段现在也接上了实际的启动/跳过逻辑。源码注释里同时说明：即便
+> `app_settings.py` 的 `DEFAULT_SETTINGS` 暂未补上该键，`dict.get(skip_key,
+> False)` 也会按"不跳过"处理，不影响默认行为。
 
 launcher.py 同时是 **CLI 一次性调用模式**的转发入口：检测到 `argv[1] == "cmd"`
 （`_is_cmd_invocation()`）时，完全跳过托盘/原生窗口/四个服务的常规启动流程，只把整条
@@ -726,11 +729,6 @@ BSD-3/Apache-2.0/LGPL 等），`Docs/LICENSES/` 存放对应许可证全文，�
 
 以下是通读代码后观察到、值得后续关注的点（非价值判断，仅作维护参考）：
 
-- **`launcher.py` 未纳入 `qwen3tts_server.py`**：详见 [§2.2](#22-进程编排launcherpy)，
-  `SERVICES` 列表只登记了 `app`/`qwen3`/`nemo` 三项，Qwen3-TTS 功能在打包发布形态下
-  不会随"一键启动"自动拉起，需要用户手动另外启动 `qwen3tts_server.py` 或修改
-  `launcher.py`。这是审阅时应重点关注的一处——文档历史版本一度误记为"已修复"，
-  实际源码核对后确认仍未处理。
 - **没有自动化测试**：仓库内未发现 `tests/` 目录或任何测试框架配置（`pytest`/`unittest`
   均未出现在依赖或文件列表中）。对于 `alt_aligners.py` 这类算法密度很高、历史上反复
   出现过对齐质量 bug 的模块，补充针对分块规划、静音检测等纯函数的单元测试会显著
