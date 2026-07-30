@@ -44,6 +44,13 @@ MFA / TTS / 对齐 / 词典等其它任何后端模块，供 /api/text/optimize 
                                       （逗号，,、句号。！？.!? 均算一句）
                                       为分句依据，每凑够 N 句换行一次，N
                                       由前端弹窗的数字输入框传入（默认 2）。
+  优化文本 - 繁体转简体 traditional_to_simplified() —— 调用 OpenCC
+                                      "t2s" 配置，只做字形转换，不做地区
+                                      词汇替换，与语种无关（不管前端语言
+                                      下拉框选的是什么都会转换）。
+  优化文本 - 简体转繁体 simplified_to_traditional() —— 调用 OpenCC
+                                      "s2t" 配置，同上，字形转换、不做
+                                      词汇替换，与语种无关。
 
 与 pipeline.py 里 _convert_digits_to_words() 的关系
 ────────────────────────────────────────────────────
@@ -1091,6 +1098,68 @@ def newline_every_n_sentences(text: str, n: int = 2) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# 对外入口（新增）：繁体转简体 / 简体转繁体（调用 OpenCC）
+#   与语种无关（_ACTIONS_NO_LANG）：不管前端"语言"下拉框当前选的是什么，
+#   点击这两个按钮都会对整段文本做繁简转换——这是用户在"优化文本"弹窗里
+#   手动、显式触发的操作，语义上就是"我现在就是要转换这段文字的繁简"，
+#   不应该因为语言选择框恰好停在别的语种上就跳过或改变行为（这一点与
+#   alt_aligners.py 的 convert_traditional_to_simplified() 刻意不同——那
+#   个函数是自动对齐预处理的一部分，只在 language 判定为中文时才生效，
+#   服务于完全不同的场景）。
+#
+#   只做繁→简 / 简→繁的字形转换（OpenCC "s2t" / "t2s" 配置），不做任何
+#   两岸三地词汇层面的地域化替换（不使用 "s2tw"/"tw2s" 等带地区词汇转换
+#   的配置），原因与 alt_aligners.py 里的同类说明一致：本模块只应该改变
+#   文字的繁简字形，不应该改变用户本来选择的具体用词。
+#
+#   opencc 未安装、或转换过程中出现任何异常时，转换失败会被上层
+#   process_text() 统一捕获并原样返回错误信息（"转换失败: ..."），不会
+#   导致 /api/text/optimize 直接 500，也不会静默返回未转换的原文本掩盖
+#   问题——用户能在弹窗里看到明确的报错提示，知道需要安装 opencc。
+# ═════════════════════════════════════════════════════════════════════════
+
+_opencc_t2s_instance = None  # 繁体 → 简体
+_opencc_s2t_instance = None  # 简体 → 繁体
+
+
+def _get_opencc_converter(config: str):
+    """
+    懒加载指定配置的 OpenCC 转换器实例并缓存复用。config 只会是 "t2s"
+    或 "s2t" 之一（见下方两个对外函数），因此这里用两个独立的模块级
+    缓存变量，而不是维护一个通用的 dict 缓存——两个转换方向各自复用一份
+    实例即可，没有必要支持任意更多的 OpenCC 配置。
+    """
+    global _opencc_t2s_instance, _opencc_s2t_instance
+    if config == "t2s":
+        if _opencc_t2s_instance is None:
+            from opencc import OpenCC
+            _opencc_t2s_instance = OpenCC("t2s")
+        return _opencc_t2s_instance
+    if config == "s2t":
+        if _opencc_s2t_instance is None:
+            from opencc import OpenCC
+            _opencc_s2t_instance = OpenCC("s2t")
+        return _opencc_s2t_instance
+    raise ValueError(f"未知的 OpenCC 配置: {config}")
+
+
+def traditional_to_simplified(text: str) -> str:
+    """繁体转简体（调用 OpenCC "t2s"）。text 为空时原样返回。"""
+    if not text:
+        return text
+    converter = _get_opencc_converter("t2s")
+    return converter.convert(text)
+
+
+def simplified_to_traditional(text: str) -> str:
+    """简体转繁体（调用 OpenCC "s2t"）。text 为空时原样返回。"""
+    if not text:
+        return text
+    converter = _get_opencc_converter("s2t")
+    return converter.convert(text)
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # 统一调度入口：/api/text/optimize 直接调用这一个函数即可，按 action 分发
 # 到上面各个转换函数之一。action 未知或为空时原样返回文本，不做任何改动
 # （避免前端传参出错时静默产生意料之外的转换结果）。
@@ -1113,6 +1182,8 @@ _ACTIONS_NO_LANG = {
     "uppercase_to_lowercase": uppercase_to_lowercase,     # 优化文本：大写转小写（与语种无关）
     "lowercase_to_uppercase": lowercase_to_uppercase,     # 优化文本：小写转大写（与语种无关）
     "capitalize_words": capitalize_words,                 # 优化文本：首字母大写其余小写（与语种无关）
+    "traditional_to_simplified": traditional_to_simplified,  # 优化文本：繁体转简体（OpenCC t2s，与语种无关）
+    "simplified_to_traditional": simplified_to_traditional,  # 优化文本：简体转繁体（OpenCC s2t，与语种无关）
 }
 
 
@@ -1126,7 +1197,8 @@ def process_text(text: str, action: str, language: str = "zh", n: int = 2) -> Di
       "add_spaces" | "strip_symbols" | "newline_after_comma" |
       "newline_after_period" | "newline_every_n" | "hyphen_to_space" |
       "add_spaces_uppercase" | "uppercase_to_lowercase" |
-      "lowercase_to_uppercase" | "capitalize_words"
+      "lowercase_to_uppercase" | "capitalize_words" |
+      "traditional_to_simplified" | "simplified_to_traditional"
     language: 语言代码（cmn/yue/eng/jpn/kor 或 zh/en/ja/ko），仅 smart /
       number_only / digit_to_words / symbol_only 需要，其余 action 与语种
       无关。

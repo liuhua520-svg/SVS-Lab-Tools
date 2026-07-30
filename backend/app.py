@@ -961,7 +961,8 @@ def text_optimize():
     "strip_symbols" | "newline_after_comma" | "newline_after_period" |
     "newline_every_n" | "hyphen_to_space" | "add_spaces_uppercase" |
     "uppercase_to_lowercase" | "lowercase_to_uppercase" |
-    "capitalize_words", "language":
+    "capitalize_words" | "traditional_to_simplified" |
+    "simplified_to_traditional", "language":
     "cmn"|"yue"|"eng"|"jpn"|"kor"（仅
     smart/number_only/digit_to_words/symbol_only 需要，其余 action 与
     语种无关，可不传）, "n": 2（仅 newline_every_n 需要，表示"每几句插入
