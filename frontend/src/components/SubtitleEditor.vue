@@ -13,20 +13,26 @@
       <div class="section-block">
         <div class="section-heading">📁 {{ t('subtitleEditor.uploadTitle') }}</div>
 
-        <el-upload
-          v-if="!mediaInfo"
-          drag
-          action="#"
-          :auto-upload="false"
-          :limit="1"
-          :disabled="uploading"
-          :on-change="handleFileSelect"
-          accept="video/*,audio/*,.mp4,.mkv,.mov,.avi,.webm,.flv,.wmv,.ts,.m4v,.wav,.mp3,.flac,.m4a,.aac,.ogg,.wma,.opus"
-          class="media-upload"
-        >
-          <el-icon class="upload-icon"><UploadFilled /></el-icon>
-          <div class="el-upload__text">{{ t('subtitleEditor.uploadHint') }}</div>
-        </el-upload>
+        <div v-if="!mediaInfo" class="audio-upload-row">
+          <el-upload
+            drag
+            action="#"
+            :auto-upload="false"
+            :limit="1"
+            :disabled="uploading"
+            :on-change="handleFileSelect"
+            accept="video/*,audio/*,.mp4,.mkv,.mov,.avi,.webm,.flv,.wmv,.ts,.m4v,.wav,.mp3,.flac,.m4a,.aac,.ogg,.wma,.opus"
+            class="media-upload"
+          >
+            <el-icon class="upload-icon"><UploadFilled /></el-icon>
+            <div class="el-upload__text">{{ t('subtitleEditor.uploadHint') }}</div>
+          </el-upload>
+          <AudioRecordPreview
+            :current-file="null"
+            :disabled="uploading"
+            @recorded="(f: File) => handleFileSelect({ raw: f })"
+          />
+        </div>
 
         <div v-if="uploading" class="upload-progress">
           <el-progress :percentage="100" :indeterminate="true" :duration="1.5" />
@@ -43,6 +49,20 @@
             <span v-if="mediaInfo.duration" class="media-duration">
               {{ t('subtitleEditor.fileDuration') }}: {{ formatDuration(mediaInfo.duration) }}
             </span>
+            <!-- 上传成功后，本地 File 引用已经不在了（handleFileSelect 只
+                 保留服务端返回的 mediaInfo），因此这里改用 sourceUrl 模式
+                 预览/下载，而不是像上传前那样传 currentFile。录音按钮在
+                 这个状态下隐藏（showRecordButton=false）——重新录音应该走
+                 下面的"重新选择文件"按钮触发完整的替换+重新上传流程，而
+                 不是在已上传状态下静默录一段新音频、却不触发重新上传，
+                 导致预览的是新录音、但实际参与字幕编辑的仍是服务端旧
+                 文件。 -->
+            <AudioRecordPreview
+              :current-file="null"
+              :source-url="mediaInfo.play_url"
+              :download-file-name="mediaInfo.filename"
+              :show-record-button="false"
+            />
           </div>
           <el-button size="small" @click="resetMedia">
             🔁 {{ t('subtitleEditor.uploadReplace') }}
@@ -225,6 +245,7 @@ import { UploadFilled } from '@element-plus/icons-vue'
 import { useAppLocale } from '../i18n'
 import SubtitleWaveform from './SubtitleWaveform.vue'
 import { useSubtitleHistory } from './useSubtitleHistory'
+import AudioRecordPreview from './AudioRecordPreview.vue'
 
 const { t } = useAppLocale()
 
@@ -904,6 +925,19 @@ onBeforeUnmount(async () => {
 .media-upload :deep(.el-upload-dragger) {
   width: 100%;
   padding: 32px 20px;
+}
+
+/* 拖拽上传框 + 录音/预览按钮并排布局，与 SubtitleRecognizer.vue 保持一致。 */
+.audio-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.audio-upload-row .media-upload {
+  flex: 1;
+  min-width: 0;
+  width: auto;
 }
 
 .upload-icon {

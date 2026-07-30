@@ -42,20 +42,31 @@
       <div class="section-block">
         <div class="section-heading">📁 {{ t('subtitle.uploadTitle') }}</div>
 
-        <el-upload
-          v-if="!mediaInfo"
-          drag
-          action="#"
-          :auto-upload="false"
-          :limit="1"
-          :disabled="uploading"
-          :on-change="handleFileSelect"
-          accept="video/*,audio/*,.mp4,.mkv,.mov,.avi,.webm,.flv,.wmv,.ts,.m4v,.wav,.mp3,.flac,.m4a,.aac,.ogg,.wma,.opus"
-          class="media-upload"
-        >
-          <el-icon class="upload-icon"><UploadFilled /></el-icon>
-          <div class="el-upload__text">{{ t('subtitle.uploadHint') }}</div>
-        </el-upload>
+        <div v-if="!mediaInfo" class="audio-upload-row">
+          <el-upload
+            drag
+            action="#"
+            :auto-upload="false"
+            :limit="1"
+            :disabled="uploading"
+            :on-change="handleFileSelect"
+            accept="video/*,audio/*,.mp4,.mkv,.mov,.avi,.webm,.flv,.wmv,.ts,.m4v,.wav,.mp3,.flac,.m4a,.aac,.ogg,.wma,.opus"
+            class="media-upload"
+          >
+            <el-icon class="upload-icon"><UploadFilled /></el-icon>
+            <div class="el-upload__text">{{ t('subtitle.uploadHint') }}</div>
+          </el-upload>
+          <!-- 录音只产出音频，不涉及视频；识别流程本身对音频/视频一视同仁，
+               因此这里直接复用 handleFileSelect，与手动选择文件走同一条
+               上传路径。上传前尚无 mediaInfo，预览按钮退化为播放"刚录制
+               但还没点击上传/尚在上传中"的本地录音（见 AudioRecordPreview
+               内部 justRecordedBlob 兜底逻辑）。 -->
+          <AudioRecordPreview
+            :current-file="null"
+            :disabled="uploading"
+            @recorded="(f: File) => handleFileSelect({ raw: f })"
+          />
+        </div>
 
         <div v-if="uploading" class="upload-progress">
           <el-progress :percentage="100" :indeterminate="true" :duration="1.5" />
@@ -72,6 +83,22 @@
             <span v-if="mediaInfo.duration" class="media-duration">
               {{ t('subtitle.fileDuration') }}: {{ formatDuration(mediaInfo.duration) }}
             </span>
+            <!-- 上传成功后，本地 File 引用已经不在了（handleFileSelect 只
+                 保留服务端返回的 mediaInfo），因此这里改用 sourceUrl 模式
+                 预览/下载，而不是像上传前那样传 currentFile。视频文件的
+                 play_url 同样可以用 <audio> 播放（浏览器只关心资源是否
+                 可解码，不关心标签本身），因此不区分 is_video。录音按钮
+                 在这个状态下隐藏（showRecordButton=false）——重新录音应该
+                 走下面的"重新选择文件"按钮触发完整的替换+重新上传流程，
+                 而不是在已上传状态下静默录一段新音频、却不触发重新上传，
+                 导致预览的是新录音、但实际参与识别的仍是服务端旧文件。 -->
+            <AudioRecordPreview
+              :current-file="null"
+              :source-url="mediaInfo.play_url"
+              :download-file-name="mediaInfo.filename"
+              :show-record-button="false"
+              :disabled="recognizing"
+            />
           </div>
           <el-button size="small" :disabled="recognizing" @click="resetMedia">
             🔁 {{ t('subtitle.uploadReplace') }}
@@ -346,6 +373,7 @@ import { UploadFilled } from '@element-plus/icons-vue'
 import { useAppLocale } from '../i18n'
 import SubtitleWaveform from './SubtitleWaveform.vue'
 import { useSubtitleHistory } from './useSubtitleHistory'
+import AudioRecordPreview from './AudioRecordPreview.vue'
 
 const { t } = useAppLocale()
 
@@ -1248,6 +1276,20 @@ onBeforeUnmount(() => {
 .media-upload :deep(.el-upload-dragger) {
   width: 100%;
   padding: 32px 20px;
+}
+
+/* 拖拽上传框 + 录音/预览按钮并排布局：.media-upload 本身撑满整行宽度，
+   这里让它在 flex 容器里可以收缩，把空间让给右侧的录音/预览按钮。 */
+.audio-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.audio-upload-row .media-upload {
+  flex: 1;
+  min-width: 0;
+  width: auto;
 }
 
 .upload-icon {

@@ -509,6 +509,11 @@
             <el-button :disabled="processing || subtitleImportDialog.loading" @click="subtitleImportAudioInputRef?.click()">
               {{ t('dialogue.chooseFile') }}
             </el-button>
+            <AudioRecordPreview
+              :current-file="subtitleImportDialog.audioFile"
+              :disabled="processing || subtitleImportDialog.loading"
+              @recorded="(f: File) => { subtitleImportDialog.audioFile = f }"
+            />
             <span v-if="subtitleImportDialog.audioFile" class="file-info" style="margin-left:8px">
               ✓ {{ subtitleImportDialog.audioFile.name }}
             </span>
@@ -746,7 +751,7 @@
 
                   <!-- VoiceClone（Base 模型）：导入参考音频 + 可选参考文本 + x-vector 开关 -->
                   <template v-if="box.ttsQwen3Mode === 'voice_clone'">
-                    <div style="margin-top: 6px">
+                    <div style="margin-top: 6px" class="audio-upload-row">
                       <el-upload
                         drag
                         action="#"
@@ -759,10 +764,15 @@
                       >
                         <div class="el-upload__text">{{ t('processor.qwen3TtsRefAudioChoose') }}</div>
                       </el-upload>
-                      <span v-if="boxQwen3RefAudioName(box)" style="margin-left: 10px; font-size: 12px; color: var(--el-text-color-secondary)">
-                        {{ boxQwen3RefAudioName(box) }}
-                        <el-button link type="danger" size="small" :disabled="processing" @click="box.ttsQwen3RefAudioFile = null; box.ttsQwen3RefAudioPath = ''">✖</el-button>
-                      </span>
+                      <AudioRecordPreview
+                        :current-file="box.ttsQwen3RefAudioFile"
+                        :disabled="processing"
+                        @recorded="(f: File) => { box.ttsQwen3RefAudioFile = f; box.ttsQwen3RefAudioPath = '' }"
+                      />
+                    </div>
+                    <div v-if="boxQwen3RefAudioName(box)" style="margin-top: 4px; font-size: 12px; color: var(--el-text-color-secondary)">
+                      {{ boxQwen3RefAudioName(box) }}
+                      <el-button link type="danger" size="small" :disabled="processing" @click="box.ttsQwen3RefAudioFile = null; box.ttsQwen3RefAudioPath = ''">✖</el-button>
                     </div>
                     <div style="margin-top: 6px">
                       <span class="tts-mini-label">{{ t('processor.qwen3TtsXVectorOnly') }}</span>
@@ -858,19 +868,26 @@
               </template>
 
               <template v-else>
-                <el-upload
-                  :key="box.audioUploadKey"
-                  drag
-                  action="#"
-                  :auto-upload="false"
-                  :limit="1"
-                  :disabled="processing"
-                  :on-change="(f: any) => handleAudioSelect(box, f)"
-                  accept=".wav,.mp3,.flac,.m4a,.aac,.ogg"
-                  class="compact-upload"
-                >
-                  <div class="el-upload__text">{{ t('dialogue.dragAudio') }}</div>
-                </el-upload>
+                <div class="audio-upload-row">
+                  <el-upload
+                    :key="box.audioUploadKey"
+                    drag
+                    action="#"
+                    :auto-upload="false"
+                    :limit="1"
+                    :disabled="processing"
+                    :on-change="(f: any) => handleAudioSelect(box, f)"
+                    accept=".wav,.mp3,.flac,.m4a,.aac,.ogg"
+                    class="compact-upload"
+                  >
+                    <div class="el-upload__text">{{ t('dialogue.dragAudio') }}</div>
+                  </el-upload>
+                  <AudioRecordPreview
+                    :current-file="box.audioFile"
+                    :disabled="processing"
+                    @recorded="(f: File) => handleAudioRecorded(box, f)"
+                  />
+                </div>
                 <div v-if="box.audioFile" class="file-info">
                   🎵 {{ box.audioFile.name }} ({{ formatFileSize(box.audioFile.size) }})
                   <el-button link type="danger" size="small" :disabled="processing" @click="box.audioFile = null">✖</el-button>
@@ -1123,18 +1140,25 @@
 
             <template v-if="narratorForm.qwen3_tts_mode === 'voice_clone'">
               <el-form-item :label="t('processor.qwen3TtsRefAudio')">
-                <el-upload
-                  drag
-                  action="#"
-                  :auto-upload="false"
-                  :show-file-list="false"
-                  :disabled="processing"
-                  accept="audio/*"
-                  :on-change="(f: any) => { narratorFormQwen3RefAudioFile = f.raw; narratorForm.qwen3_tts_ref_audio_path = '' }"
-                  class="compact-upload"
-                >
-                  <div class="el-upload__text">{{ t('processor.qwen3TtsRefAudioChoose') }}</div>
-                </el-upload>
+                <div class="audio-upload-row">
+                  <el-upload
+                    drag
+                    action="#"
+                    :auto-upload="false"
+                    :show-file-list="false"
+                    :disabled="processing"
+                    accept="audio/*"
+                    :on-change="(f: any) => { narratorFormQwen3RefAudioFile = f.raw; narratorForm.qwen3_tts_ref_audio_path = '' }"
+                    class="compact-upload"
+                  >
+                    <div class="el-upload__text">{{ t('processor.qwen3TtsRefAudioChoose') }}</div>
+                  </el-upload>
+                  <AudioRecordPreview
+                    :current-file="narratorFormQwen3RefAudioFile"
+                    :disabled="processing"
+                    @recorded="(f: File) => { narratorFormQwen3RefAudioFile = f; narratorForm.qwen3_tts_ref_audio_path = '' }"
+                  />
+                </div>
                 <span v-if="narratorFormQwen3RefAudioName" style="margin-left: 10px; font-size: 13px; color: var(--el-text-color-secondary)">
                   {{ narratorFormQwen3RefAudioName }}
                   <el-button link type="danger" size="small" :disabled="processing" @click="narratorFormQwen3RefAudioFile = null; narratorForm.qwen3_tts_ref_audio_path = ''">✖</el-button>
@@ -1752,6 +1776,7 @@
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
+import AudioRecordPreview from './AudioRecordPreview.vue'
 
 const { t, locale } = useI18n()
 
@@ -3425,6 +3450,15 @@ const handleAudioSelect = (box: DialogueBox, file: any) => {
   box.audioFile = raw
 }
 
+// 录音完成回调：与 MFAProcessor.vue 的 handleAudioRecorded 同样的逻辑，
+// 复用与"本地选择文件"完全相同的赋值方式；额外自增 box.audioUploadKey
+// 强制重建该框的 el-upload，避免其内部选择状态和刚通过录音写入的
+// box.audioFile 不一致。
+const handleAudioRecorded = (box: DialogueBox, file: File) => {
+  box.audioFile = file
+  box.audioUploadKey += 1
+}
+
 const showBoxError = (box: DialogueBox) => {
   ElMessageBox.alert(box.error, t('dialogue.viewError'), { type: 'error' })
 }
@@ -4525,6 +4559,22 @@ onMounted(() => {
 
 .compact-upload :deep(.el-upload-dragger) {
   padding: 14px 10px;
+}
+
+/* 拖拽上传框 + 录音/预览按钮并排布局，与 MFAProcessor.vue 保持一致。 */
+.audio-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.audio-upload-row :deep(.el-upload) {
+  flex: 1;
+  min-width: 0;
+}
+
+.audio-upload-row :deep(.el-upload-dragger) {
+  width: 100%;
 }
 
 .tts-box-sliders {

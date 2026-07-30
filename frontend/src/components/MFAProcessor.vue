@@ -34,27 +34,34 @@
         </el-form-item>
 
         <el-form-item v-if="inputMode === 'audio'" :label="t('processor.audioFile')">
-          <el-upload
-            :key="audioUploadKey"
-            drag
-            action="#"
-            :auto-upload="false"
-            :limit="1"
-            :disabled="processing"
-            :on-exceed="handleExceed"
-            @change="handleAudioSelect"
-            accept=".wav,.mp3,.flac,.m4a,.aac,.ogg"
-          >
-            <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
-            <div class="el-upload__text">
-              {{ t('processor.dragAudio') }}
-            </div>
-            <template #tip>
-              <div class="el-upload__tip">
-                {{ t('processor.supportedAudio') }}
+          <div class="audio-upload-row">
+            <el-upload
+              :key="audioUploadKey"
+              drag
+              action="#"
+              :auto-upload="false"
+              :limit="1"
+              :disabled="processing"
+              :on-exceed="handleExceed"
+              @change="handleAudioSelect"
+              accept=".wav,.mp3,.flac,.m4a,.aac,.ogg"
+            >
+              <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+              <div class="el-upload__text">
+                {{ t('processor.dragAudio') }}
               </div>
-            </template>
-          </el-upload>
+              <template #tip>
+                <div class="el-upload__tip">
+                  {{ t('processor.supportedAudio') }}
+                </div>
+              </template>
+            </el-upload>
+            <AudioRecordPreview
+              :current-file="formData.audioFile"
+              :disabled="processing"
+              @recorded="handleAudioRecorded"
+            />
+          </div>
           <div v-if="formData.audioFile" class="file-info">
             ✓ {{ formData.audioFile.name }} ({{ formatFileSize(formData.audioFile.size) }})
           </div>
@@ -64,23 +71,30 @@
              固定用 Qwen3-ForcedAligner 逐句强制对齐，拼接成覆盖整段音频的 LAB。 -->
         <template v-if="inputMode === 'subtitle'">
           <el-form-item :label="t('processor.audioFile')">
-            <el-upload
-              :key="subtitleAudioUploadKey"
-              drag
-              action="#"
-              :auto-upload="false"
-              :limit="1"
-              :disabled="processing"
-              :on-exceed="handleExceed"
-              @change="handleSubtitleAudioSelect"
-              accept=".wav,.mp3,.flac,.m4a,.aac,.ogg"
-            >
-              <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
-              <div class="el-upload__text">{{ t('processor.dragAudio') }}</div>
-              <template #tip>
-                <div class="el-upload__tip">{{ t('processor.supportedAudio') }}</div>
-              </template>
-            </el-upload>
+            <div class="audio-upload-row">
+              <el-upload
+                :key="subtitleAudioUploadKey"
+                drag
+                action="#"
+                :auto-upload="false"
+                :limit="1"
+                :disabled="processing"
+                :on-exceed="handleExceed"
+                @change="handleSubtitleAudioSelect"
+                accept=".wav,.mp3,.flac,.m4a,.aac,.ogg"
+              >
+                <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+                <div class="el-upload__text">{{ t('processor.dragAudio') }}</div>
+                <template #tip>
+                  <div class="el-upload__tip">{{ t('processor.supportedAudio') }}</div>
+                </template>
+              </el-upload>
+              <AudioRecordPreview
+                :current-file="subtitleImport.audioFile"
+                :disabled="processing"
+                @recorded="handleSubtitleAudioRecorded"
+              />
+            </div>
             <div v-if="subtitleImport.audioFile" class="file-info">
               ✓ {{ subtitleImport.audioFile.name }} ({{ formatFileSize(subtitleImport.audioFile.size) }})
             </div>
@@ -232,18 +246,25 @@
           <!-- VoiceClone（Base 模型）：导入参考音频 + 可选参考文本 + x-vector 开关 -->
           <template v-if="ttsConfig.engine === 'qwen3_tts' && qwen3TtsMode === 'voice_clone'">
             <el-form-item :label="t('processor.qwen3TtsRefAudio')">
-              <el-upload
-                drag
-                action="#"
-                :auto-upload="false"
-                :show-file-list="false"
-                accept="audio/*"
-                :disabled="processing"
-                :on-change="(f: any) => { qwen3TtsRefAudioFile = f.raw; qwen3TtsRefAudioPath = '' }"
-                class="compact-upload"
-              >
-                <div class="el-upload__text">{{ t('processor.qwen3TtsRefAudioChoose') }}</div>
-              </el-upload>
+              <div class="audio-upload-row">
+                <el-upload
+                  drag
+                  action="#"
+                  :auto-upload="false"
+                  :show-file-list="false"
+                  accept="audio/*"
+                  :disabled="processing"
+                  :on-change="(f: any) => { qwen3TtsRefAudioFile = f.raw; qwen3TtsRefAudioPath = '' }"
+                  class="compact-upload"
+                >
+                  <div class="el-upload__text">{{ t('processor.qwen3TtsRefAudioChoose') }}</div>
+                </el-upload>
+                <AudioRecordPreview
+                  :current-file="qwen3TtsRefAudioFile"
+                  :disabled="processing"
+                  @recorded="(f: File) => { qwen3TtsRefAudioFile = f; qwen3TtsRefAudioPath = '' }"
+                />
+              </div>
               <span v-if="qwen3TtsRefAudioName" style="margin-left: 10px; font-size: 13px; color: var(--el-text-color-secondary)">
                 {{ qwen3TtsRefAudioName }}
                 <el-button link type="danger" size="small" :disabled="processing" @click="qwen3TtsRefAudioFile = null; qwen3TtsRefAudioPath = ''">✖</el-button>
@@ -494,18 +515,25 @@
 
               <template v-if="narratorForm.qwen3_tts_mode === 'voice_clone'">
                 <el-form-item :label="t('processor.qwen3TtsRefAudio')">
-                  <el-upload
-                    drag
-                    action="#"
-                    :auto-upload="false"
-                    :show-file-list="false"
-                    :disabled="processing"
-                    accept="audio/*"
-                    :on-change="(f: any) => { narratorFormQwen3RefAudioFile = f.raw; narratorForm.qwen3_tts_ref_audio_path = '' }"
-                    class="compact-upload"
-                  >
-                    <div class="el-upload__text">{{ t('processor.qwen3TtsRefAudioChoose') }}</div>
-                  </el-upload>
+                  <div class="audio-upload-row">
+                    <el-upload
+                      drag
+                      action="#"
+                      :auto-upload="false"
+                      :show-file-list="false"
+                      :disabled="processing"
+                      accept="audio/*"
+                      :on-change="(f: any) => { narratorFormQwen3RefAudioFile = f.raw; narratorForm.qwen3_tts_ref_audio_path = '' }"
+                      class="compact-upload"
+                    >
+                      <div class="el-upload__text">{{ t('processor.qwen3TtsRefAudioChoose') }}</div>
+                    </el-upload>
+                    <AudioRecordPreview
+                      :current-file="narratorFormQwen3RefAudioFile"
+                      :disabled="processing"
+                      @recorded="(f: File) => { narratorFormQwen3RefAudioFile = f; narratorForm.qwen3_tts_ref_audio_path = '' }"
+                    />
+                  </div>
                   <span v-if="narratorFormQwen3RefAudioName" style="margin-left: 10px; font-size: 13px; color: var(--el-text-color-secondary)">
                     {{ narratorFormQwen3RefAudioName }}
                     <el-button link type="danger" size="small" :disabled="processing" @click="narratorFormQwen3RefAudioFile = null; narratorForm.qwen3_tts_ref_audio_path = ''">✖</el-button>
@@ -1748,6 +1776,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled, InfoFilled, QuestionFilled } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
+import AudioRecordPreview from './AudioRecordPreview.vue'
 
 const emit = defineEmits<{
   (e: 'status-changed', status: SystemStatus): void
@@ -2792,6 +2821,13 @@ const handleSubtitleAudioSelect = (file: any) => {
   const raw: File | null = file?.raw || null
   if (!raw) return
   subtitleImport.value.audioFile = raw
+}
+
+// 录音完成回调：与 handleAudioRecorded 同样的逻辑，仅目标状态不同
+// （字幕跟读模式的 subtitleImport.audioFile，而非 formData.value.audioFile）。
+const handleSubtitleAudioRecorded = (file: File) => {
+  subtitleImport.value.audioFile = file
+  subtitleAudioUploadKey.value += 1
 }
 
 const handleSubtitleFileSelect = (file: any) => {
@@ -3957,6 +3993,16 @@ const handleAudioSelect = (file: any) => {
   error.value = ''
 }
 
+// 录音完成后的回调：AudioRecordPreview 已经把录音打包成标准 File 对象，
+// 直接复用与"本地选择文件"完全相同的赋值逻辑，两条路径行为一致。
+const handleAudioRecorded = (file: File) => {
+  formData.value.audioFile = file
+  error.value = ''
+  // 强制重建 el-upload（沿用清空逻辑里的做法），避免其内部选择状态和
+  // 刚通过录音写入的 formData.value.audioFile 不一致。
+  audioUploadKey.value += 1
+}
+
 /**
  * 从 MIDI 文件的二进制内容中解析第一个 set_tempo 事件，换算成 BPM。
  * 纯浏览器端解析，不需要额外库。
@@ -4782,6 +4828,23 @@ const newProcess = () => {
   color: #409eff;
   border-radius: 4px;
   font-size: 12px;
+}
+
+/* 拖拽上传框 + 录音/预览按钮并排布局：录音控件贴着上传框右侧居中对齐，
+   避免出现在拖拽框内部（会和拖拽/点击选择文件的点击区域打架）。 */
+.audio-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.audio-upload-row :deep(.el-upload) {
+  flex: 1;
+  min-width: 0;
+}
+
+.audio-upload-row :deep(.el-upload-dragger) {
+  width: 100%;
 }
 
 .help-text {
