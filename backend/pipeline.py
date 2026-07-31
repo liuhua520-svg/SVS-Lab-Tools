@@ -666,6 +666,10 @@ class AudioProcessingPipeline:
         fill_short_rests_max_length: str = "16",            # ← 判定"短"的音符时值阈值（8/16/32/64/128）
         stage_cb: Optional[Callable[[str, str], None]] = None,   # ← 阶段进度回调 (stage, status)，
                                                                    #   stage ∈ "f0"/"project"，status ∈ "start"/"done"
+        cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：F0 提取完成后、开始生成
+                                                              #   工程文件前检查一次，返回 True 时提前
+                                                              #   中止并返回 stage="cancelled"（与
+                                                              #   process_full 的取消语义一致）
     ) -> Dict:
         """仅执行工程文件生成（已有 WAV 以及 LAB/MIDI 之一）"""
         import time
@@ -677,6 +681,14 @@ class AudioProcessingPipeline:
                     stage_cb(stage, status)
                 except Exception:
                     pass
+
+        def _cancelled(stage: str) -> Dict:
+            logger.info(f"⏹ 任务已取消 (阶段: {stage})")
+            return {
+                "success": False, "error": "用户已取消",
+                "stage": "cancelled", "cancelled_at_stage": stage,
+                "processing_time": int((time.time() - start_time) * 1000),
+            }
 
         try:
             logger.info("[ 工程文件模式 ] 生成项目文件")
@@ -700,6 +712,9 @@ class AudioProcessingPipeline:
                     "error": "需要 LAB 文件或 MIDI 文件（至少提供其中一个）",
                     "processing_time": 0,
                 }
+
+            if cancel_check and cancel_check():
+                return _cancelled("f0_extraction")
 
             config = AudioProcessingConfig(
                 bpm=bpm, base_pitch=base_pitch,
@@ -728,6 +743,10 @@ class AudioProcessingPipeline:
             except Exception as e:
                 logger.warning(f"⚠ 音高提取异常: {e}，继续生成工程文件")
             _stage("f0", "done")
+
+            if cancel_check and cancel_check():
+                return _cancelled("project_generation")
+
             _stage("project", "start")
 
             result = self.tsubaki_processor.process_full_pipeline(

@@ -503,6 +503,10 @@ def align_subtitle_audio(
     audio_duration_sec: Optional[float] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
     skip_split_every_n: int = 1,
+    cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：每个对齐块开始前
+                                                           #   检查一次，返回 True 时立即中止
+                                                           #   并返回 {"success": False,
+                                                           #   "stage": "cancelled"}
 ) -> Dict:
     """
     单文件"字幕跟读"主流程：整段音频按字幕时间轴切分 → 每个"对齐块"
@@ -572,6 +576,9 @@ def align_subtitle_audio(
 
     try:
         for i, group in enumerate(align_groups):
+            if cancel_check and cancel_check():
+                return {"success": False, "stage": "cancelled", "error": "用户已取消"}
+
             group_start = group[0].start
             group_end = group[-1].end
             # 组内多条字幕的文本按顺序拼接，中间用换行分隔，交给 Qwen3-FA

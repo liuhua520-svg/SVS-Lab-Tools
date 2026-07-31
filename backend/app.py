@@ -22,7 +22,7 @@ from urllib.parse import quote
 from threading import Thread
 from time import sleep
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from flask import Flask, request, jsonify, send_from_directory, abort, Response
 from flask_cors import CORS
@@ -1783,6 +1783,9 @@ def run_project_only_job(
     ja_devoiced_phoneme: bool = False,
     fill_short_rests: bool = False,
     fill_short_rests_max_length: str = "16",
+    cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：透传给
+                                                           # process_project_only 的
+                                                           # F0/工程文件生成阶段边界。
 ):
     try:
         set_job(
@@ -1822,6 +1825,7 @@ def run_project_only_job(
             fill_short_rests=fill_short_rests,
             fill_short_rests_max_length=fill_short_rests_max_length,
             stage_cb=lambda stage, status: set_job(job_id, stage=stage, stage_status=status),
+            cancel_check=cancel_check,
         )
 
         if result.get("success"):
@@ -1834,6 +1838,14 @@ def run_project_only_job(
                 job_id,
                 status="done",
                 finished_at=datetime.now().isoformat(),
+                result=result,
+            )
+        elif result.get("stage") == "cancelled":
+            set_job(
+                job_id,
+                status="cancelled",
+                finished_at=datetime.now().isoformat(),
+                error=result.get("error", "用户已取消"),
                 result=result,
             )
         else:
@@ -2012,6 +2024,7 @@ def pipeline_project_only():
                 ja_devoiced_phoneme,
                 fill_short_rests,
                 fill_short_rests_max_length,
+                lambda: is_job_cancel_requested(job_id),
             ),
         ).start()
 
@@ -2118,6 +2131,15 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
             tts_boxes = [b for b in boxes if b.get("tts")]
             total_tts = len(tts_boxes)
             for done_tts, box in enumerate(tts_boxes, start=1):
+                if is_job_cancel_requested(job_id):
+                    set_job(
+                        job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                        error="用户已取消",
+                        result={"success": False, "error": "用户已取消", "stage": "cancelled",
+                                "cancelled_at_stage": "tts"},
+                    )
+                    return
+
                 tts_info = box["tts"]
                 # 对齐辅助移调（半音）：每个对话框独立生效，未提交时默认 0。
                 box_align_pitch_shift_semitones = box.get("align_pitch_shift_semitones", 0.0)
@@ -2162,9 +2184,17 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         english_word_align=box_english_word_align,
                         ja_disable_katakana=box_ja_disable_katakana,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
+                        cancel_check=lambda: is_job_cancel_requested(job_id),
                     )
                     shutil.rmtree(job_segments_dir, ignore_errors=True)
                     set_job(job_id, stage="align", stage_status="done", box_index=box.get("index"))
+
+                    if align_result.get("stage") == "cancelled":
+                        set_job(
+                            job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                            error=align_result.get("error", "用户已取消"), result=align_result,
+                        )
+                        return
 
                     if align_result.get("success"):
                         final_wav_path = str(WORK_DIR / f"{stem}.wav")
@@ -2204,8 +2234,16 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                         qwen3_tts_options=tts_info.get("qwen3_tts_options"),
                         stage_cb=_box_stage_cb,
+                        cancel_check=lambda: is_job_cancel_requested(job_id),
                     )
                     set_job(job_id, stage="align", stage_status="done", box_index=box.get("index"))
+
+                    if tts_result.get("stage") == "cancelled":
+                        set_job(
+                            job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                            error=tts_result.get("error", "用户已取消"), result=tts_result,
+                        )
+                        return
 
                 if tts_result.get("success"):
                     box["audio_path"] = tts_result["wav_path"]
@@ -3081,6 +3119,10 @@ def run_tts_pipeline_job(
     preview_sentences: Optional[list] = None,
     preview_wav_path: Optional[str] = None,
     qwen3_tts_options: Optional[Dict] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：透传给 TTS 合成/对齐的
+                                                           # 逐句循环，以及 F0/工程文件生成阶段
+                                                           # 边界；由 app.py 传入
+                                                           # is_job_cancel_requested(job_id)。
 ):
     try:
         set_job(job_id, status="running", started_at=datetime.now().isoformat(),
@@ -3114,9 +3156,17 @@ def run_tts_pipeline_job(
                 ja_disable_katakana=ja_disable_katakana,
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 progress_cb=_progress_cb,
+                cancel_check=cancel_check,
             )
             shutil.rmtree(job_segments_dir, ignore_errors=True)
             set_job(job_id, stage="align", stage_status="done")
+
+            if align_result.get("stage") == "cancelled":
+                set_job(
+                    job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                    error=align_result.get("error", "用户已取消"), result=align_result,
+                )
+                return
 
             if not align_result.get("success"):
                 set_job(
@@ -3159,8 +3209,16 @@ def run_tts_pipeline_job(
                 progress_cb=_progress_cb,
                 qwen3_tts_options=qwen3_tts_options,
                 stage_cb=_stage_switch_cb,
+                cancel_check=cancel_check,
             )
             set_job(job_id, stage="align", stage_status="done")
+
+        if tts_result.get("stage") == "cancelled":
+            set_job(
+                job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                error=tts_result.get("error", "用户已取消"), result=tts_result,
+            )
+            return
 
         if not tts_result.get("success"):
             set_job(
@@ -3172,6 +3230,17 @@ def run_tts_pipeline_job(
         if processing_mode == "mfa-only":
             result = {**tts_result, "processing_time": 0, "aligner_backend": "qwen3_aligner"}
             set_job(job_id, status="done", finished_at=datetime.now().isoformat(), result=result)
+            return
+
+        if cancel_check and cancel_check():
+            cancelled_result = {
+                "success": False, "error": "用户已取消",
+                "stage": "cancelled", "cancelled_at_stage": "f0_extraction",
+            }
+            set_job(
+                job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                error="用户已取消", result=cancelled_result,
+            )
             return
 
         project_result = pipeline.process_project_only(
@@ -3194,6 +3263,7 @@ def run_tts_pipeline_job(
             fill_short_rests=fill_short_rests,
             fill_short_rests_max_length=fill_short_rests_max_length,
             stage_cb=lambda stage, status: set_job(job_id, stage=stage, stage_status=status),
+            cancel_check=cancel_check,
         )
 
         merged_result = {
@@ -3207,6 +3277,11 @@ def run_tts_pipeline_job(
 
         if project_result.get("success"):
             set_job(job_id, status="done", finished_at=datetime.now().isoformat(), result=merged_result)
+        elif project_result.get("stage") == "cancelled":
+            set_job(
+                job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                error=project_result.get("error", "用户已取消"), result=merged_result,
+            )
         else:
             set_job(
                 job_id, status="failed", finished_at=datetime.now().isoformat(),
@@ -3386,6 +3461,7 @@ def tts_process():
                 preview_sentences=(preview_entry or {}).get("sentences"),
                 preview_wav_path=(preview_entry or {}).get("wav_path"),
                 qwen3_tts_options=qwen3_tts_options,
+                cancel_check=lambda: is_job_cancel_requested(job_id),
             ),
         ).start()
 
@@ -4507,7 +4583,12 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
                             align_pitch_shift_semitones: float, audio_duration_sec: float,
                             processing_mode: str, original_text: str = "",
                             skip_split_every_n: int = 1,
-                            ja_disable_katakana: bool = False, **project_kwargs):
+                            ja_disable_katakana: bool = False,
+                            cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：
+                                                                                  # 透传给对齐块循环，
+                                                                                  # 以及 F0/工程文件
+                                                                                  # 生成阶段边界。
+                            **project_kwargs):
     """
     单文件"字幕跟读"后台任务：整段音频按字幕时间轴逐句（或按
     skip_split_every_n 合并成块）Qwen3-FA 对齐，产出完整 LAB；"完整处理"
@@ -4530,8 +4611,14 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
             audio_duration_sec=audio_duration_sec,
             progress_cb=_progress_cb,
             skip_split_every_n=skip_split_every_n,
+            cancel_check=cancel_check,
         )
         set_job(job_id, stage="align", stage_status="done")
+
+        if align_result.get("stage") == "cancelled":
+            set_job(job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                    error=align_result.get("error", "用户已取消"), result=align_result)
+            return
 
         if not align_result.get("success"):
             set_job(job_id, status="failed", finished_at=datetime.now().isoformat(),
@@ -4559,6 +4646,15 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
         lab_path = str(Path(wav_path).with_suffix(".lab"))
         Path(lab_path).write_text(lab_content, encoding="utf-8")
 
+        if cancel_check and cancel_check():
+            set_job(
+                job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                error="用户已取消",
+                result={"success": False, "error": "用户已取消", "stage": "cancelled",
+                        "cancelled_at_stage": "f0_extraction"},
+            )
+            return
+
         # language 已经是本函数的顶层形参（对齐阶段就在用），不再从
         # project_kwargs 里取——project_kwargs 若同时携带同名 language，
         # 会在 Thread(kwargs=dict(language=..., **project_kwargs)) 处
@@ -4568,6 +4664,7 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
             wav_path=wav_path, lab_path=lab_path, midi_path=None,
             language=language, original_text=original_text,
             stage_cb=lambda stage, status: set_job(job_id, stage=stage, stage_status=status),
+            cancel_check=cancel_check,
             **project_kwargs,
         )
 
@@ -4583,6 +4680,10 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
             project_result.setdefault("lab_content", lab_content)
             project_result["warnings"] = align_result.get("warnings", [])
             set_job(job_id, status="done", finished_at=datetime.now().isoformat(), result=project_result)
+        elif project_result.get("stage") == "cancelled":
+            project_result.setdefault("lab_content", lab_content)
+            set_job(job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                    error=project_result.get("error", "用户已取消"), result=project_result)
         else:
             set_job(job_id, status="failed", finished_at=datetime.now().isoformat(),
                     error=project_result.get("error", "工程文件生成失败"), result=project_result)
@@ -4752,6 +4853,7 @@ def subtitle_import_align():
                 audio_duration_sec=audio_duration, processing_mode=processing_mode,
                 original_text=subtitle_original_text,
                 skip_split_every_n=skip_split_every_n,
+                cancel_check=lambda: is_job_cancel_requested(job_id),
                 **project_kwargs,
             ),
         ).start()

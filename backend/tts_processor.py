@@ -1040,6 +1040,9 @@ def synthesize_segments_only(
     sentences: Optional[List[str]] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
     qwen3_tts_options: Optional[Dict] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：每句合成前检查一次，
+                                                           #   返回 True 时立即中止并返回
+                                                           #   {"success": False, "stage": "cancelled"}
 ) -> Dict:
     """
     仅执行"逐句 TTS 合成"这一半流程，不做 Qwen3-FA 对齐：
@@ -1136,6 +1139,10 @@ def synthesize_segments_only(
 
     try:
         for i, sentence in enumerate(sentence_list):
+            if cancel_check and cancel_check():
+                shutil.rmtree(str(segments_dir), ignore_errors=True)
+                return {"success": False, "stage": "cancelled", "error": "用户已取消"}
+
             seg_raw = segments_dir / f"_raw_{i:04d}{seg_suffix}"
             try:
                 synthesize_segment_to_file(sentence, voice, rate, volume, pitch,
@@ -1224,6 +1231,9 @@ def align_segments(
     sentence_gap_sec: float = DEFAULT_SENTENCE_GAP_SEC,
     align_pitch_shift_semitones: float = 0.0,
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：每句对齐前检查一次，
+                                                           #   返回 True 时立即中止并返回
+                                                           #   {"success": False, "stage": "cancelled"}
 ) -> Dict:
     """
     TTS 跟读的对齐半流程：对 synthesize_segments_only() 已经产出的分句
@@ -1269,6 +1279,9 @@ def align_segments(
     gap_100ns = int(round(sentence_gap_sec * 10_000_000))
 
     for i, sentence in enumerate(sentences):
+        if cancel_check and cancel_check():
+            return {"success": False, "stage": "cancelled", "error": "用户已取消"}
+
         seg_wav = segments_path / f"seg_{i:04d}.wav"
         if not seg_wav.exists():
             warnings.append(f"第 {i + 1} 句音频缺失，已跳过")
@@ -1356,6 +1369,9 @@ def synthesize_and_align(
                                                           #   传入 "tts" 或 "align"，供调用方
                                                           #   区分 progress_cb 报告的 (done,total)
                                                           #   当前属于合成阶段还是对齐阶段。
+    cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：透传给合成/对齐两个
+                                                           #   子阶段各自的逐句循环，并在两个
+                                                           #   阶段之间的边界再检查一次。
 ) -> Dict:
     """
     TTS 跟读主流程（合成 + 对齐一次性做完）：依次调用
@@ -1389,9 +1405,14 @@ def synthesize_and_align(
         engine=engine, rate=rate, volume=volume, pitch=pitch,
         sentence_gap_sec=sentence_gap_sec, sentences=sentences, progress_cb=progress_cb,
         qwen3_tts_options=qwen3_tts_options,
+        cancel_check=cancel_check,
     )
     if not seg_result.get("success"):
         return seg_result
+
+    if cancel_check and cancel_check():
+        shutil.rmtree(str(seg_result["segments_dir"]), ignore_errors=True)
+        return {"success": False, "stage": "cancelled", "error": "用户已取消"}
 
     if stage_cb:
         try:
@@ -1407,6 +1428,7 @@ def synthesize_and_align(
             sentence_gap_sec=sentence_gap_sec,
             align_pitch_shift_semitones=align_pitch_shift_semitones,
             progress_cb=progress_cb,
+            cancel_check=cancel_check,
         )
     finally:
         shutil.rmtree(str(segments_dir), ignore_errors=True)
