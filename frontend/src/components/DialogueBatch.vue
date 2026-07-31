@@ -1224,7 +1224,7 @@
       </el-dialog>
 
       <!-- "优化文本"弹窗：智能转换 / 仅转换（数字）/ 逐字转换（数字）/
-           仅转换符号 / 英文加空格 / 去除多余符号 / 连字符转空格 /
+           仅转换符号 / 英文加空格 / 去除多余符号 / 连字符转空格 / 去除空格 /
            大写字母加空格 / 大写转小写 / 小写转大写 / 首字母大写其余小写 /
            繁体转简体 / 简体转繁体（调用 OpenCC）/
            按逗号插入换行 / 按句号插入换行 / 按每几句插入换行，全部只在弹窗内的这份文本
@@ -1261,6 +1261,9 @@
           </el-button>
           <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'hyphen_to_space'" @click="runTextOptimize('hyphen_to_space')">
             ➖ {{ t('processor.textOptimizeHyphenToSpace') }}
+          </el-button>
+          <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'strip_spaces'" @click="runTextOptimize('strip_spaces')">
+            🚫 {{ t('processor.textOptimizeStripSpaces') }}
           </el-button>
           <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'add_spaces_uppercase'" @click="runTextOptimize('add_spaces_uppercase')">
             🔡 {{ t('processor.textOptimizeAddSpacesUppercase') }}
