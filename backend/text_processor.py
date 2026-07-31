@@ -13,6 +13,12 @@ MFA / TTS / 对齐 / 词典等其它任何后端模块，供 /api/text/optimize 
                                       日期各字段各自按完整数值读）+ 百分号
                                       +摄氏度/华氏度+四则运算符号等，一次
                                       性全部转换。
+  一键优化 one_click_optimize()   —— 固定串联"智能转换 → 去除多余符号 →
+                                      去除空格 → 英文加空格"这四步，一次
+                                      点击自动依次执行，省去逐个手动点击
+                                      对应按钮的操作；内部就是按顺序直接
+                                      调用下面这几个函数，不是新的转换
+                                      规则。
   仅转换（数字）number_only_convert() —— 只做数字转换（完整数值读法，
                                       不识别日期/年份的特殊拆分，纯粹把
                                       文本中每一段连续数字整体按数值转换），
@@ -1203,6 +1209,35 @@ def simplified_to_traditional(text: str) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# 对外入口（新增）：一键优化
+#   把"优化文本"弹窗里最常用的几个转换按固定顺序自动串联执行一次，省得
+#   逐个手动点按钮。固定顺序（前一步的输出是后一步的输入）：
+#     1. 智能转换 smart_convert()          —— 数字/日期/百分号/温度/运算
+#        符号等一次性转换为对应语种的读法文字
+#     2. 去除多余符号 strip_stray_symbols() —— 清掉 "*" 等不构成读法的
+#        干扰符号
+#     3. 去除空格 strip_spaces()            —— 删除中文之间/中英文交界处
+#        的空格，保留英文单词之间的空格
+#     4. 英文加空格 add_spaces_around_english() —— 给英文单词前后补空格，
+#        避免英文与中文/数字紧贴导致分词或强制对齐出错
+#   顺序特意把"去除空格"放在"英文加空格"之前：先清掉所有不必要的空格
+#   （包括之前误加在英文单词内部/两侧、但英文单词与中文紧贴的情形），
+#   再统一补上英文单词该有的空格，避免两步互相抵消或遗漏。
+#   language 仅用于第 1 步（智能转换），其余三步与语种无关。
+# ═════════════════════════════════════════════════════════════════════════
+
+def one_click_optimize(text: str, language: str) -> str:
+    """一键优化：依次执行 智能转换 → 去除多余符号 → 去除空格 → 英文加空格。"""
+    if not text:
+        return text
+    result = smart_convert(text, language)
+    result = strip_stray_symbols(result)
+    result = strip_spaces(result)
+    result = add_spaces_around_english(result)
+    return result
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # 统一调度入口：/api/text/optimize 直接调用这一个函数即可，按 action 分发
 # 到上面各个转换函数之一。action 未知或为空时原样返回文本，不做任何改动
 # （避免前端传参出错时静默产生意料之外的转换结果）。
@@ -1213,6 +1248,7 @@ _ACTIONS = {
     "number_only": number_only_convert,     # 仅转换（数字，完整数值读法，需要 language）
     "digit_to_words": digit_to_words_convert,  # 逐字转换（数字，按位读，需要 language）
     "symbol_only": symbol_only_convert,     # 仅转换符号（需要 language）
+    "one_click": one_click_optimize,        # 一键优化（需要 language，内部串联多步）
 }
 
 _ACTIONS_NO_LANG = {
@@ -1238,14 +1274,14 @@ def process_text(text: str, action: str, language: str = "zh", n: int = 2) -> Di
     ----------
     text: 待处理文本（仅处理这一段文本本身，不涉及任何文件/其它后端）。
     action: "smart" | "number_only" | "digit_to_words" | "symbol_only" |
-      "add_spaces" | "strip_symbols" | "newline_after_comma" |
+      "one_click" | "add_spaces" | "strip_symbols" | "newline_after_comma" |
       "newline_after_period" | "newline_every_n" | "hyphen_to_space" |
       "strip_spaces" | "add_spaces_uppercase" | "uppercase_to_lowercase" |
       "lowercase_to_uppercase" | "capitalize_words" |
       "traditional_to_simplified" | "simplified_to_traditional"
     language: 语言代码（cmn/yue/eng/jpn/kor 或 zh/en/ja/ko），仅 smart /
-      number_only / digit_to_words / symbol_only 需要，其余 action 与语种
-      无关。
+      number_only / digit_to_words / symbol_only / one_click 需要，其余
+      action 与语种无关。
     n: 仅 "newline_every_n" 需要，表示"每几句插入一次换行"，默认 2。
 
     Returns
