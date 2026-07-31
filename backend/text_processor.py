@@ -993,6 +993,49 @@ def hyphen_to_space(text: str) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# 对外入口（新增）：去除空格
+#   删除文本中"不需要的"空格（半角空格 + 全角空格 U+3000），但保留英文
+#   单词之间的空格——"HELLO WORLD"要保持"HELLO WORLD"，不能被删成
+#   "HELLOWORLD"，因为那样英文单词会直接连在一起、破坏英文读法。
+#
+#   规则：一段连续空格，只要两侧都紧邻"英文单词字符"（[A-Za-z0-9']，
+#   数字/撇号一并算作单词字符，兼顾"3 PM"、"don't tell"这类场景），
+#   就保留（合并为一个半角空格）；否则一律删除。这样：
+#     · "你好 世界"（中文与中文之间）→ "你好世界"（删除）
+#     · "你好 HELLO"（中文与英文之间）→ "你好HELLO"（删除，因为左侧
+#       不是英文单词字符）
+#     · "HELLO WORLD"（英文单词之间）→ "HELLO WORLD"（保留）
+#     · "HELLO  WORLD"（多个空格）→ "HELLO WORLD"（合并为一个）
+#   只处理空格字符本身，不影响换行符，因此多行文本的分行结构保持不变。
+# ═════════════════════════════════════════════════════════════════════════
+
+_SPACE_RUN_RE = re.compile(r"[ \t\u3000]+")
+_ENGLISH_WORD_CHAR_RE = re.compile(r"[A-Za-z0-9']")
+
+
+def strip_spaces(text: str) -> str:
+    """去除文本中的多余空格（半角空格、制表符、全角空格），但保留英文单词
+    之间的空格（如 "HELLO WORLD" 不会被去除中间的空格），保留换行符与其余
+    全部文字/标点。"""
+    if not text:
+        return text
+
+    def _replace_line(line: str) -> str:
+        def _replace(m: "re.Match") -> str:
+            start, end = m.start(), m.end()
+            before_is_word = start > 0 and bool(_ENGLISH_WORD_CHAR_RE.match(line[start - 1]))
+            after_is_word = end < len(line) and bool(_ENGLISH_WORD_CHAR_RE.match(line[end]))
+            if before_is_word and after_is_word:
+                return " "
+            return ""
+        return _SPACE_RUN_RE.sub(_replace, line)
+
+    lines = text.split("\n")
+    cleaned_lines = [_replace_line(ln) for ln in lines]
+    return "\n".join(cleaned_lines)
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # 对外入口（新增）：按标点插入换行
 #   三个按钮共用同一套"句末标点识别 + 保留标点本身、只在标点后插入换行"
 #   的实现，唯一的区别是识别哪一组标点、以及"每几句"的分组大小：
@@ -1178,6 +1221,7 @@ _ACTIONS_NO_LANG = {
     "newline_after_comma": newline_after_comma,   # 优化文本：按逗号插入换行（与语种无关）
     "newline_after_period": newline_after_period, # 优化文本：按句号插入换行（与语种无关）
     "hyphen_to_space": hyphen_to_space,           # 优化文本：连字符转空格（与语种无关）
+    "strip_spaces": strip_spaces,                 # 优化文本：去除空格（与语种无关）
     "add_spaces_uppercase": add_spaces_around_uppercase,  # 优化文本：大写字母逐个加空格（与语种无关）
     "uppercase_to_lowercase": uppercase_to_lowercase,     # 优化文本：大写转小写（与语种无关）
     "lowercase_to_uppercase": lowercase_to_uppercase,     # 优化文本：小写转大写（与语种无关）
@@ -1196,7 +1240,7 @@ def process_text(text: str, action: str, language: str = "zh", n: int = 2) -> Di
     action: "smart" | "number_only" | "digit_to_words" | "symbol_only" |
       "add_spaces" | "strip_symbols" | "newline_after_comma" |
       "newline_after_period" | "newline_every_n" | "hyphen_to_space" |
-      "add_spaces_uppercase" | "uppercase_to_lowercase" |
+      "strip_spaces" | "add_spaces_uppercase" | "uppercase_to_lowercase" |
       "lowercase_to_uppercase" | "capitalize_words" |
       "traditional_to_simplified" | "simplified_to_traditional"
     language: 语言代码（cmn/yue/eng/jpn/kor 或 zh/en/ja/ko），仅 smart /
