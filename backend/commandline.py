@@ -276,6 +276,13 @@ def _load_dialogue_manifest(manifest_path: str) -> list:
       - engine  : "edge_tts"（默认）/ "windows_sapi" / "qwen3_tts"
       - voice   : 音色 id；engine="qwen3_tts" 且 mode 为 voice_design/
                   voice_clone 时不需要
+      - narrator_id : 可选，仅用于标记这一框是否对应网页版的"讲述人"
+                  预设，不影响实际合成参数（合成仍完全由 engine/voice/
+                  rate/pitch/volume/qwen3_tts_options 决定）。命令行本身
+                  没有讲述人预设管理界面，这里只是让手写 manifest 时若想
+                  在产物文件名里体现"这是讲述人配置"，可以随手填一个非空
+                  字符串（如 "manual" 或预设名），留空则按 engine 生成
+                  "tts_edgetts"/"tts_qwen3tts"标签。
       - text    : 该框台词文本；不传则回退使用外层的 "text" 字段
       - rate / pitch / volume : 语速/音调/音量，engine="qwen3_tts" 时不使用
       - qwen3_tts_options : 仅 engine="qwen3_tts" 时读取，见
@@ -1173,7 +1180,17 @@ class CmdUI:
             print(f"→ {len(tts_boxes)} 个 TTS 跟读对话框合成+对齐中...")
             for done, box in enumerate(tts_boxes, start=1):
                 tts_info = box["tts"]
-                stem = f"dlg_tts_{box['index']:03d}_{uuid.uuid4().hex[:6]}"
+                # 文件名带上引擎/来源标签，与网页版（app.py 的
+                # run_dialogue_batch_job / /api/tts/process）保持一致的
+                # 命名习惯：narrator_id 非空 → "narrator"；否则按 engine
+                # 落到 "edgetts"/"qwen3tts"。命令行没有讲述人预设管理，
+                # narrator_id 完全由用户手写 manifest 时自行决定是否填写。
+                narrator_id = (tts_info.get("narrator_id") or "").strip()
+                voice_source_tag = (
+                    "narrator" if narrator_id
+                    else ("qwen3tts" if (tts_info.get("engine") or tts_processor.DEFAULT_ENGINE) == "qwen3_tts" else "edgetts")
+                )
+                stem = f"dlg_tts_{voice_source_tag}_{box['index']:03d}_{uuid.uuid4().hex[:6]}"
                 tts_result = tts_processor.synthesize_and_align(
                     text=tts_info.get("text") or box.get("text", ""),
                     language=args.language,
