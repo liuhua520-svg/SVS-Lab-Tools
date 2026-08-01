@@ -499,7 +499,7 @@
         <el-button :disabled="processing" @click="addBox">➕ {{ t('dialogue.addBox') }}</el-button>
         <el-button type="danger" plain :disabled="processing" @click="clearAllBoxes">🗑️ {{ t('dialogue.clearAll') }}</el-button>
       </div>
-      <p class="help-text">{{ inputMode === 'tts' ? t('dialogue.importFolderHintTts') : t('dialogue.importFolderHint') }}</p>
+      <p class="help-text">{{ t('dialogue.importFolderHint') }}</p>
 
       <el-dialog v-model="subtitleImportDialog.visible" :title="t('dialogue.importSubtitle')" width="520px" :close-on-click-modal="!processing && !subtitleImportDialog.loading" :show-close="!processing && !subtitleImportDialog.loading">
         <p class="help-text" style="margin-top:0">{{ t('dialogue.subtitleImportDialogHint') }}</p>
@@ -624,11 +624,7 @@
                 </div>
                 <!-- LAB / MIDI 二选一，单个文件槽位：.lab 标注优先级最高，
                      其次是 .mid/.midi（两者都能跳过对齐直接生成音轨）；
-                     .txt 走"参考文本"模式，填入左侧文本框供对齐使用。
-                     —— TTS跟读模式音频当场合成，固定用 Qwen3-FA 逐句强制
-                     对齐，LAB/MIDI"跳过对齐"没有意义，因此该模式下只
-                     允许导入 .txt 参考文本，按钮文案与 accept 均改为
-                     仅 TXT。 -->
+                     .txt 走"参考文本"模式，填入左侧文本框供对齐使用。 -->
                 <el-upload
                   :key="box.labUploadKey"
                   action="#"
@@ -636,10 +632,10 @@
                   :show-file-list="false"
                   :disabled="processing"
                   :on-change="(f: any) => handleNotationSelect(box, f)"
-                  :accept="inputMode === 'tts' ? '.txt' : '.lab,.txt,.mid,.midi'"
+                  accept=".lab,.txt,.mid,.midi"
                 >
                   <el-button size="small" style="margin-top: 6px" :disabled="processing">
-                    📎 {{ inputMode === 'tts' ? t('dialogue.txtLabel') : t('dialogue.labLabel') }}
+                    📎 {{ t('dialogue.labLabel') }}
                   </el-button>
                 </el-upload>
               </template>
@@ -1227,8 +1223,7 @@
         </template>
       </el-dialog>
 
-      <!-- "优化文本"弹窗：一键优化（固定串联智能转换→去除多余符号→去除
-           空格→英文加空格）/ 智能转换 / 仅转换（数字）/ 逐字转换（数字）/
+      <!-- "优化文本"弹窗：智能转换 / 仅转换（数字）/ 逐字转换（数字）/
            仅转换符号 / 英文加空格 / 去除多余符号 / 连字符转空格 / 去除空格 /
            大写字母加空格 / 大写转小写 / 小写转大写 / 首字母大写其余小写 /
            繁体转简体 / 简体转繁体（调用 OpenCC）/
@@ -1245,11 +1240,6 @@
           :disabled="processing"
           :placeholder="t('processor.textOptimizePlaceholder')"
         />
-        <div class="text-optimize-toolbar">
-          <el-button type="primary" size="small" :disabled="processing" :loading="textOptimizer.loading === 'one_click'" @click="runTextOptimize('one_click')">
-            🚀 {{ t('processor.textOptimizeOneClick') }}
-          </el-button>
-        </div>
         <div class="text-optimize-toolbar">
           <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'smart'" @click="runTextOptimize('smart')">
             ✨ {{ t('processor.textOptimizeSmart') }}
@@ -3436,14 +3426,6 @@ const handleNotationSelect = async (box: DialogueBox, file: any) => {
   const dot = raw.name.lastIndexOf('.')
   const ext = dot > 0 ? raw.name.slice(dot + 1).toLowerCase() : ''
 
-  // TTS跟读模式固定走 Qwen3-FA 逐句强制对齐，不支持 LAB/MIDI"跳过对齐"，
-  // accept 属性只是浏览器文件选择器的过滤提示、不是强制限制（拖拽等
-  // 方式仍可能绕过），这里再兜底拒绝一次。
-  if (inputMode.value === 'tts' && ext !== 'txt') {
-    ElMessage.error(t('processor.onlySupportNotation'))
-    return
-  }
-
   if (ext === 'txt') {
     // .txt 走"参考文本"模式：读取文本内容填入左侧文本框，不作为标注文件
     try {
@@ -3635,11 +3617,6 @@ const handleFolderSelect = async (e: Event) => {
   // 每个 stem（不含扩展名的文件名）最多对应一个音频文件（audio 只能导入
   // 一个），以及一个 LAB 或 MIDI（二选一，LAB 优先级高于 MID：同名的
   // .lab 与 .mid/.midi 同时存在时，仅保留 .lab）。
-  // —— TTS跟读模式下音频是当场合成的，不导入音频；该模式固定使用
-  //    Qwen3-FA 逐句强制对齐，LAB/MIDI"跳过对齐"在这里没有意义，因此
-  //    只按 .txt 参考文本配对，文件夹里即使混有 .lab/.mid/.midi 也一律
-  //    忽略，不纳入分组、不计入匹配数。
-  const isTtsMode = inputMode.value === 'tts'
   const groups: Record<string, { audio?: File; lab?: File; midi?: File; txt?: File }> = {}
   for (const file of files) {
     const dot = file.name.lastIndexOf('.')
@@ -3648,10 +3625,9 @@ const handleFolderSelect = async (e: Event) => {
     const stem = file.name.slice(0, dot)
     if (!groups[stem]) groups[stem] = {}
     if (AUDIO_EXTS.includes(ext)) groups[stem].audio = file
-    else if (ext === 'txt') groups[stem].txt = file
-    else if (isTtsMode) continue
     else if (ext === 'lab') groups[stem].lab = file
     else if (ext === 'mid' || ext === 'midi') groups[stem].midi = file
+    else if (ext === 'txt') groups[stem].txt = file
   }
 
   const stems = Object.keys(groups)
@@ -3966,6 +3942,7 @@ const buildFormData = async (): Promise<FormData> => {
       if (box.text.trim() && boxQwen3TtsModeReady(box)) {
         fd.append(`tts_text_${i}`, box.text)
         fd.append(`tts_engine_${i}`, box.ttsEngine)
+        fd.append(`tts_narrator_id_${i}`, box.ttsNarratorId || '')
         fd.append(`tts_voice_${i}`, box.ttsVoice)
         fd.append(`tts_rate_${i}`, `${box.ttsRate >= 0 ? '+' : ''}${box.ttsRate}%`)
         fd.append(`tts_pitch_${i}`, `${box.ttsPitch >= 0 ? '+' : ''}${box.ttsPitch}Hz`)

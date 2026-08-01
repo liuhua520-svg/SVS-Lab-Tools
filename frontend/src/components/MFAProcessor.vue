@@ -4179,6 +4179,7 @@ const processAudio = async () => {
       formDataObj.append('text', formData.value.text)
       formDataObj.append('language', formData.value.language)
       formDataObj.append('engine', ttsConfig.value.engine)
+      formDataObj.append('narrator_id', ttsConfig.value.narratorId || '')
       formDataObj.append('voice', ttsConfig.value.voice)
       formDataObj.append('rate', `${ttsConfig.value.rateNum >= 0 ? '+' : ''}${ttsConfig.value.rateNum}%`)
       formDataObj.append('pitch', `${ttsConfig.value.pitchNum >= 0 ? '+' : ''}${ttsConfig.value.pitchNum}Hz`)
