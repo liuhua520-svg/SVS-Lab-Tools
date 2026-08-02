@@ -598,10 +598,14 @@
           </template>
         </el-dialog>
 
-        <!-- "优化文本"弹窗：智能转换 / 仅转换（数字）/ 逐字转换（数字）/
+        <!-- "优化文本"弹窗：一键优化（固定串联智能转换→去除多余符号→去除
+             空格→英文加空格）/ 智能转换 / 仅转换（数字）/ 逐字转换（数字）/
              仅转换符号 / 英文加空格 / 去除多余符号 / 连字符转空格 / 去除空格 /
              大写字母加空格 / 大写转小写 / 小写转大写 / 首字母大写其余小写 /
              繁体转简体 / 简体转繁体（调用 OpenCC）/
+             英语转片假名 / 英语转平假名 / 日语汉字转片假名 / 日语汉字转
+             平假名（均调用 sudachipy reading_form()）/ 平假名转片假名 /
+             片假名转平假名（纯 Unicode 码位平移）/
              按逗号插入换行 / 按句号插入换行 / 按每几句插入换行，全部只在弹窗内的这份文本
              副本上生效；点击"应用"才会写回打开弹窗时指定的那个文本框，
              不点"应用"直接关闭则不影响原文本。与 pipeline.py /
@@ -623,6 +627,11 @@
             </el-button>
             <el-button size="small" :disabled="processing || !textOptimizerHistory.canRedo.value" @click="redoTextOptimize">
               ↷ {{ t('processor.redo') }}
+            </el-button>
+          </div>
+          <div class="text-optimize-toolbar">
+            <el-button type="primary" size="small" :disabled="processing" :loading="textOptimizer.loading === 'one_click'" @click="runTextOptimize('one_click')">
+              🚀 {{ t('processor.textOptimizeOneClick') }}
             </el-button>
           </div>
           <div class="text-optimize-toolbar">
@@ -667,6 +676,24 @@
             </el-button>
             <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'simplified_to_traditional'" @click="runTextOptimize('simplified_to_traditional')">
               🇹🇼 {{ t('processor.textOptimizeSimplifiedToTraditional') }}
+            </el-button>
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'english_to_katakana'" @click="runTextOptimize('english_to_katakana')">
+              🔤 {{ t('processor.textOptimizeEnglishToKatakana') }}
+            </el-button>
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'english_to_hiragana'" @click="runTextOptimize('english_to_hiragana')">
+              🔤 {{ t('processor.textOptimizeEnglishToHiragana') }}
+            </el-button>
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'ja_kanji_to_katakana'" @click="runTextOptimize('ja_kanji_to_katakana')">
+              漢 {{ t('processor.textOptimizeJaKanjiToKatakana') }}
+            </el-button>
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'ja_kanji_to_hiragana'" @click="runTextOptimize('ja_kanji_to_hiragana')">
+              漢 {{ t('processor.textOptimizeJaKanjiToHiragana') }}
+            </el-button>
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'hiragana_to_katakana'" @click="runTextOptimize('hiragana_to_katakana')">
+              あ→ア {{ t('processor.textOptimizeHiraganaToKatakana') }}
+            </el-button>
+            <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'katakana_to_hiragana'" @click="runTextOptimize('katakana_to_hiragana')">
+              ア→あ {{ t('processor.textOptimizeKatakanaToHiragana') }}
             </el-button>
             <el-button size="small" :disabled="processing" :loading="textOptimizer.loading === 'newline_after_comma'" @click="runTextOptimize('newline_after_comma')">
               ↩️ {{ t('processor.textOptimizeNewlineAfterComma') }}
