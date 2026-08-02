@@ -57,6 +57,21 @@ MFA / TTS / 对齐 / 词典等其它任何后端模块，供 /api/text/optimize 
   优化文本 - 简体转繁体 simplified_to_traditional() —— 调用 OpenCC
                                       "s2t" 配置，同上，字形转换、不做
                                       词汇替换，与语种无关。
+  优化文本 - 英语转片假名 english_to_katakana() —— 用 sudachipy 分词后
+                                      查询每个英语单词的片假名读音并替换，
+                                      非英语部分原样保留，与语种无关。
+  优化文本 - 英语转平假名 english_to_hiragana() —— 同上，最终结果再转
+                                      换为平假名，与语种无关。
+  优化文本 - 日语汉字转片假名 ja_kanji_to_katakana() —— 用 sudachipy
+                                      分词后查询每个汉字 token 的片假名
+                                      读音并替换，假名/标点/数字等原样
+                                      保留，与语种无关。
+  优化文本 - 日语汉字转平假名 ja_kanji_to_hiragana() —— 同上，最终结果
+                                      再转换为平假名，与语种无关。
+  优化文本 - 平假名转片假名 hiragana_to_katakana() —— 纯 Unicode 码位
+                                      平移，不依赖 sudachipy，与语种无关。
+  优化文本 - 片假名转平假名 katakana_to_hiragana() —— 同上，反方向
+                                      转换，与语种无关。
 
 与 pipeline.py 里 _convert_digits_to_words() 的关系
 ────────────────────────────────────────────────────
@@ -80,8 +95,11 @@ DialogueBatch.vue 下拉框里实际使用的语言代码（cmn/yue/eng/jpn/kor�
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Dict, List
+
+logger = logging.getLogger(__name__)
 
 # ═════════════════════════════════════════════════════════════════════════
 # 语言代码归一化：粤语与普通话统一按中文处理
@@ -1169,6 +1187,7 @@ def newline_every_n_sentences(text: str, n: int = 2) -> str:
 
 _opencc_t2s_instance = None  # 繁体 → 简体
 _opencc_s2t_instance = None  # 简体 → 繁体
+_sudachi_tokenizer_instance = None  # 日语分词器（英语单词/日语汉字 → 假名读音共用）
 
 
 def _get_opencc_converter(config: str):
@@ -1206,6 +1225,189 @@ def simplified_to_traditional(text: str) -> str:
         return text
     converter = _get_opencc_converter("s2t")
     return converter.convert(text)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 假名转换（新增）：英语单词/日语汉字 → 假名，以及片假名/平假名互转
+#
+#   英语转片假名 english_to_katakana() / 英语转平假名 english_to_hiragana()
+#       —— 用 sudachipy 分词后调用 reading_form() 取每个 token 的片假名
+#          读音，非英语单词的 token（中文/日文假名/标点/数字等）原样保留，
+#          不做任何改动；只有被判定为"英语单词"的 token 才会被替换。这与
+#          mfa_processor.py 里日语文本预处理阶段"把夹杂的英语单词转成
+#          片假名读音送入 MFA 对齐"用的是同一套 sudachipy reading_form()
+#          机制，只是这里是暴露给用户在"优化文本"弹窗里手动、可控地转换
+#          整段文本，转换是否准确取决于 sudachipy 词典是否收录该英语单词
+#          （生僻词/专有名词可能查不到读音，此时原词保留不变）。
+#   日语汉字转平假名 ja_kanji_to_hiragana() / 转片假名 ja_kanji_to_katakana()
+#       —— 同样用 sudachipy 分词 + reading_form()，但对所有 token（不限
+#          于英语单词）都尝试取读音；假名本身的 token（reading_form()
+#          返回值和原字符是同一个假名）保持原样，只有汉字 token 才会被
+#          替换为读音，避免把文本中本来就是假名的部分重复"转换"一遍导致
+#          结果和输入没有实质变化但徒增函数耗时。
+#   平假名转片假名 hiragana_to_katakana() / 片假名转平假名 katakana_to_hiragana()
+#       —— 纯 Unicode 码位平移，不依赖 sudachipy：平假名区块 U+3041-3096
+#          与片假名区块 U+30A1-30F6 逐字符一一对应，偏移量固定为
+#          0x60（96），出了这两个区块的字符（汉字/中文/英文/标点/数字等）
+#          原样保留。这一对转换纯粹是"字形"转换，不涉及分词或读音查询，
+#          速度快、无外部依赖、不会有查不到词典的问题。
+# ═════════════════════════════════════════════════════════════════════════
+
+def _get_sudachi_tokenizer():
+    """
+    懒加载 sudachipy 分词器实例并缓存复用（与 mfa_processor.py /
+    alt_aligners.py 里各自维护的 sudachipy 分词器是各自独立的实例，
+    互不影响；本模块只负责"优化文本"弹窗这一条纯文本转换路径，
+    不需要和对齐流程共享分词器状态）。
+
+    Returns
+    -------
+    成功返回 tokenizer 实例；sudachipy 未安装或初始化失败时返回 None
+    （调用方应据此原样返回输入文本，而不是抛出异常导致整个请求失败）。
+    """
+    global _sudachi_tokenizer_instance
+    if _sudachi_tokenizer_instance is None:
+        try:
+            from sudachipy import Dictionary
+            _sudachi_tokenizer_instance = Dictionary().create()
+        except Exception as e:
+            logger.warning(
+                f"sudachipy 分词器初始化失败，英语/日语汉字转假名功能不可用："
+                f"{e}（请确认已安装 sudachipy + sudachidict-core）"
+            )
+            return None
+    return _sudachi_tokenizer_instance
+
+
+def _is_english_word_token(token: str) -> bool:
+    """判断一个 sudachipy 分词 token 是否是"英语单词"（纯 ASCII 字母，
+    允许内部的撇号，如 don't）。与 mfa_processor.py 里
+    MFAProcessor._is_english_word() 的判定口径保持一致。"""
+    if not token:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z]+(?:'[A-Za-z]+)?", token))
+
+
+_HIRAGANA_START, _HIRAGANA_END = 0x3041, 0x3096
+_KATAKANA_START, _KATAKANA_END = 0x30A1, 0x30F6
+_KANA_OFFSET = 0x60  # 片假名 = 对应平假名码位 + 0x60
+
+
+def hiragana_to_katakana(text: str) -> str:
+    """平假名转片假名（纯 Unicode 码位平移，与语种无关）。
+    text 为空时原样返回；非平假名字符（汉字/中文/英文/标点/数字/片假名
+    本身等）原样保留。"""
+    if not text:
+        return text
+    chars = []
+    for ch in text:
+        code = ord(ch)
+        if _HIRAGANA_START <= code <= _HIRAGANA_END:
+            chars.append(chr(code + _KANA_OFFSET))
+        else:
+            chars.append(ch)
+    return "".join(chars)
+
+
+def katakana_to_hiragana(text: str) -> str:
+    """片假名转平假名（纯 Unicode 码位平移，与语种无关）。
+    text 为空时原样返回；非片假名字符（汉字/中文/英文/标点/数字/平假名
+    本身等）原样保留。长音符号"ー"不在片假名 Unicode 区块内，不会被
+    误转换，保持原样（这也是日文书写习惯——平假名极少使用长音符号，
+    原样保留符合预期）。"""
+    if not text:
+        return text
+    chars = []
+    for ch in text:
+        code = ord(ch)
+        if _KATAKANA_START <= code <= _KATAKANA_END:
+            chars.append(chr(code - _KANA_OFFSET))
+        else:
+            chars.append(ch)
+    return "".join(chars)
+
+
+def _convert_via_sudachi(text: str, only_english: bool, to_hiragana: bool) -> str:
+    """
+    英语转假名 / 日语汉字转假名的共用实现。
+
+    Parameters
+    ----------
+    only_english: True 时只替换英语单词 token（供 english_to_katakana /
+        english_to_hiragana 使用）；False 时对所有 token 尝试取读音，
+        但跳过"读音与原文相同"的 token（供 ja_kanji_to_katakana /
+        ja_kanji_to_hiragana 使用，这样假名/标点/数字等 token 不会被
+        无意义地重新替换一遍）。
+    to_hiragana: True 时最终结果转换为平假名；False 时保留 sudachipy
+        原生给出的片假名读音。
+
+    sudachipy 不可用，或某个 token 查不到有效读音时，该 token 原样保留，
+    不影响文本中其它部分的转换结果。
+    """
+    if not text:
+        return text
+    tokenizer = _get_sudachi_tokenizer()
+    if tokenizer is None:
+        return text
+
+    from sudachipy import tokenizer as sudachi_tokenizer_mod
+    split_mode = sudachi_tokenizer_mod.Tokenizer.SplitMode.C
+
+    try:
+        morphemes = tokenizer.tokenize(text, split_mode)
+    except Exception as e:
+        logger.warning(f"sudachipy 分词失败，本次转换未生效：{e}")
+        return text
+
+    pieces: List[str] = []
+    for m in morphemes:
+        surface = m.surface()
+
+        if only_english and not _is_english_word_token(surface):
+            pieces.append(surface)
+            continue
+
+        try:
+            reading = m.reading_form() or ""
+        except Exception:
+            reading = ""
+
+        # 读音为空、或（非纯英语场景下）读音与原文完全相同——说明这个
+        # token 本身已经是假名/无需转换的内容（标点、数字等 sudachipy
+        # 通常会原样把 surface 当作 reading_form 返回），保留原文。
+        if not reading or (not only_english and reading == surface):
+            pieces.append(surface)
+            continue
+
+        pieces.append(katakana_to_hiragana(reading) if to_hiragana else reading)
+
+    return "".join(pieces)
+
+
+def english_to_katakana(text: str) -> str:
+    """英语单词转片假名（文本中的中文/日文/标点/数字等非英语部分原样
+    保留，只转换被识别为英语单词的片段；查不到读音的生僻词/专有名词
+    也原样保留）。text 为空时原样返回。"""
+    return _convert_via_sudachi(text, only_english=True, to_hiragana=False)
+
+
+def english_to_hiragana(text: str) -> str:
+    """英语单词转平假名（先取片假名读音，再转平假名；其余规则同
+    english_to_katakana()）。text 为空时原样返回。"""
+    return _convert_via_sudachi(text, only_english=True, to_hiragana=True)
+
+
+def ja_kanji_to_katakana(text: str) -> str:
+    """日语汉字转片假名（文本中原本就是假名/标点/数字/中文/英文等的
+    部分原样保留，只有汉字 token 会被替换为片假名读音）。text 为空时
+    原样返回。"""
+    return _convert_via_sudachi(text, only_english=False, to_hiragana=False)
+
+
+def ja_kanji_to_hiragana(text: str) -> str:
+    """日语汉字转平假名（规则同 ja_kanji_to_katakana()，最终转换为
+    平假名）。text 为空时原样返回。"""
+    return _convert_via_sudachi(text, only_english=False, to_hiragana=True)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -1264,6 +1466,12 @@ _ACTIONS_NO_LANG = {
     "capitalize_words": capitalize_words,                 # 优化文本：首字母大写其余小写（与语种无关）
     "traditional_to_simplified": traditional_to_simplified,  # 优化文本：繁体转简体（OpenCC t2s，与语种无关）
     "simplified_to_traditional": simplified_to_traditional,  # 优化文本：简体转繁体（OpenCC s2t，与语种无关）
+    "english_to_katakana": english_to_katakana,           # 优化文本：英语单词转片假名（sudachipy，与语种无关）
+    "english_to_hiragana": english_to_hiragana,           # 优化文本：英语单词转平假名（sudachipy，与语种无关）
+    "ja_kanji_to_katakana": ja_kanji_to_katakana,         # 优化文本：日语汉字转片假名（sudachipy，与语种无关）
+    "ja_kanji_to_hiragana": ja_kanji_to_hiragana,         # 优化文本：日语汉字转平假名（sudachipy，与语种无关）
+    "hiragana_to_katakana": hiragana_to_katakana,         # 优化文本：平假名转片假名（Unicode码位平移，与语种无关）
+    "katakana_to_hiragana": katakana_to_hiragana,         # 优化文本：片假名转平假名（Unicode码位平移，与语种无关）
 }
 
 
@@ -1278,7 +1486,10 @@ def process_text(text: str, action: str, language: str = "zh", n: int = 2) -> Di
       "newline_after_period" | "newline_every_n" | "hyphen_to_space" |
       "strip_spaces" | "add_spaces_uppercase" | "uppercase_to_lowercase" |
       "lowercase_to_uppercase" | "capitalize_words" |
-      "traditional_to_simplified" | "simplified_to_traditional"
+      "traditional_to_simplified" | "simplified_to_traditional" |
+      "english_to_katakana" | "english_to_hiragana" |
+      "ja_kanji_to_katakana" | "ja_kanji_to_hiragana" |
+      "hiragana_to_katakana" | "katakana_to_hiragana"
     language: 语言代码（cmn/yue/eng/jpn/kor 或 zh/en/ja/ko），仅 smart /
       number_only / digit_to_words / symbol_only / one_click 需要，其余
       action 与语种无关。

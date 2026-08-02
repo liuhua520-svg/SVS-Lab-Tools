@@ -22,7 +22,7 @@ from urllib.parse import quote
 from threading import Thread
 from time import sleep
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from flask import Flask, request, jsonify, send_from_directory, abort, Response
 from flask_cors import CORS
@@ -962,7 +962,10 @@ def text_optimize():
     "newline_every_n" | "hyphen_to_space" | "add_spaces_uppercase" |
     "uppercase_to_lowercase" | "lowercase_to_uppercase" |
     "capitalize_words" | "traditional_to_simplified" |
-    "simplified_to_traditional", "language":
+    "simplified_to_traditional" | "english_to_katakana" |
+    "english_to_hiragana" | "ja_kanji_to_katakana" |
+    "ja_kanji_to_hiragana" | "hiragana_to_katakana" |
+    "katakana_to_hiragana", "language":
     "cmn"|"yue"|"eng"|"jpn"|"kor"（仅
     smart/number_only/digit_to_words/symbol_only 需要，其余 action 与
     语种无关，可不传）, "n": 2（仅 newline_every_n 需要，表示"每几句插入
@@ -1515,26 +1518,22 @@ def pipeline_full_process():
                 nemo_model,
                 english_word_align,
             ),
-            # 【修复错位 bug】english_word_align 之后的字段全部改用关键字参数
-            # 传递，一个不留地摆脱位置参数顺序依赖。
+            # 【修复位置参数错位 bug】english_word_align 之后的字段全部改用
+            # 关键字参数传递，摆脱位置参数顺序依赖。
             #
-            # 之前这里只把"新增字段"（align_pitch_shift_semitones 等 5 个）
-            # 放进 kwargs，但 vsqx_singer / vsqx_singer_id / vsqx_singer_bs /
-            # word_phoneme_map / dict_source / vsqx_pitch_smooth_window /
-            # whisperx_batch_size 仍然留在 args 元组里按位置传递。当
-            # ja_disable_katakana 这个形参被插入到 english_word_align 和
-            # vsqx_singer 之间（签名第 23 位）而 args 元组没有同步在对应
-            # 位置插入它的值时，args 元组第 23 项（原本想传 vsqx_singer）
-            # 就被顶替去匹配到了 ja_disable_katakana 形参，导致：
-            #   1) kwargs 里又传了一次 ja_disable_katakana
-            #      → TypeError: got multiple values for argument
-            #        'ja_disable_katakana'
-            #   2) 即使没有 (1) 报错暴露问题，vsqx_singer 及其后的所有字段
-            #      也会依次错位一格（vsqx_singer_bs 的值会被塞进
-            #      word_phoneme_map 这个布尔形参里，全部串位）。
-            # 只要函数签名里还留有位置参数，新插入形参就永远有重蹈覆辙的
-            # 风险；改成清一色关键字参数后，插入新字段、调整顺序都不会再
-            # 影响到已有调用。
+            # 原因：run_pipeline_job 签名里 ja_disable_katakana 排在
+            # english_word_align 和 vsqx_singer 之间（第 23 位），但这里的
+            # args 元组过去把 vsqx_singer 及其后续字段都按位置往后排，没有
+            # 对应在第 23 位插入 ja_disable_katakana 的值。结果 args 元组
+            # 第 23 项（本想传 vsqx_singer）被顶替去匹配 ja_disable_katakana
+            # 形参，而 kwargs 里又显式传了一次 ja_disable_katakana，导致：
+            #   TypeError: run_pipeline_job() got multiple values for
+            #   argument 'ja_disable_katakana'
+            # 即使没有这个报错暴露问题，vsqx_singer 之后的所有字段也会
+            # 依次错位一格（例如 vsqx_singer_bs 的值被塞进 word_phoneme_map
+            # 这个布尔形参），是"跑起来但结果全错"的隐蔽坑。只要函数签名
+            # 里还留有位置参数，插入新形参就有重蹈覆辙的风险；改成清一色
+            # 关键字参数后，以后插入新字段、调整顺序都不会再影响已有调用。
             kwargs=dict(
                 vsqx_singer=vsqx_singer,
                 vsqx_singer_id=vsqx_singer_id,
@@ -1800,6 +1799,9 @@ def run_project_only_job(
     ja_devoiced_phoneme: bool = False,
     fill_short_rests: bool = False,
     fill_short_rests_max_length: str = "16",
+    cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：透传给
+                                                           # process_project_only 的
+                                                           # F0/工程文件生成阶段边界。
 ):
     try:
         set_job(
@@ -1839,6 +1841,7 @@ def run_project_only_job(
             fill_short_rests=fill_short_rests,
             fill_short_rests_max_length=fill_short_rests_max_length,
             stage_cb=lambda stage, status: set_job(job_id, stage=stage, stage_status=status),
+            cancel_check=cancel_check,
         )
 
         if result.get("success"):
@@ -1851,6 +1854,14 @@ def run_project_only_job(
                 job_id,
                 status="done",
                 finished_at=datetime.now().isoformat(),
+                result=result,
+            )
+        elif result.get("stage") == "cancelled":
+            set_job(
+                job_id,
+                status="cancelled",
+                finished_at=datetime.now().isoformat(),
+                error=result.get("error", "用户已取消"),
                 result=result,
             )
         else:
@@ -2029,6 +2040,7 @@ def pipeline_project_only():
                 ja_devoiced_phoneme,
                 fill_short_rests,
                 fill_short_rests_max_length,
+                lambda: is_job_cancel_requested(job_id),
             ),
         ).start()
 
@@ -2135,6 +2147,15 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
             tts_boxes = [b for b in boxes if b.get("tts")]
             total_tts = len(tts_boxes)
             for done_tts, box in enumerate(tts_boxes, start=1):
+                if is_job_cancel_requested(job_id):
+                    set_job(
+                        job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                        error="用户已取消",
+                        result={"success": False, "error": "用户已取消", "stage": "cancelled",
+                                "cancelled_at_stage": "tts"},
+                    )
+                    return
+
                 tts_info = box["tts"]
                 # 对齐辅助移调（半音）：每个对话框独立生效，未提交时默认 0。
                 box_align_pitch_shift_semitones = box.get("align_pitch_shift_semitones", 0.0)
@@ -2187,9 +2208,17 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         english_word_align=box_english_word_align,
                         ja_disable_katakana=box_ja_disable_katakana,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
+                        cancel_check=lambda: is_job_cancel_requested(job_id),
                     )
                     shutil.rmtree(job_segments_dir, ignore_errors=True)
                     set_job(job_id, stage="align", stage_status="done", box_index=box.get("index"))
+
+                    if align_result.get("stage") == "cancelled":
+                        set_job(
+                            job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                            error=align_result.get("error", "用户已取消"), result=align_result,
+                        )
+                        return
 
                     if align_result.get("success"):
                         final_wav_path = str(WORK_DIR / f"{stem}.wav")
@@ -2229,8 +2258,16 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                         qwen3_tts_options=tts_info.get("qwen3_tts_options"),
                         stage_cb=_box_stage_cb,
+                        cancel_check=lambda: is_job_cancel_requested(job_id),
                     )
                     set_job(job_id, stage="align", stage_status="done", box_index=box.get("index"))
+
+                    if tts_result.get("stage") == "cancelled":
+                        set_job(
+                            job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                            error=tts_result.get("error", "用户已取消"), result=tts_result,
+                        )
+                        return
 
                 if tts_result.get("success"):
                     box["audio_path"] = tts_result["wav_path"]
@@ -3125,6 +3162,10 @@ def run_tts_pipeline_job(
     preview_wav_path: Optional[str] = None,
     qwen3_tts_options: Optional[Dict] = None,
     voice_source_tag: str = "",
+    cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：透传给 TTS 合成/对齐的
+                                                           # 逐句循环，以及 F0/工程文件生成阶段
+                                                           # 边界；由 app.py 传入
+                                                           # is_job_cancel_requested(job_id)。
 ):
     try:
         set_job(job_id, status="running", started_at=datetime.now().isoformat(),
@@ -3165,9 +3206,17 @@ def run_tts_pipeline_job(
                 ja_disable_katakana=ja_disable_katakana,
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 progress_cb=_progress_cb,
+                cancel_check=cancel_check,
             )
             shutil.rmtree(job_segments_dir, ignore_errors=True)
             set_job(job_id, stage="align", stage_status="done")
+
+            if align_result.get("stage") == "cancelled":
+                set_job(
+                    job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                    error=align_result.get("error", "用户已取消"), result=align_result,
+                )
+                return
 
             if not align_result.get("success"):
                 set_job(
@@ -3210,8 +3259,16 @@ def run_tts_pipeline_job(
                 progress_cb=_progress_cb,
                 qwen3_tts_options=qwen3_tts_options,
                 stage_cb=_stage_switch_cb,
+                cancel_check=cancel_check,
             )
             set_job(job_id, stage="align", stage_status="done")
+
+        if tts_result.get("stage") == "cancelled":
+            set_job(
+                job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                error=tts_result.get("error", "用户已取消"), result=tts_result,
+            )
+            return
 
         if not tts_result.get("success"):
             set_job(
@@ -3223,6 +3280,17 @@ def run_tts_pipeline_job(
         if processing_mode == "mfa-only":
             result = {**tts_result, "processing_time": 0, "aligner_backend": "qwen3_aligner"}
             set_job(job_id, status="done", finished_at=datetime.now().isoformat(), result=result)
+            return
+
+        if cancel_check and cancel_check():
+            cancelled_result = {
+                "success": False, "error": "用户已取消",
+                "stage": "cancelled", "cancelled_at_stage": "f0_extraction",
+            }
+            set_job(
+                job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                error="用户已取消", result=cancelled_result,
+            )
             return
 
         project_result = pipeline.process_project_only(
@@ -3245,6 +3313,7 @@ def run_tts_pipeline_job(
             fill_short_rests=fill_short_rests,
             fill_short_rests_max_length=fill_short_rests_max_length,
             stage_cb=lambda stage, status: set_job(job_id, stage=stage, stage_status=status),
+            cancel_check=cancel_check,
         )
 
         merged_result = {
@@ -3258,6 +3327,11 @@ def run_tts_pipeline_job(
 
         if project_result.get("success"):
             set_job(job_id, status="done", finished_at=datetime.now().isoformat(), result=merged_result)
+        elif project_result.get("stage") == "cancelled":
+            set_job(
+                job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                error=project_result.get("error", "用户已取消"), result=merged_result,
+            )
         else:
             set_job(
                 job_id, status="failed", finished_at=datetime.now().isoformat(),
@@ -3319,8 +3393,6 @@ def tts_process():
             voice_source_tag = "qwen3tts"
         else:
             voice_source_tag = "edgetts"
-
-        qwen3_tts_options: Optional[Dict] = None
         if engine == "qwen3_tts":
             raw_opts = payload.get("qwen3_tts_options", "").strip()
             try:
@@ -3344,6 +3416,20 @@ def tts_process():
                     qwen3_tts_options["ref_audio_path"] = str(ref_path)
                 elif not qwen3_tts_options.get("ref_audio_base64"):
                     return jsonify({"error": "Voice Clone 模式需要提供参考音频"}), 400
+        else:
+            # 【修复 UnboundLocalError】qwen3_tts_options 原本只在
+            # engine == "qwen3_tts" 分支内被赋值；Python 函数作用域分析
+            # 一旦发现某变量在函数体内任何地方有赋值语句，就会把它当成
+            # 局部变量处理——哪怕运行时走的是没有赋值的分支。engine 不是
+            # "qwen3_tts"（如 edge_tts）时这个 if 分支整体不会执行，
+            # 变量从未被真正赋值，而下面第 3417 行、以及本函数末尾投递
+            # 后台任务时的 qwen3_tts_options=qwen3_tts_options 都会无条件
+            # 引用它，导致 UnboundLocalError: local variable
+            # 'qwen3_tts_options' referenced before assignment。
+            # 这里补上 else 分支显式赋 None，其余引用处本来就已经用
+            # (qwen3_tts_options or {}) 之类的写法兼容 None 值，不需要
+            # 再改动别处。
+            qwen3_tts_options = None
 
         if not voice and not (engine == "qwen3_tts" and (qwen3_tts_options or {}).get("mode") in ("voice_design", "voice_clone")):
             return jsonify({"error": "缺少 voice（音色）"}), 400
@@ -3453,6 +3539,7 @@ def tts_process():
                 preview_sentences=(preview_entry or {}).get("sentences"),
                 preview_wav_path=(preview_entry or {}).get("wav_path"),
                 qwen3_tts_options=qwen3_tts_options,
+                cancel_check=lambda: is_job_cancel_requested(job_id),
             ),
         ).start()
 
@@ -4574,7 +4661,12 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
                             align_pitch_shift_semitones: float, audio_duration_sec: float,
                             processing_mode: str, original_text: str = "",
                             skip_split_every_n: int = 1,
-                            ja_disable_katakana: bool = False, **project_kwargs):
+                            ja_disable_katakana: bool = False,
+                            cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：
+                                                                                  # 透传给对齐块循环，
+                                                                                  # 以及 F0/工程文件
+                                                                                  # 生成阶段边界。
+                            **project_kwargs):
     """
     单文件"字幕跟读"后台任务：整段音频按字幕时间轴逐句（或按
     skip_split_every_n 合并成块）Qwen3-FA 对齐，产出完整 LAB；"完整处理"
@@ -4597,8 +4689,14 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
             audio_duration_sec=audio_duration_sec,
             progress_cb=_progress_cb,
             skip_split_every_n=skip_split_every_n,
+            cancel_check=cancel_check,
         )
         set_job(job_id, stage="align", stage_status="done")
+
+        if align_result.get("stage") == "cancelled":
+            set_job(job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                    error=align_result.get("error", "用户已取消"), result=align_result)
+            return
 
         if not align_result.get("success"):
             set_job(job_id, status="failed", finished_at=datetime.now().isoformat(),
@@ -4626,6 +4724,15 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
         lab_path = str(Path(wav_path).with_suffix(".lab"))
         Path(lab_path).write_text(lab_content, encoding="utf-8")
 
+        if cancel_check and cancel_check():
+            set_job(
+                job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                error="用户已取消",
+                result={"success": False, "error": "用户已取消", "stage": "cancelled",
+                        "cancelled_at_stage": "f0_extraction"},
+            )
+            return
+
         # language 已经是本函数的顶层形参（对齐阶段就在用），不再从
         # project_kwargs 里取——project_kwargs 若同时携带同名 language，
         # 会在 Thread(kwargs=dict(language=..., **project_kwargs)) 处
@@ -4635,6 +4742,7 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
             wav_path=wav_path, lab_path=lab_path, midi_path=None,
             language=language, original_text=original_text,
             stage_cb=lambda stage, status: set_job(job_id, stage=stage, stage_status=status),
+            cancel_check=cancel_check,
             **project_kwargs,
         )
 
@@ -4650,6 +4758,10 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
             project_result.setdefault("lab_content", lab_content)
             project_result["warnings"] = align_result.get("warnings", [])
             set_job(job_id, status="done", finished_at=datetime.now().isoformat(), result=project_result)
+        elif project_result.get("stage") == "cancelled":
+            project_result.setdefault("lab_content", lab_content)
+            set_job(job_id, status="cancelled", finished_at=datetime.now().isoformat(),
+                    error=project_result.get("error", "用户已取消"), result=project_result)
         else:
             set_job(job_id, status="failed", finished_at=datetime.now().isoformat(),
                     error=project_result.get("error", "工程文件生成失败"), result=project_result)
@@ -4819,6 +4931,7 @@ def subtitle_import_align():
                 audio_duration_sec=audio_duration, processing_mode=processing_mode,
                 original_text=subtitle_original_text,
                 skip_split_every_n=skip_split_every_n,
+                cancel_check=lambda: is_job_cancel_requested(job_id),
                 **project_kwargs,
             ),
         ).start()
