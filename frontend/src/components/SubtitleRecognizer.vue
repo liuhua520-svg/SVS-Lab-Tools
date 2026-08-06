@@ -521,7 +521,7 @@ const recognizeSettings = reactive({
   language: 'auto',
   device: 'auto',
   batchSize: 8,
-  maxChars: 250,
+  maxChars: 34,
   splitAtSentenceEnd: false,
   allowCommaSplit: false,
   removePunctuation: false,
