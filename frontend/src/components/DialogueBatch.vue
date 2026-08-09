@@ -990,6 +990,13 @@
         >
           📥 {{ t('dialogue.resultDownload') }}
         </el-button>
+        <el-button
+          v-if="dialogueTextContent.trim()"
+          size="large"
+          @click="downloadDialogueText"
+        >
+          📄 {{ t('processor.downloadTextFile') }}
+        </el-button>
       </div>
 
       <div v-if="topError" class="error-section">
@@ -1159,6 +1166,8 @@
                   </el-upload>
                   <AudioRecordPreview
                     :current-file="narratorFormQwen3RefAudioFile"
+                    :source-url="narratorFormQwen3RefAudioSourceUrl"
+                    :download-file-name="narratorFormQwen3RefAudioDownloadName"
                     :disabled="processing"
                     @recorded="(f: File) => { narratorFormQwen3RefAudioFile = f; narratorForm.qwen3_tts_ref_audio_path = '' }"
                   />
@@ -2340,6 +2349,30 @@ const narratorFormVoicesLoading = ref(false)
 const narratorFormQwen3RefAudioFile = ref<File | null>(null)
 const narratorFormQwen3RefAudioName = computed(() =>
   narratorFormQwen3RefAudioFile.value?.name || (narratorForm.value.qwen3_tts_ref_audio_path ? narratorForm.value.qwen3_tts_ref_audio_path.split(/[\\/]/).pop() : '')
+)
+
+// 【修复】编辑一个已保存的 Voice Clone 预设时，narratorFormQwen3RefAudioFile
+// 是 null（本地没有 File 对象，只有服务端路径 narratorForm.qwen3_tts_ref_audio_path
+// 这个字符串），此时 AudioRecordPreview 的播放/下载功能必须走 sourceUrl
+// 这条路径，否则组件两个数据源都是空，播放▶/下载⬇按钮点击后自然没有
+// 任何反应（组件内部逻辑判断"当前没有可预览的源"直接短路返回）。
+// 后端 /api/tts/narrators/<id>/ref_audio 路由专门用于这个场景（与
+// MFAProcessor.vue 共用同一个后端接口，语音预设本身就是全局共享的，
+// 不区分是从哪个页面打开的编辑弹窗）。仅当"没有新选择本地文件"且
+// "确实是编辑已有预设（id 非空）"且"该预设已经保存过参考音频路径"时
+// 才提供 sourceUrl；新建预设/已选择新文件替换时 currentFile 优先，
+// sourceUrl 不生效（组件自身的优先级规则），这里判断条件只是避免没
+// 必要地构造一个必然 404 的 URL。
+const narratorFormQwen3RefAudioSourceUrl = computed(() => {
+  if (narratorFormQwen3RefAudioFile.value) return null
+  if (!narratorForm.value.id || !narratorForm.value.qwen3_tts_ref_audio_path) return null
+  return `/api/tts/narrators/${encodeURIComponent(narratorForm.value.id)}/ref_audio`
+})
+// sourceUrl 模式下载时用到的文件名：URL 本身不带扩展名信息，从已保存的
+// 服务端路径里取原始文件名（与 narratorFormQwen3RefAudioName 取值逻辑
+// 一致，两者保持同步）。
+const narratorFormQwen3RefAudioDownloadName = computed(() =>
+  narratorForm.value.qwen3_tts_ref_audio_path ? narratorForm.value.qwen3_tts_ref_audio_path.split(/[\\/]/).pop() || '' : ''
 )
 
 // 切出 voice_clone 模式时清空弹窗内已选的参考音频，避免残留状态。
@@ -4455,6 +4488,43 @@ const downloadResult = async () => {
   } finally {
     downloading.value = false
   }
+}
+
+// 用于"下载TXT文本"按钮：按对话框当前顺序把每个框的 text 拼成一份
+// TXT（一框一行，跳过空文本框）。文本本来就在每个 box.text 里（导入
+// SRT/LRC 字幕跟读时也是逐条写入这个字段，见 runSubtitleImport），
+// 不需要额外请求后端。
+const dialogueTextContent = computed(() => {
+  return boxes.value
+    .map(box => box.text.trim())
+    .filter(Boolean)
+    .join('\n')
+})
+
+const downloadDialogueText = () => {
+  const content = dialogueTextContent.value.trim()
+  if (!content) {
+    ElMessage.warning(t('processor.noTextContent'))
+    return
+  }
+
+  // 文件名尽量跟工程文件同名，取不到就退回固定名。
+  let stem = 'dialogue'
+  if (projectResult.value?.path) {
+    const projName = getFileName(projectResult.value.path)
+    stem = projName.replace(/\.(svp|ustx|sv|vsqx)$/, '')
+  }
+
+  const filename = `${stem}.txt`
+
+  const element = document.createElement('a')
+  element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(content))
+  element.setAttribute('download', filename)
+  document.body.appendChild(element)
+  element.click()
+  document.body.removeChild(element)
+
+  ElMessage.success(`✅ ${t('processor.downloadTextFile')}: ${filename}`)
 }
 
 onMounted(() => {

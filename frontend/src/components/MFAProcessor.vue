@@ -530,6 +530,8 @@
                     </el-upload>
                     <AudioRecordPreview
                       :current-file="narratorFormQwen3RefAudioFile"
+                      :source-url="narratorFormQwen3RefAudioSourceUrl"
+                      :download-file-name="narratorFormQwen3RefAudioDownloadName"
                       :disabled="processing"
                       @recorded="(f: File) => { narratorFormQwen3RefAudioFile = f; narratorForm.qwen3_tts_ref_audio_path = '' }"
                     />
@@ -1661,6 +1663,9 @@
           >
             📥 {{ t('processor.downloadProjectFile') }}
           </el-button>
+          <el-button v-if="downloadTextContent.trim()" @click="downloadText" size="large">
+            📄 {{ t('processor.downloadTextFile') }}
+          </el-button>
           <el-button v-if="result.labContent" @click="copyLabToClipboard" size="large">
             📋 {{ t('processor.copyLabContent') }}
           </el-button>
@@ -2669,6 +2674,28 @@ const narratorFormQwen3RefAudioName = computed(() =>
   narratorFormQwen3RefAudioFile.value?.name || (narratorForm.value.qwen3_tts_ref_audio_path ? narratorForm.value.qwen3_tts_ref_audio_path.split(/[\\/]/).pop() : '')
 )
 
+// 【修复】编辑一个已保存的 Voice Clone 预设时，narratorFormQwen3RefAudioFile
+// 是 null（本地没有 File 对象，只有服务端路径 narratorForm.qwen3_tts_ref_audio_path
+// 这个字符串），此时 AudioRecordPreview 的播放/下载功能必须走 sourceUrl
+// 这条路径，否则组件两个数据源都是空，播放▶/下载⬇按钮点击后自然没有
+// 任何反应（组件内部逻辑判断"当前没有可预览的源"直接短路返回）。
+// 后端新增的 /api/tts/narrators/<id>/ref_audio 路由专门用于这个场景。
+// 仅当"没有新选择本地文件" 且 "确实是编辑已有预设（id 非空）"且
+// "该预设已经保存过参考音频路径"时才提供 sourceUrl；新建预设/已选择
+// 新文件替换时 currentFile 优先，sourceUrl 不生效（组件自身的优先级
+// 规则），这里判断条件只是避免没必要地构造一个必然 404 的 URL。
+const narratorFormQwen3RefAudioSourceUrl = computed(() => {
+  if (narratorFormQwen3RefAudioFile.value) return null
+  if (!narratorForm.value.id || !narratorForm.value.qwen3_tts_ref_audio_path) return null
+  return `/api/tts/narrators/${encodeURIComponent(narratorForm.value.id)}/ref_audio`
+})
+// sourceUrl 模式下载时用到的文件名：URL 本身不带扩展名信息，从已保存的
+// 服务端路径里取原始文件名（与 narratorFormQwen3RefAudioName 取值逻辑
+// 一致，两者保持同步）。
+const narratorFormQwen3RefAudioDownloadName = computed(() =>
+  narratorForm.value.qwen3_tts_ref_audio_path ? narratorForm.value.qwen3_tts_ref_audio_path.split(/[\\/]/).pop() || '' : ''
+)
+
 // 切出 voice_clone 模式时清空弹窗内已选的参考音频，避免残留状态。
 watch(() => narratorForm.value.qwen3_tts_mode, (mode) => {
   if (mode !== 'voice_clone') {
@@ -2765,8 +2792,8 @@ const advancedConfig = ref<AdvancedConfig>({
   f0_smooth: true,
   f0_smooth_window: 5,
   vsqx_pitch_smooth_window: 5,
-  f0_floor: 35,
-  f0_ceil: 2100,
+  f0_floor: 71,
+  f0_ceil: 800,
   fill_short_rests: false,
   fill_short_rests_max_length: '32'
 })
@@ -3822,6 +3849,19 @@ const driveStageProgress = (job: any, withTts: boolean) => {
     }
     progressPercent.value = Math.round((cumBefore('align') + within) * 100)
   } else if (stage === 'f0') {
+    // 【修复】此前这里只把"F0"这一行标记为进行中，没有对称地把上一步
+    // （align）标记为完成——align 分支里"完成"标记只在 stageStatus
+    // 恰好等于 'done' 的那一次轮询里才会设置（见上面 align 分支）。但
+    // 后端 align→f0 两个阶段的 _stage() 回调之间几乎没有耗时（都是
+    // 同步写 job 状态），如果轮询间隔没有精确捕捉到那个瞬时的
+    // stage==='align' && stageStatus==='done' 状态（很常见——下一次
+    // 轮询可能直接看到 stage 已经是 'f0'），"align 完成"这个 UI 更新
+    // 就会被跳过，导致这一行永远停在"进行中"，即使实际处理早已进入
+    // F0 阶段（截图复现的正是这个场景）。
+    // 逻辑上只要能进入 f0 阶段，align 就必然已经完成，不需要依赖是否
+    // 曾经捕捉到那个瞬时状态，这里无条件补一次"完成"标记（与 project
+    // 分支补标记 f0 完成是同一个思路，保持两处处理方式一致）。
+    updateProcessingStep(offset, t('processor.statusDone'), t('processor.stagePrepareAlign'))
     const label = job.f0_progress?.track_title
       ? `${t('processor.stageExtractF0')} (${job.f0_progress.track_title} ${job.f0_progress.done}/${job.f0_progress.total})`
       : t('processor.stageExtractF0')
@@ -3861,6 +3901,11 @@ const normalizeResult = (payload: any) => {
   const projectPath = extractProjectPath(payload)
   return {
     labContent: payload?.lab_content || payload?.labContent || '',
+    // 仅字幕跟读（inputMode==='subtitle'）模式下有值：后端把解析出的
+    // 字幕原文（按时间顺序逐条拼接）一并带回，因为该模式下前端并不
+    // 持有逐条字幕文本（字幕文件整份转发给后端解析）。音频跟读/TTS跟读
+    // 两种模式不需要这个字段，直接用 formData.value.text 即可。
+    subtitleText: payload?.subtitle_text || payload?.subtitleText || '',
     processingTime: payload?.processing_time || payload?.processingTime || 0,
     labPath: payload?.lab_path || payload?.labPath || '',
     projectPath,
@@ -4735,6 +4780,50 @@ const downloadLab = () => {
   document.body.removeChild(element)
 
   ElMessage.success(`✅ ${t('processor.downloadLabFile')}: ${filename}`)
+}
+
+// 用于"下载TXT文本"按钮：音频跟读 / TTS跟读两种模式文本就是用户在
+// formData.value.text 里手动填写/粘贴的内容；字幕跟读模式下前端并不
+// 持有逐条字幕文本（字幕文件整份转发给后端解析），改用后端随结果一并
+// 带回的 result.value.subtitleText（见 normalizeResult）。
+const downloadTextContent = computed(() => {
+  if (inputMode.value === 'subtitle') return result.value?.subtitleText || ''
+  return formData.value.text || ''
+})
+
+const downloadText = () => {
+  const content = downloadTextContent.value.trim()
+  if (!content) {
+    ElMessage.warning(t('processor.noTextContent'))
+    return
+  }
+
+  // 与 downloadLab 保持一致的文件名规则：优先跟工程文件/LAB 文件同名，
+  // 找不到再退回音频文件名，最后兜底一个固定名。
+  let stem = 'text'
+
+  if (result.value?.projectPath) {
+    const projName = getFileName(result.value.projectPath)
+    stem = projName.replace(/\.(svp|ustx|sv|vsqx)$/, '')
+  } else if (result.value?.labPath) {
+    const labName = getFileName(result.value.labPath)
+    stem = labName.replace(/\.lab$/, '')
+  } else if (inputMode.value === 'subtitle' && subtitleImport.value.audioFile) {
+    stem = subtitleImport.value.audioFile.name.replace(/\.\w+$/, '')
+  } else if (formData.value.audioFile) {
+    stem = formData.value.audioFile.name.replace(/\.\w+$/, '')
+  }
+
+  const filename = `${stem}.txt`
+
+  const element = document.createElement('a')
+  element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(content))
+  element.setAttribute('download', filename)
+  document.body.appendChild(element)
+  element.click()
+  document.body.removeChild(element)
+
+  ElMessage.success(`✅ ${t('processor.downloadTextFile')}: ${filename}`)
 }
 
 const downloadProject = async () => {
