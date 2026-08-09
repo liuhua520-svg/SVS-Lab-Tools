@@ -3,8 +3,7 @@
 > 本报告基于对 `backend/mfa_processor.py`、`backend/alt_aligners.py`、
 > `backend/phoneme_converter.py`、`backend/tsubaki_processor.py`、
 > `backend/f0_extractors.py`、`backend/midi_processor.py`、`backend/tts_processor.py`、
-> `backend/pipeline.py` 等源码的直接阅读整理而成。与上一版报告不同，这一版不再把
-> "唱歌"当作默认场景来讲，而是回到这个工具真正的立项目的：**让 Synthesizer V、
+> `backend/pipeline.py` 等源码的直接阅读整理而成。**让 Synthesizer V、
 > OpenUTAU、VOCALOID 这些为唱歌而生的引擎，去说一句台词，而且听起来要像人在
 > 说话，不是在唱一段古怪的旋律**。这个方向在虚拟歌手圈子里有个专门的名字，叫
 > "说话调教"，英文/日文语境里常写作 Talkloid。全文所有函数名、字段名均对应仓库
