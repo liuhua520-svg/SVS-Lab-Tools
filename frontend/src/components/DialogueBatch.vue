@@ -2482,8 +2482,8 @@ const advanced = ref<AdvancedConfig>({
   f0_smooth: true,
   f0_smooth_window: 5,
   vsqx_pitch_smooth_window: 5,
-  f0_floor: 35,
-  f0_ceil: 2100,
+  f0_floor: 71,
+  f0_ceil: 800,
   fill_short_rests: false,
   fill_short_rests_max_length: '32',
 })
@@ -4681,7 +4681,7 @@ onMounted(() => {
 }
 
 .compact-upload :deep(.el-upload-dragger) {
-  padding: 14px 10px;
+  padding: 60px 80px;
 }
 
 /* 拖拽上传框 + 录音/预览按钮并排布局，与 MFAProcessor.vue 保持一致。 */
