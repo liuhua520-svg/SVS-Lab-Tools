@@ -261,6 +261,8 @@
                 </el-upload>
                 <AudioRecordPreview
                   :current-file="qwen3TtsRefAudioFile"
+                  :source-url="qwen3TtsRefAudioSourceUrl"
+                  :download-file-name="qwen3TtsRefAudioDownloadName"
                   :disabled="processing"
                   @recorded="(f: File) => { qwen3TtsRefAudioFile = f; qwen3TtsRefAudioPath = '' }"
                 />
@@ -1994,6 +1996,25 @@ const qwen3TtsRefAudioFile = ref<File | null>(null)
 const qwen3TtsRefAudioPath = ref('')
 const qwen3TtsRefAudioName = computed(() => qwen3TtsRefAudioFile.value?.name || (qwen3TtsRefAudioPath.value ? qwen3TtsRefAudioPath.value.split(/[\\/]/).pop() : ''))
 
+// 【修复】套用一个已保存的 Voice Clone 预设时（handleNarratorSelect()
+// 里 qwen3TtsRefAudioPath.value = n.qwen3_tts_ref_audio_path），本地
+// 同样没有对应的 File 对象，只有服务端路径字符串——与"语音预设管理"
+// 弹窗内编辑预设是同一类问题（见 narratorFormQwen3RefAudioSourceUrl），
+// 这里的区别是主面板拿到的 id 来自 ttsConfig.narratorId（当前套用的
+// 预设 id，由下拉框 v-model 维护），而不是"正在编辑哪个预设"。
+// 仅当"没有新选择本地文件"且"确实套用了一个预设（narratorId 非空）"
+// 且"该预设保存过参考音频路径"时才提供 sourceUrl，避免构造一个
+// 必然 404 的 URL（例如自定义模式下 qwen3TtsRefAudioPath 有值但
+// narratorId 为空的情况，此时应该走 currentFile/本地文件逻辑）。
+const qwen3TtsRefAudioSourceUrl = computed(() => {
+  if (qwen3TtsRefAudioFile.value) return null
+  if (!ttsConfig.value.narratorId || !qwen3TtsRefAudioPath.value) return null
+  return `/api/tts/narrators/${encodeURIComponent(ttsConfig.value.narratorId)}/ref_audio`
+})
+const qwen3TtsRefAudioDownloadName = computed(() =>
+  qwen3TtsRefAudioPath.value ? qwen3TtsRefAudioPath.value.split(/[\\/]/).pop() || '' : ''
+)
+
 // 切出 voice_clone 模式时清空已选参考音频，避免"切到 CustomVoice/VoiceDesign
 // 后再切回来，参考音频还残留着上一次选的文件"的状态泄漏问题。
 watch(qwen3TtsMode, (mode) => {
@@ -3290,12 +3311,9 @@ watch(() => formData.value.language, (lang) => {
 })
 
 // 切换"选择 TTS"引擎时：清空当前音色（不同引擎的音色 ID 体系完全不同，
-// 沿用旧值没有意义）并按新引擎重新拉取音色列表。
-watch(() => ttsConfig.value.engine, (engine, oldEngine) => {
-  if (!engine || engine === oldEngine) return
-  ttsConfig.value.voice = ''
-  if (inputMode.value === 'tts') fetchTtsVoices(formData.value.language, engine)
-})
+// 沿用旧值没有意义）并按新引擎重新拉取音色列表；见下方
+// handleNarratorSelect() 定义之后的同名 watch（依赖它清空预设状态，
+// 故放在其后声明）。
 
 const handleNarratorSelect = (narratorId: string) => {
   if (!narratorId) {
@@ -3334,6 +3352,28 @@ const handleNarratorSelect = (narratorId: string) => {
     qwen3TtsRefAudioPath.value = n.qwen3_tts_ref_audio_path || ''
   }
 }
+
+// 【修复】此前"切换选择 TTS 引擎"的 watch 只清空了音色（ttsConfig.voice），
+// 没有处理 ttsConfig.narratorId：filteredNarrators（下拉框选项列表，见
+// 其定义处注释）按 engine 过滤预设，切换引擎后，原来选中的预设如果是
+// 别的引擎的，会从 <el-option> 列表里消失——el-select 在当前 v-model
+// 值找不到匹配选项时，UI 上会回退显示成 placeholder"不使用预设"，但
+// ttsConfig.value.narratorId 这个变量本身并没有被清空，只是"看不见但
+// 还在生效"：用户切回原引擎时，下拉框又会神奇地恢复选中状态，行为上
+// 让人困惑，且如果这时候直接提交任务，后端拿到的 narrator_id 实际上
+// 还是那个已经不匹配当前引擎的旧值。这里显式检查一次：新引擎下如果
+// 找不到这个预设了，就真正清空 narratorId，并复用 handleNarratorSelect('')
+// 分支同步清空跟随预设带出的语速/音调/音量/参考音频等状态，避免另起
+// 一份清空逻辑、后续维护时两处不一致。
+watch(() => ttsConfig.value.engine, (engine, oldEngine) => {
+  if (!engine || engine === oldEngine) return
+  ttsConfig.value.voice = ''
+  if (ttsConfig.value.narratorId && !filteredNarrators.value.some(n => n.id === ttsConfig.value.narratorId)) {
+    handleNarratorSelect('')
+    ttsConfig.value.narratorId = ''
+  }
+  if (inputMode.value === 'tts') fetchTtsVoices(formData.value.language, engine)
+})
 
 // ── 手动分段预览 ─────────────────────────────────────────────────────
 // 只在用户点击"生成预览"按钮时触发（不再随输入防抖自动生成）：按句末

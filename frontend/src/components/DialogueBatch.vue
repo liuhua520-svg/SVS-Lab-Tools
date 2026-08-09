@@ -770,6 +770,8 @@
                       </el-upload>
                       <AudioRecordPreview
                         :current-file="box.ttsQwen3RefAudioFile"
+                        :source-url="boxQwen3RefAudioSourceUrl(box)"
+                        :download-file-name="boxQwen3RefAudioDownloadName(box)"
                         :disabled="processing"
                         @recorded="(f: File) => { box.ttsQwen3RefAudioFile = f; box.ttsQwen3RefAudioPath = '' }"
                       />
@@ -2681,8 +2683,22 @@ const fetchAllBoxTtsVoices = () => {
 
 // 切换某个对话框的"选择 TTS"引擎：清空该框当前音色（不同引擎音色 ID 体系
 // 不通用）并按新引擎重新拉取该框的音色列表；只影响这一个框。
+//
+// 【修复】此前没有处理 box.ttsNarratorId：narratorsForEngine(box.ttsEngine)
+// 按引擎过滤这一框的预设下拉选项，切换引擎后，原来选中的预设如果是别的
+// 引擎的，会从 <el-option> 列表里消失——el-select 在当前 v-model 值找
+// 不到匹配选项时，UI 上会回退显示成 placeholder"不使用预设"，但
+// box.ttsNarratorId 这个字段本身并没有被清空，只是"看不见但还在生效"
+// （与 MFAProcessor.vue 主面板的同名问题一致，这里是按框隔离的版本）。
+// 这里显式检查一次：新引擎下如果找不到这个预设了，就真正清空
+// box.ttsNarratorId，并复用 handleBoxNarratorSelect(box, '') 分支同步
+// 清空跟随预设带出的语速/音调/音量/参考音频等状态。
 const handleBoxEngineChange = (box: DialogueBox, engine: string) => {
   box.ttsVoice = ''
+  if (box.ttsNarratorId && !narratorsForEngine(engine).some(n => n.id === box.ttsNarratorId)) {
+    handleBoxNarratorSelect(box, '')
+    box.ttsNarratorId = ''
+  }
   fetchBoxTtsVoices(box, engine)
 }
 
@@ -2690,6 +2706,21 @@ const handleBoxEngineChange = (box: DialogueBox, engine: string) => {
 // 路径（与 MFAProcessor.vue 的 qwen3TtsRefAudioName 同款逻辑，按框隔离）。
 const boxQwen3RefAudioName = (box: DialogueBox): string =>
   box.ttsQwen3RefAudioFile?.name || (box.ttsQwen3RefAudioPath ? box.ttsQwen3RefAudioPath.split(/[\\/]/).pop() || '' : '')
+
+// 【修复】套用一个已保存的 Voice Clone 预设时（handleBoxNarratorSelect()
+// 里 box.ttsQwen3RefAudioPath = n.qwen3_tts_ref_audio_path），本地同样
+// 没有对应的 File 对象，只有服务端路径字符串——与 MFAProcessor.vue 的
+// qwen3TtsRefAudioSourceUrl 是完全同一类问题，按框隔离后的版本（这个
+// 框拿到的 id 来自 box.ttsNarratorId，即这一框当前套用的预设 id）。
+// 仅当"没有新选择本地文件"且"这一框确实套用了一个预设"且"该预设保存
+// 过参考音频路径"时才提供 sourceUrl，避免构造一个必然 404 的 URL。
+const boxQwen3RefAudioSourceUrl = (box: DialogueBox): string | null => {
+  if (box.ttsQwen3RefAudioFile) return null
+  if (!box.ttsNarratorId || !box.ttsQwen3RefAudioPath) return null
+  return `/api/tts/narrators/${encodeURIComponent(box.ttsNarratorId)}/ref_audio`
+}
+const boxQwen3RefAudioDownloadName = (box: DialogueBox): string =>
+  box.ttsQwen3RefAudioPath ? box.ttsQwen3RefAudioPath.split(/[\\/]/).pop() || '' : ''
 
 // 该框 Qwen3-TTS 三种模式各自的"是否已经具备可以合成的最小条件"（与
 // MFAProcessor.vue 的 qwen3TtsModeReady 语义一致，按框隔离）：
