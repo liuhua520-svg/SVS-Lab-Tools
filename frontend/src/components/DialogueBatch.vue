@@ -763,7 +763,7 @@
                         :show-file-list="false"
                         accept="audio/*"
                         :disabled="processing"
-                        :on-change="(f: any) => { box.ttsQwen3RefAudioFile = f.raw; box.ttsQwen3RefAudioPath = '' }"
+                        :on-change="(f: any) => { box.ttsQwen3RefAudioFile = f.raw; box.ttsQwen3RefAudioPath = ''; clearBoxNarratorIdOnManualRefAudioChange(box) }"
                         class="compact-upload"
                       >
                         <div class="el-upload__text">{{ t('processor.qwen3TtsRefAudioChoose') }}</div>
@@ -773,7 +773,7 @@
                         :source-url="boxQwen3RefAudioSourceUrl(box)"
                         :download-file-name="boxQwen3RefAudioDownloadName(box)"
                         :disabled="processing"
-                        @recorded="(f: File) => { box.ttsQwen3RefAudioFile = f; box.ttsQwen3RefAudioPath = '' }"
+                        @recorded="(f: File) => { box.ttsQwen3RefAudioFile = f; box.ttsQwen3RefAudioPath = ''; clearBoxNarratorIdOnManualRefAudioChange(box) }"
                       />
                     </div>
                     <div v-if="boxQwen3RefAudioName(box)" style="margin-top: 4px; font-size: 12px; color: var(--el-text-color-secondary)">
@@ -2702,6 +2702,24 @@ const handleBoxEngineChange = (box: DialogueBox, engine: string) => {
   fetchBoxTtsVoices(box, engine)
 }
 
+// 【修复】与 MFAProcessor.vue 主面板的同名问题一致（按框隔离的版本）：
+// 这一框已经套用了某个"讲述人"预设（box.ttsNarratorId 非空，该预设恰好
+// 也是 Qwen3-TTS 引擎）时，如果用户直接在这一框手动选择/录制了新的参考
+// 音频（el-upload 的 on-change 或 AudioRecordPreview 的 recorded 事件），
+// box.ttsQwen3Mode 和 box.ttsEngine 都没变，上面 handleBoxEngineChange
+// 不会触发，导致 box.ttsNarratorId 悄悄残留成"看不见但还在生效"的旧值。
+// 提交批量任务时这个旧 narrator_id 仍会被当作
+// tts_narrator_id_{i} 传给后端，让后端把这一框错误归类成走了"讲述人"
+// 预设（产物文件名前缀 dlg_tts_narrator_ 而不是
+// dlg_tts_qwen3tts_，见 app.py 的 voice_source_tag 判定逻辑），与用户
+// 实际选择本地参考音频的操作意图不符。这里显式清空这一框的
+// ttsNarratorId，让该框下拉框回到"不使用预设"。
+const clearBoxNarratorIdOnManualRefAudioChange = (box: DialogueBox) => {
+  if (box.ttsNarratorId) {
+    box.ttsNarratorId = ''
+  }
+}
+
 // 该框参考音频文件名展示：新选择的 File 优先，否则回退到已保存预设自带的
 // 路径（与 MFAProcessor.vue 的 qwen3TtsRefAudioName 同款逻辑，按框隔离）。
 const boxQwen3RefAudioName = (box: DialogueBox): string =>
@@ -4076,6 +4094,18 @@ const buildFormData = async (): Promise<FormData> => {
             if (!box.ttsQwen3XVectorOnly) qwen3OptionsForSubmit.ref_text = box.ttsQwen3RefText.trim()
             if (box.ttsQwen3RefAudioFile) {
               fd.append(`ref_audio_${i}`, box.ttsQwen3RefAudioFile)
+              // 【预览复用修复】与 MFAProcessor.vue 同款问题：本地选择的
+              // 参考音频这里走 multipart 文件字段，qwen3_tts_options 里
+              // 原本不带 ref_audio_base64/ref_audio_ext，但"生成预览"阶段
+              // （buildQwen3TtsOptionsForPreview 同款逻辑）提交的
+              // qwen3_tts_options 里带了这两个字段——两边 JSON 结构不一致，
+              // 会导致 app.py 的 qwen3_tts_options_json 字符串比对
+              // （_tts_preview_take）永远判定预览已过期，这个框的"复用预览"
+              // 每次都会失败。这两个字段本身不会被使用（后端解析表单时
+              // ref_audio_path 会被优先设置并覆盖，见 app.py 对应逻辑），
+              // 仅用于让 JSON 结构与预览时保持一致。
+              qwen3OptionsForSubmit.ref_audio_base64 = '__uploaded_as_file__'
+              qwen3OptionsForSubmit.ref_audio_ext = `.${(box.ttsQwen3RefAudioFile.name.split('.').pop() || 'wav')}`
             } else if (box.ttsQwen3RefAudioPath) {
               qwen3OptionsForSubmit.ref_audio_path = box.ttsQwen3RefAudioPath
             }

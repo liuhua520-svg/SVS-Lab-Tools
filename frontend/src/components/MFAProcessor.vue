@@ -254,7 +254,7 @@
                   :show-file-list="false"
                   accept="audio/*"
                   :disabled="processing"
-                  :on-change="(f: any) => { qwen3TtsRefAudioFile = f.raw; qwen3TtsRefAudioPath = '' }"
+                  :on-change="(f: any) => { qwen3TtsRefAudioFile = f.raw; qwen3TtsRefAudioPath = ''; clearNarratorIdOnManualRefAudioChange() }"
                   class="compact-upload"
                 >
                   <div class="el-upload__text">{{ t('processor.qwen3TtsRefAudioChoose') }}</div>
@@ -264,7 +264,7 @@
                   :source-url="qwen3TtsRefAudioSourceUrl"
                   :download-file-name="qwen3TtsRefAudioDownloadName"
                   :disabled="processing"
-                  @recorded="(f: File) => { qwen3TtsRefAudioFile = f; qwen3TtsRefAudioPath = '' }"
+                  @recorded="(f: File) => { qwen3TtsRefAudioFile = f; qwen3TtsRefAudioPath = ''; clearNarratorIdOnManualRefAudioChange() }"
                 />
               </div>
               <span v-if="qwen3TtsRefAudioName" style="margin-left: 10px; font-size: 13px; color: var(--el-text-color-secondary)">
@@ -3353,6 +3353,28 @@ const handleNarratorSelect = (narratorId: string) => {
   }
 }
 
+// 【修复】用户在已经套用了某个"讲述人"预设（ttsConfig.narratorId 非空，
+// 该预设恰好也是 Qwen3-TTS 引擎）的情况下，直接在主面板手动选择/录制了
+// 一份新的参考音频（走 el-upload 的 on-change 或 AudioRecordPreview 的
+// recorded 事件）——这明显是想临时用这份本地音频覆盖预设自带的参考
+// 音频，而不是继续沿用预设。但此前没有任何地方在这个动作里清空
+// ttsConfig.narratorId：qwen3TtsMode 没变（还是 voice_clone）、
+// ttsConfig.engine 也没变（还是 qwen3_tts），下面两个 watch 都不会触发，
+// 于是 narratorId 悄悄残留成"看不见但还在生效"的旧值。提交时
+// processAudio() 仍然会把这个旧 narratorId 当作 narrator_id 传给后端，
+// 后端只根据 narrator_id 是否非空来判断"这次到底是不是走了讲述人预设"
+// 从而决定产物文件名前缀（tts_narrator_ vs tts_qwen3tts_，见 app.py
+// 的【文件名后缀标签】注释），于是用户明明选的是自己的参考音频，产物
+// 文件名却仍然带着 tts_narrator_ 前缀，看起来像是被错误归类成了
+// "讲述人"预设合成。这里显式清空 narratorId，让下拉框回到"不使用
+// 预设"，与用户的实际操作意图保持一致；不触碰语速/音调/音量等其它
+// 已经手动调整过的参数，只处理"预设归属"这一个维度。
+const clearNarratorIdOnManualRefAudioChange = () => {
+  if (ttsConfig.value.narratorId) {
+    ttsConfig.value.narratorId = ''
+  }
+}
+
 // 【修复】此前"切换选择 TTS 引擎"的 watch 只清空了音色（ttsConfig.voice），
 // 没有处理 ttsConfig.narratorId：filteredNarrators（下拉框选项列表，见
 // 其定义处注释）按 engine 过滤预设，切换引擎后，原来选中的预设如果是
@@ -4321,6 +4343,20 @@ const processAudio = async () => {
           if (!qwen3TtsXVectorOnly.value) qwen3OptionsForSubmit.ref_text = qwen3TtsRefText.value.trim()
           if (qwen3TtsRefAudioFile.value) {
             formDataObj.append('ref_audio', qwen3TtsRefAudioFile.value)
+            // 【预览复用修复】这两个字段本身不会被后端用到（voice_clone
+            // 的参考音频这里走的是上面的 multipart 文件字段，而不是
+            // base64），但必须和 buildQwen3TtsOptionsForPreview() 提交给
+            // /api/tts/synthesize_preview 的 qwen3_tts_options 保持完全
+            // 相同的 JSON 结构——否则 /api/tts/process 里 qwen3_tts_options_json
+            // 的字符串比对（_tts_preview_take）会因为"预览有这两个 key、
+            // 这次提交没有"而必然判定预览已过期，导致本地选择参考音频的
+            // Voice Clone 场景每次点"开始处理"都无法复用预览、变成重新
+            // 合成一遍（症状：日志里 复用预览=否，且 TTS 已经在"生成预览"
+            // 阶段成功合成过一次）。ref_audio_ext 用同样的后缀推导逻辑，
+            // ref_audio_base64 则只需要占位保持字段存在，不需要真的算一遍
+            // base64（对齐用的音频最终来自 formDataObj 里的文件字段）。
+            qwen3OptionsForSubmit.ref_audio_base64 = '__uploaded_as_file__'
+            qwen3OptionsForSubmit.ref_audio_ext = `.${(qwen3TtsRefAudioFile.value.name.split('.').pop() || 'wav')}`
           } else if (qwen3TtsRefAudioPath.value) {
             qwen3OptionsForSubmit.ref_audio_path = qwen3TtsRefAudioPath.value
           }
