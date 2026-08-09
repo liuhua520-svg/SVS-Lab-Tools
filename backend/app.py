@@ -2626,6 +2626,7 @@ def dialogue_process():
                 # 讲述人）仍然必须有音色才视为这个框"已配置"。
                 box_qwen3_tts_options = None
                 box_qwen3_voice_required = True
+                box_qwen3_mode = ""
                 if tts_engine_i == "qwen3_tts":
                     raw_opts = request.form.get(f"qwen3_tts_options_{i}", "").strip()
                     try:
@@ -2664,9 +2665,15 @@ def dialogue_process():
                         "pitch": tts_pitch_i,
                         "volume": tts_volume_i,
                         "qwen3_tts_options": box_qwen3_tts_options,
+                        # 【产品决策】与 /api/tts/process（单文件页面）同款例外：
+                        # 只要这一框的引擎是 Qwen3-TTS（不管预设音色/声音设计/
+                        # 声音克隆哪种模式，也不管是不是原样套用了讲述人预设），
+                        # 都统一标 qwen3tts，不标 narrator；narrator 只保留给
+                        # EdgeTTS 套用讲述人预设的情况。
                         "voice_source_tag": (
-                            "narrator" if tts_narrator_id_i
-                            else ("qwen3tts" if tts_engine_i == "qwen3_tts" else "edgetts")
+                            "qwen3tts" if tts_engine_i == "qwen3_tts"
+                            else "narrator" if tts_narrator_id_i
+                            else "edgetts"
                         ),
                     }
                     text = tts_text
@@ -3420,20 +3427,10 @@ def tts_process():
         voice = payload.get("voice", "").strip()
         engine = payload.get("engine", "").strip() or tts_processor.DEFAULT_ENGINE
 
-        # 【文件名后缀标签】区分本次合成到底是走"讲述人"预设，还是用户直接
-        # 手动选择 EdgeTTS / Qwen3-TTS 音色——仅从 engine 字段（只有
-        # "edge_tts"/"qwen3_tts" 两种取值）无法区分"讲述人"这一档，因为
-        # 讲述人预设本身内部也是绑定 edge_tts 或 qwen3_tts 其中一个，前端
-        # 选中讲述人后会把预设里的 engine/voice/rate/pitch/volume 展开传
-        # 过来，到这一层已经看不出原始是不是走了预设。因此依赖前端额外
-        # 传的 narrator_id 来判断："非空 → 走了讲述人预设"。
-        narrator_id = payload.get("narrator_id", "").strip()
-        if narrator_id:
-            voice_source_tag = "narrator"
-        elif engine == "qwen3_tts":
-            voice_source_tag = "qwen3tts"
-        else:
-            voice_source_tag = "edgetts"
+        # Qwen3-TTS 专用参数需要提前解析出来（本来在下面 engine == "qwen3_tts"
+        # 分支里解析）：下面处理 Voice Clone 模式的参考音频落盘逻辑要用到
+        # 其中的 mode 字段，提前到这里解析一次，避免下面重复 json.loads。
+        qwen3_mode = ""
         if engine == "qwen3_tts":
             raw_opts = payload.get("qwen3_tts_options", "").strip()
             try:
@@ -3441,6 +3438,32 @@ def tts_process():
             except Exception:
                 return jsonify({"error": "qwen3_tts_options 不是合法的 JSON"}), 400
             qwen3_mode = (qwen3_tts_options.get("mode") or "custom_voice").strip()
+
+        # 【文件名后缀标签】区分本次合成到底是走"讲述人"预设，还是用户直接
+        # 手动选择 EdgeTTS / Qwen3-TTS 音色——仅从 engine 字段（只有
+        # "edge_tts"/"qwen3_tts" 两种取值）无法区分"讲述人"这一档，因为
+        # 讲述人预设本身内部也是绑定 edge_tts 或 qwen3_tts 其中一个，前端
+        # 选中讲述人后会把预设里的 engine/voice/rate/pitch/volume 展开传
+        # 过来，到这一层已经看不出原始是不是走了预设。因此依赖前端额外
+        # 传的 narrator_id 来判断："非空 → 走了讲述人预设"。
+        #
+        # 【产品决策】例外：只要引擎是 Qwen3-TTS（不管预设音色 custom_voice /
+        # 声音设计 voice_design / 声音克隆 voice_clone 哪一种模式，也不管
+        # 是不是原样套用了讲述人预设），产物文件名一律标 qwen3tts，不标
+        # narrator——Qwen3-TTS 场景下用户关心的是"这是 Qwen3-TTS 合成的"这
+        # 件事本身，而不是"是不是从预设列表里选的"。narrator 这个分类只
+        # 保留给非 Qwen3-TTS 引擎（EdgeTTS）套用讲述人预设的情况。
+        narrator_id = payload.get("narrator_id", "").strip()
+        if engine == "qwen3_tts":
+            voice_source_tag = "qwen3tts"
+        elif narrator_id:
+            voice_source_tag = "narrator"
+        else:
+            voice_source_tag = "edgetts"
+        if engine == "qwen3_tts":
+            # qwen3_tts_options / qwen3_mode 已经提前解析过了（见上面），
+            # 这里不用重复 json.loads，直接接着处理 Voice Clone 的参考
+            # 音频落盘逻辑。
 
             # Voice Clone 模式：参考音频可以随表单上传（ref_audio 文件字段），
             # 落盘到 WORK_DIR 下的临时子目录，路径写回 options 供
