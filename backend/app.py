@@ -2932,6 +2932,47 @@ def tts_narrators_delete(narrator_id: str):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route("/api/tts/narrators/<narrator_id>/ref_audio", methods=["GET"])
+def tts_narrators_ref_audio_serve(narrator_id: str):
+    """
+    提供"语音预设管理"里 Voice Clone 预设已保存参考音频的播放/下载访问。
+
+    编辑一个已保存的 Voice Clone 预设时，前端拿到的只是预设记录本身
+    （包含 qwen3_tts_ref_audio_path 这个服务端文件路径字符串），浏览器
+    本地并不持有对应的 File 对象——AudioRecordPreview.vue 播放/下载
+    功能靠 currentFile（本地 File）或 sourceUrl（服务端可访问 URL）二选
+    一驱动，这里补上后者，让"编辑预设时预览/下载已保存的参考音频"这个
+    场景有 URL 可用，对应 /api/subtitle/media/<id>/<filename> 那个字幕
+    媒体播放路由的同款模式，只是这里按 narrator_id 定位、不需要额外的
+    filename 路径参数（讲述人档案里参考音频文件名固定是
+    "{narrator_id}{原始扩展名}"，upsert_narrator() 落盘时就是这么命名的，
+    一个讲述人最多只有一份参考音频，不存在“同一个 narrator_id 下选哪个
+    文件”的歧义，因此不需要在 URL 里再暴露一层文件名）。
+    """
+    try:
+        narrators = tts_processor.list_narrators()
+        record = next((n for n in narrators if n.get("id") == narrator_id), None)
+        if not record:
+            return jsonify({"error": "讲述人不存在"}), 404
+
+        ref_audio_path = record.get("qwen3_tts_ref_audio_path") or ""
+        if not ref_audio_path:
+            return jsonify({"error": "该讲述人没有保存参考音频"}), 404
+
+        file_path = Path(ref_audio_path).resolve()
+        ref_dir = tts_processor.NARRATOR_REF_AUDIO_DIR.resolve()
+        # 路径安全校验：解析后的真实路径必须落在参考音频目录内，防止
+        # narrator 记录被篡改（或历史脏数据）导致越权访问目录外文件，
+        # 与 subtitle_media_serve() 的校验方式一致。
+        if not str(file_path).startswith(str(ref_dir)) or not file_path.is_file():
+            return jsonify({"error": "参考音频文件不存在"}), 404
+
+        return send_from_directory(str(file_path.parent), file_path.name)
+    except Exception as e:
+        logger.error(f"讲述人参考音频访问失败: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/tts/preview", methods=["POST"])
 def tts_preview():
     """
@@ -4717,6 +4758,11 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
                     "lab_path": lab_path,
                     "audio_duration": align_result.get("audio_duration"),
                     "warnings": align_result.get("warnings", []),
+                    # 【新增】字幕原文（按时间顺序拼接，逐条一行），供前端
+                    # "下载TXT文本"按钮使用——字幕跟读模式下前端本身并不
+                    # 持有逐条字幕文本（文件直接整份转发给后端解析），必须
+                    # 由后端把已经解析好的 subtitle_original_text 一并带回。
+                    "subtitle_text": original_text,
                 },
             )
             return
@@ -4757,9 +4803,13 @@ def run_subtitle_align_job(job_id: str, wav_path: str, cues, language: str,
         if project_result.get("success"):
             project_result.setdefault("lab_content", lab_content)
             project_result["warnings"] = align_result.get("warnings", [])
+            # 同 mfa-only 分支：把字幕原文一并带回，供"完整处理"模式下
+            # 的"下载TXT文本"按钮使用。
+            project_result["subtitle_text"] = original_text
             set_job(job_id, status="done", finished_at=datetime.now().isoformat(), result=project_result)
         elif project_result.get("stage") == "cancelled":
             project_result.setdefault("lab_content", lab_content)
+            project_result["subtitle_text"] = original_text
             set_job(job_id, status="cancelled", finished_at=datetime.now().isoformat(),
                     error=project_result.get("error", "用户已取消"), result=project_result)
         else:

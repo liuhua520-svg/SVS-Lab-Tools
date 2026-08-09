@@ -550,6 +550,11 @@ def asr():
 
         segments = _normalize_segments(result)
         raw_text = "".join([seg.get("text", "") for seg in segments]).strip()
+        
+        # ↓↓↓ 新增这两行（实时输出识别结果到命令行）
+        logger.info(f"✅ 识别完成 | 设备={_model_device} | batch={_model_batch_size}")
+        logger.info(f"📝 识别文字: {raw_text}")
+        # ↑↑↑ 新增结束
 
         return jsonify(
             {

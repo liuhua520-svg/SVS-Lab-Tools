@@ -979,7 +979,7 @@ def capitalize_words(text: str) -> str:
 # 反引号代码标记、波浪号、竖线、方括号形式的注释标记等。刻意不包含任何
 # 语言的正常标点（，。！？、；：""''（）—…,.!?;:"'()-）和本模块已支持
 # 转换的符号（+-×÷=℃℉&%），避免"去除多余符号"把还没转换的符号也删掉。
-_STRAY_SYMBOLS_RE = re.compile(r"[*_`~^\\|]")
+_STRAY_SYMBOLS_RE = re.compile(r"[*_`~^\\|#@/]")
 
 
 def strip_stray_symbols(text: str) -> str:
