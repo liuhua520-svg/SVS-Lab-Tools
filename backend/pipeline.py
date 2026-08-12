@@ -964,6 +964,17 @@ class AudioProcessingPipeline:
             box_phoneme_mode         = box_override.get("phoneme_mode", phoneme_mode)
             box_dict_source          = box_override.get("dict_source", dict_source)
             box_ja_devoiced_phoneme      = bool(box_override.get("ja_devoiced_phoneme", ja_devoiced_phoneme))
+            # 【新增】对齐后端具体用哪个模型/批处理大小，此前恒定用整批
+            # 统一的外层参数，即使 box_aligner_backend 每框可以选不同后端，
+            # 具体模型/批大小也无法跟着按框覆盖——这是导致"单独设置"弹窗
+            # 里始终没有 Whisper 模型/批处理大小/NeMo 模型这几项的根本
+            # 原因（前端做了也没用，因为后端调用 _run_alignment 时压根
+            # 不会读取这几个 override 字段）。现在补上，与 aligner_backend
+            # 同一套"未开启覆盖时回退到整批统一值"的规则。
+            box_whisperx_model       = box_override.get("whisperx_model", whisperx_model)
+            box_whisperx_batch_size  = box_override.get("whisperx_batch_size", whisperx_batch_size)
+            box_qwen3_batch_size     = box_override.get("qwen3_batch_size", qwen3_batch_size)
+            box_nemo_model           = box_override.get("nemo_model", nemo_model)
 
             # 该对话框自己的 F0/音高相关配置：只替换 override 里显式提供的
             # 字段，bpm 恒定沿用全局 config（见函数 docstring 里 BPM 的说明），
@@ -1056,12 +1067,12 @@ class AudioProcessingPipeline:
                     _stage("align", "start", idx)
                     align_result = _run_alignment(
                         audio_adapter, text, box_language, box_aligner_backend,
-                        f0_device, whisperx_model,
-                        whisperx_batch_size=whisperx_batch_size,
-                        qwen3_batch_size=qwen3_batch_size,
+                        f0_device, box_whisperx_model,
+                        whisperx_batch_size=box_whisperx_batch_size,
+                        qwen3_batch_size=box_qwen3_batch_size,
                         english_word_align=box_english_word_align,
                         ja_disable_katakana=box_ja_disable_katakana,
-                        nemo_model=nemo_model,
+                        nemo_model=box_nemo_model,
                         aligner_device=aligner_device,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                         cancel_check=cancel_check,

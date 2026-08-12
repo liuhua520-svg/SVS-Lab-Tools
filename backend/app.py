@@ -154,6 +154,29 @@ def _parse_box_override(form, index: int) -> Optional[Dict]:
 
     dict_source = _normalize_dict_source(form.get(f"override_dict_source_{index}", "default"))
 
+    # 【新增】对齐后端具体模型/批处理大小：与整批统一设置（页面顶部
+    # 对应控件）用完全一致的解析/校验规则，只是字段名多了 override_ 前缀
+    # 和框序号后缀。此前 aligner_backend 虽然可以按框覆盖，但具体用哪个
+    # Whisper 模型、批处理开多大、NeMo 用哪个模型这几项却一直读的是整批
+    # 统一值（process_dialogue_batch 里 _run_alignment 调用一直没有接
+    # box_override 的这几个键），导致前端"单独设置"弹窗即使加了这几个
+    # 控件也不会真正生效，因此弹窗一直没有暴露它们；现在前后端一起补上。
+    whisperx_model = form.get(f"override_whisperx_model_{index}", "large-v3")
+
+    try:
+        whisperx_batch_size = int(form.get(f"override_whisperx_batch_size_{index}", 16))
+    except (TypeError, ValueError):
+        whisperx_batch_size = 16
+    whisperx_batch_size = max(1, min(64, whisperx_batch_size))
+
+    try:
+        qwen3_batch_size_override = int(form.get(f"override_qwen3_batch_size_{index}", 8))
+    except (TypeError, ValueError):
+        qwen3_batch_size_override = 8
+    qwen3_batch_size_override = max(1, min(64, qwen3_batch_size_override))
+
+    nemo_model = form.get(f"override_nemo_model_{index}", "").strip() or None
+
     try:
         base_pitch = int(form.get(f"override_base_pitch_{index}", 60))
     except (TypeError, ValueError):
@@ -213,6 +236,10 @@ def _parse_box_override(form, index: int) -> Optional[Dict]:
         "phoneme_mode": phoneme_mode,
         "ja_devoiced_phoneme": ja_devoiced_phoneme,
         "dict_source": dict_source,
+        "whisperx_model": whisperx_model,
+        "whisperx_batch_size": whisperx_batch_size,
+        "qwen3_batch_size": qwen3_batch_size_override,
+        "nemo_model": nemo_model,
         "base_pitch": base_pitch,
         "auto_note_pitch": auto_note_pitch,
         "export_pitch_line": export_pitch_line,
@@ -2175,13 +2202,15 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                     tts_progress={"done": done_tts - 1, "total": total_tts},
                     stage="tts", stage_status="start", box_index=box.get("index"),
                 )
-                # 文件名带上引擎/来源标签，与单文件页面（/api/tts/process）
-                # 保持一致的命名习惯，方便用户从文件名分辨这份产物是
-                # "讲述人"预设、EdgeTTS 手动选音色、还是 Qwen3-TTS 合成的。
-                # 旧前端（未提交 tts_narrator_id_{i}）时 tts_info 里不会有
-                # voice_source_tag 这个键，按 engine 兜底，不影响旧请求。
+                # 文件名带上引擎标签，与单文件页面（/api/tts/process）保持
+                # 一致的命名习惯，方便用户从文件名分辨这份产物是用哪个引擎
+                # 合成的（narrator 对应 Windows SAPI5 讲述人引擎）。
+                # 旧前端（未提交 voice_source_tag）时 tts_info 里不会有这个
+                # 键，按 engine 兜底，不影响旧请求。
                 voice_source_tag = tts_info.get("voice_source_tag") or (
-                    "qwen3tts" if tts_info.get("engine") == "qwen3_tts" else "edgetts"
+                    "qwen3tts" if tts_info.get("engine") == "qwen3_tts"
+                    else "narrator" if tts_info.get("engine") == "windows_sapi"
+                    else "edgetts"
                 )
                 stem = f"dlg_tts_{voice_source_tag}_{box.get('index', 0):03d}_{uuid.uuid4().hex[:6]}"
 
@@ -2450,13 +2479,21 @@ def dialogue_process():
       - override_aligner_backend_{i} / override_language_{i} /
         override_english_word_align_{i} / override_word_phoneme_map_{i} /
         override_phoneme_mode_{i} / override_dict_source_{i} /
+        override_whisperx_model_{i} / override_whisperx_batch_size_{i} /
+        override_qwen3_batch_size_{i} / override_nemo_model_{i} /
         override_base_pitch_{i} / override_auto_note_pitch_{i} /
         override_export_pitch_line_{i} / override_f0_method_{i} /
         override_f0_device_{i} / override_crepe_model_{i} / override_precision_{i} /
         override_f0_smooth_{i} / override_f0_smooth_window_{i} /
         override_vsqx_pitch_smooth_window_{i} / override_f0_floor_{i} /
         override_f0_ceil_{i} : 仅在 override_enabled_{i}="true" 时读取，字段语义
-                          与同名的整批全局参数一致。
+                          与同名的整批全局参数一致。override_whisperx_model_{i} 等
+                          四项仅在该框 override_aligner_backend_{i} 对应需要它们
+                          的后端时才有意义（WhisperX 用 model/batch_size，
+                          Qwen3-ASR/Qwen3-FA/NeMo-FA 用 qwen3_batch_size，
+                          NeMo-FA 额外用 nemo_model），但无论如何都按同一套
+                          "缺省时回退整批统一值"规则解析，不要求前端按后端
+                          精确挑选提交哪些字段。
     """
     try:
         box_count = int(request.form.get("box_count", 0))
@@ -2611,14 +2648,6 @@ def dialogue_process():
                 tts_text = request.form.get(f"tts_text_{i}", "").strip() or text
                 tts_voice = request.form.get(f"tts_voice_{i}", "").strip()
                 tts_engine_i = request.form.get(f"tts_engine_{i}", "").strip() or tts_processor.DEFAULT_ENGINE
-                # 【文件名后缀标签】与 /api/tts/process（单文件页面）同款逻辑：
-                # 仅凭 engine 字段（只有 "edge_tts"/"qwen3_tts" 两种取值）无法
-                # 区分这一框是走了"讲述人"预设还是用户手动选的音色，因为
-                # 讲述人预设内部同样绑定 edge_tts 或 qwen3_tts 其中一个，前端
-                # 选中讲述人后会把预设字段展开提交，到这里已经看不出原始
-                # 是不是走了预设。这里额外读取该框的 tts_narrator_id_{i}，
-                # 非空即视为该框选择了"讲述人"。
-                tts_narrator_id_i = request.form.get(f"tts_narrator_id_{i}", "").strip()
 
                 # Qwen3-TTS 专用参数：与 /api/tts/process 同款解析逻辑。
                 # Voice Design / Voice Clone 两种模式不使用"预设音色"，
@@ -2665,14 +2694,12 @@ def dialogue_process():
                         "pitch": tts_pitch_i,
                         "volume": tts_volume_i,
                         "qwen3_tts_options": box_qwen3_tts_options,
-                        # 【产品决策】与 /api/tts/process（单文件页面）同款例外：
-                        # 只要这一框的引擎是 Qwen3-TTS（不管预设音色/声音设计/
-                        # 声音克隆哪种模式，也不管是不是原样套用了讲述人预设），
-                        # 都统一标 qwen3tts，不标 narrator；narrator 只保留给
-                        # EdgeTTS 套用讲述人预设的情况。
+                        # 【文件名后缀标签】与 /api/tts/process（单文件页面）同款
+                        # 逻辑：纯粹按这一框的引擎三选一区分，与是否套用了语音
+                        # 预设无关（详见 /api/tts/process 里的【历史教训】注释）。
                         "voice_source_tag": (
                             "qwen3tts" if tts_engine_i == "qwen3_tts"
-                            else "narrator" if tts_narrator_id_i
+                            else "narrator" if tts_engine_i == "windows_sapi"
                             else "edgetts"
                         ),
                     }
@@ -3222,13 +3249,14 @@ def run_tts_pipeline_job(
         def _progress_cb(done, total):
             set_job(job_id, status="running", progress={"done": done, "total": total})
 
-        # 文件名带上引擎/来源标签，方便用户从文件名直接分辨这份产物是
-        # "讲述人"预设、EdgeTTS 手动选音色、还是 Qwen3-TTS 合成的
-        # （如 tts_narrator_f328117cd8.wav / tts_edgetts_xxxx.wav /
-        # tts_qwen3tts_xxxx.wav）。voice_source_tag 由路由层根据是否带了
-        # narrator_id 推导好传入；旧调用方（未传该参数）按 engine 兜底，
-        # 不会两者都没有导致标签缺失。
-        tag = voice_source_tag or ("qwen3tts" if engine == "qwen3_tts" else "edgetts")
+        # 文件名带上引擎标签，方便用户从文件名直接分辨这份产物是用哪个
+        # 引擎合成的（如 tts_narrator_f328117cd8.wav / tts_edgetts_xxxx.wav /
+        # tts_qwen3tts_xxxx.wav，narrator 对应 Windows SAPI5 讲述人引擎）。
+        # voice_source_tag 由路由层按 engine 三选一推导好传入；旧调用方
+        # （未传该参数）按 engine 兜底，不会两者都没有导致标签缺失。
+        tag = voice_source_tag or (
+            "qwen3tts" if engine == "qwen3_tts" else "narrator" if engine == "windows_sapi" else "edgetts"
+        )
         stem = f"tts_{tag}_{uuid.uuid4().hex[:10]}"
 
         if preview_segments_dir and preview_sentences and preview_wav_path:
@@ -3439,24 +3467,20 @@ def tts_process():
                 return jsonify({"error": "qwen3_tts_options 不是合法的 JSON"}), 400
             qwen3_mode = (qwen3_tts_options.get("mode") or "custom_voice").strip()
 
-        # 【文件名后缀标签】区分本次合成到底是走"讲述人"预设，还是用户直接
-        # 手动选择 EdgeTTS / Qwen3-TTS 音色——仅从 engine 字段（只有
-        # "edge_tts"/"qwen3_tts" 两种取值）无法区分"讲述人"这一档，因为
-        # 讲述人预设本身内部也是绑定 edge_tts 或 qwen3_tts 其中一个，前端
-        # 选中讲述人后会把预设里的 engine/voice/rate/pitch/volume 展开传
-        # 过来，到这一层已经看不出原始是不是走了预设。因此依赖前端额外
-        # 传的 narrator_id 来判断："非空 → 走了讲述人预设"。
+        # 【文件名后缀标签】标记这次合成用的是哪个 TTS 引擎，纯粹按 engine
+        # 三选一区分：qwen3_tts → qwen3tts，windows_sapi（前端"选择 TTS"
+        # 下拉框显示为 "Narrator (Windows)"，即 Windows 系统自带的 SAPI5
+        # 讲述人）→ narrator，其余（目前只有 edge_tts）→ edgetts。
         #
-        # 【产品决策】例外：只要引擎是 Qwen3-TTS（不管预设音色 custom_voice /
-        # 声音设计 voice_design / 声音克隆 voice_clone 哪一种模式，也不管
-        # 是不是原样套用了讲述人预设），产物文件名一律标 qwen3tts，不标
-        # narrator——Qwen3-TTS 场景下用户关心的是"这是 Qwen3-TTS 合成的"这
-        # 件事本身，而不是"是不是从预设列表里选的"。narrator 这个分类只
-        # 保留给非 Qwen3-TTS 引擎（EdgeTTS）套用讲述人预设的情况。
-        narrator_id = payload.get("narrator_id", "").strip()
+        # 【历史教训】这里最早写成了"看 narrator_id 是否非空"来判断——那是
+        # 把"套用了语音预设"误当成了"用的是 Windows 讲述人引擎"，这是两件
+        # 完全不相关的事：语音预设（narrator_id 对应的 /api/tts/narrators
+        # 档案）可以绑定 windows_sapi/edge_tts/qwen3_tts 里的任意一个引擎，
+        # 套不套预设跟引擎本身是正交的两个维度。正确做法自始至终都应该是
+        # 纯粹按 engine 三选一映射，不看 narrator_id。
         if engine == "qwen3_tts":
             voice_source_tag = "qwen3tts"
-        elif narrator_id:
+        elif engine == "windows_sapi":
             voice_source_tag = "narrator"
         else:
             voice_source_tag = "edgetts"
