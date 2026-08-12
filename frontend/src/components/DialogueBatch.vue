@@ -1485,6 +1485,65 @@
                 <el-switch v-model="boxSettings.draft.englishWordAlign" />
                 <span class="option-hint">{{ t('processor.englishWordAlignHint') }}</span>
               </el-form-item>
+
+              <!-- 对齐后端具体用哪个模型/批处理大小：与全局设置区块（页面
+                   顶部 27-146 行附近）同款控件，仅显示条件、说明文案保持
+                   一致。运行设备（CPU/CUDA/自动）本弹窗不提供覆盖入口，
+                   固定使用全局 advanced.aligner_device 判断是否需要展示
+                   批处理大小控件——这与实际运行行为一致：无论这一框用
+                   哪个对齐后端，跑对齐时的物理设备始终是整批统一的，
+                   只有"用哪个具体模型/批大小"才按框覆盖。 -->
+              <el-form-item v-if="boxSettings.draft.alignerBackend === 'whisperx'" :label="t('processor.whisperModel')">
+                <el-select v-model="boxSettings.draft.whisperxModel" style="width: 240px">
+                  <el-option value="large-v3" :label="t('processor.whisperModelLargeV3')" />
+                  <el-option value="large-v3-turbo" :label="t('processor.whisperModelLargeV3Turbo')" />
+                  <el-option value="large-v2" :label="t('processor.whisperModelLargeV2')" />
+                  <el-option value="medium" :label="t('processor.whisperModelMedium')" />
+                  <el-option value="small" :label="t('processor.whisperModelSmall')" />
+                  <el-option value="base" :label="t('processor.whisperModelBase')" />
+                  <el-option value="tiny" :label="t('processor.whisperModelTiny')" />
+                </el-select>
+              </el-form-item>
+
+              <el-form-item
+                v-if="boxSettings.draft.alignerBackend === 'whisperx' && advanced.aligner_device !== 'cpu'"
+                :label="t('processor.whisperxBatchSize')"
+              >
+                <el-input-number
+                  v-model="boxSettings.draft.whisperxBatchSize"
+                  :min="1"
+                  :max="64"
+                  :step="1"
+                  style="width:160px"
+                />
+                <div class="help-text" v-if="advanced.aligner_device === 'auto'">💡 {{ t('processor.batchSizeAutoHint') }}</div>
+                <div class="help-text" v-else>⚠️ {{ t('processor.whisperxBatchSizeHint') }}</div>
+              </el-form-item>
+
+              <el-form-item
+                v-if="(boxSettings.draft.alignerBackend === 'qwen3_asr' || boxSettings.draft.alignerBackend === 'qwen3_aligner' || boxSettings.draft.alignerBackend === 'nemo_aligner') && advanced.aligner_device !== 'cpu'"
+                :label="t('processor.qwen3BatchSize')"
+              >
+                <el-input-number
+                  v-model="boxSettings.draft.qwen3BatchSize"
+                  :min="1"
+                  :max="64"
+                  :step="1"
+                  style="width:160px"
+                />
+                <div class="help-text" v-if="boxSettings.draft.alignerBackend === 'qwen3_asr' && advanced.aligner_device === 'auto'">💡 {{ t('processor.batchSizeAutoHint') }}</div>
+                <div class="help-text" v-else-if="boxSettings.draft.alignerBackend === 'qwen3_asr'">⚠️ {{ t('processor.qwen3BatchSizeHintAsr') }}</div>
+                <div class="help-text" v-else>ℹ️ {{ t('processor.qwen3BatchSizeHintAligner') }}</div>
+              </el-form-item>
+
+              <el-form-item v-if="boxSettings.draft.alignerBackend === 'nemo_aligner'" :label="t('processor.nemoModel')">
+                <el-input
+                  v-model="boxSettings.draft.nemoModel"
+                  :placeholder="t('processor.nemoModelPlaceholder')"
+                  style="width: 360px"
+                  clearable
+                />
+              </el-form-item>
             </template>
 
 
@@ -1958,6 +2017,14 @@ interface BoxOverride {
   englishWordAlign: boolean
   jaDisableKatakana: boolean     // 关闭英语转片假名（仅日语 jpn 有意义）
   wordPhonemeMap: boolean
+  // 对齐后端具体用哪个模型/批处理大小：与 alignerBackend 同级（概念上
+  // 属于"对齐后端怎么跑"，不属于下面 advanced 里的 F0/音高设置），仅在
+  // alignerBackend 对应需要它们时才在弹窗里显示，但字段本身始终保留，
+  // 便于切换后端时不丢失用户之前为其它后端填好的值。
+  whisperxModel: string
+  whisperxBatchSize: number
+  qwen3BatchSize: number
+  nemoModel: string
   // ── 仅生成工程模式专属 ──
   phonemeMode: 'none' | 'merge' | 'hiragana' | 'katakana'
   jaDevoicedPhoneme: boolean         // 日语辅音起始音素锁定（<p lock="1">），仅 vsqx 有意义
@@ -3308,6 +3375,10 @@ const createBoxOverride = (): BoxOverride => ({
   englishWordAlign: false,
   jaDisableKatakana: false,
   wordPhonemeMap: false,
+  whisperxModel: 'large-v3',
+  whisperxBatchSize: 16,
+  qwen3BatchSize: 8,
+  nemoModel: '',
   phonemeMode: 'none',
   jaDevoicedPhoneme: false,
   dictSource: 'default',
@@ -4046,6 +4117,10 @@ const buildFormData = async (): Promise<FormData> => {
         && ov.jaDevoicedPhoneme
       ))
       fd.append(`override_dict_source_${i}`, ov.dictSource)
+      fd.append(`override_whisperx_model_${i}`, ov.whisperxModel)
+      fd.append(`override_whisperx_batch_size_${i}`, String(ov.whisperxBatchSize))
+      fd.append(`override_qwen3_batch_size_${i}`, String(ov.qwen3BatchSize))
+      fd.append(`override_nemo_model_${i}`, ov.nemoModel)
       fd.append(`override_base_pitch_${i}`, String(ov.advanced.base_pitch))
       fd.append(`override_auto_note_pitch_${i}`, String(ov.advanced.auto_note_pitch))
       fd.append(`override_export_pitch_line_${i}`, String(ov.advanced.export_pitch_line))
