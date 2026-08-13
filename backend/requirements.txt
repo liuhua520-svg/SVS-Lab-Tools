@@ -1,88 +1,67 @@
---extra-index-url https://download.pytorch.org/whl/cu121
+--extra-index-url https://download.pytorch.org/whl/cpu
 
-# ====================== 核心依赖 & 严格版本锁定 ======================
-numpy==1.26.4               # 【关键修复】强制锁定 1.x，解决 NumPy 2.x 导致的 C-API 崩溃
-setuptools<82.0.0           # 解决 ctranslate2 / whisperx 对 pkg_resources 的依赖报错
+# SVS Lab Tools / SVS Lab Aligner - fixed main environment
+# Target: Python 3.10 / Windows x64
+# IMPORTANT: Qwen3-ASR and NeMo are intentionally NOT installed here.
+# They run as separate HTTP server environments to avoid dependency conflicts.
 
-# NeMo Forced Aligner 后端 (nemo_server.py，由 alt_aligners.py 的
-# NeMoForcedAligner 通过 HTTP 调用，端口 127.0.0.1:5002)
-# 与上面的 qwen-asr 一样：这一行描述的是 nemo_server.py 自己独立环境
-# (nemo_env) 的依赖，不要装进运行 app.py 的那个环境，否则会触发依赖冲突
-# （NeMo 对 packaging/fsspec/omegaconf/hydra-core/lightning 等核心依赖
-# 有严格版本限制，会把 .mfa_env 里这些包"降级"，与其它工具产生冲突，
-# 例如 pip 会报 "pipdeptree requires packaging>=26, but you have 24.2"）。
-# 详见 NEMO_ALIGNER_INTEGRATION.md。
-# 需要 torchaudio>=2.1（forced_align / merge_tokens 接口）。
-# 截至本文件更新时 PyPI 最新稳定版为 2.7.x（NeMo 仓库正在拆分为聚焦语音的
-# NVIDIA-NeMo/Speech 独立仓库，2.8.x 暂为预发布版，故不锁定到该版本）。
-# nemo_toolkit[asr]>=2.7.0,<2.8.0
+# Core
+numpy==1.26.4
+setuptools==81.0.0
 
-
-# ====================== PyTorch (根据硬件三选一) ======================
-
-# CUDA 12.1（用于 RTX 30/40 系等现代显卡）
-# torch==2.3.1+cu121
-# torchaudio==2.3.1+cu121
-
-# CUDA 11.8 (旧版显卡保留选项)
-# torch==2.3.1+cu118
-# torchaudio==2.3.1+cu118
-
-# CPU Only（无显卡）
+# PyTorch - CPU default
+# For CUDA, replace BOTH torch and torchaudio with matching CUDA builds.
 torch==2.3.1+cpu
 torchaudio==2.3.1+cpu
 
-# ====================== 核心框架 & 网络 ======================
+# Web/API
 flask==2.3.3
 flask-cors==4.0.0
+requests==2.34.2
+tqdm==4.70.0
 
-# ====================== 网络与其他基础库 ======================
-requests
-tqdm
-
-# ====================== 语音处理基础 ======================
+# Audio / DSP
 soundfile==0.12.1
-librosa>=0.10.0
-resampy>=0.4.2
-pyworld>=0.3.4
+librosa==0.11.0
+resampy==0.4.3
+pyworld==0.3.5
 torchcrepe==0.0.24
-kalpy
 
-# ====================== MFA 与文本处理 ======================
+# MFA / text
 montreal-forced-aligner==3.3.9
 textgrid==1.5
 pypinyin==0.53.0
-pycantonese>=0.1.0
+pycantonese==5.0.0
 sudachipy==0.6.8
 sudachidict-core==20240409
 jamo==0.4.1
-nltk>=3.8.1
-num2words>=0.5.13
-g2p_en>=0.3.1
+nltk==3.10.2
+num2words==0.5.14
+g2p_en==2.1.0
 
-# ====================== 替代对齐后端 ======================
-whisperx>=3.2.0
-ctranslate2>=4.3.0
-funasr>=1.1.0
-modelscope>=1.9.0
-accelerate>=0.27.0
-qwen-asr>=1.0.0
-k2
+# WhisperX 3.2.0 is retained because this project intentionally keeps NumPy 1.26.x.
+# WhisperX 3.2.0 requires faster-whisper==1.0.0, ctranslate2==4.4.0 and an unconstrained transformers.
+# faster-whisper==1.0.0 requires tokenizers<0.16, so pin an older Transformers stack here.
+# PyAV 11.0.0 is NOT installed by pip: setup.bat installs conda-forge av=11.0.0 first
+# to avoid a Windows source build that requires FFmpeg import libraries.
+whisperx==3.2.0
+ctranslate2==4.4.0
+transformers==4.39.3
+tokenizers==0.15.2
+huggingface-hub==0.36.2
 
-# Qwen3-ForcedAligner / Qwen3-ASR 对齐前繁体转简体预处理
-# （alt_aligners.py 的 convert_traditional_to_simplified()，纯 Python
-# 实现，免 C 扩展编译；未安装时自动跳过转换并记录 warning 日志，不影响
-# 其它对齐功能，详见 alt_aligners.py "2c." 节说明）
-opencc-python-reimplemented>=0.1.7
+# Traditional -> Simplified Chinese conversion
+opencc-python-reimplemented==0.1.7
 
-# ====================== TTS跟读（讲述人 / EdgeTTS） ======================
-edge-tts>=7.0
-# "讲述人"引擎调用 Windows 自带的 SAPI5 语音合成，仅 Windows 需要安装；
-# tts_processor._windows_sapi_check_available() 在非 Windows 系统上会直接
-# 返回不可用，不影响其它平台运行，这里用 platform marker 避免在非 Windows
-# 系统上尝试安装它导致 pip 报错。
-pywin32>=306; sys_platform == "win32"
+# Edge TTS / Windows SAPI helper
+edge-tts==7.2.8
+pywin32==312; sys_platform == "win32"
 
-# ====================== 工程文件导出 ======================
-ruamel.yaml>=0.18.0
-mido>=1.3.0
+# Project file formats
+ruamel.yaml==0.19.1
+mido==1.3.3
+
+# NOTE:
+# kalpy-kaldi is intentionally NOT installed by pip here.
+# The upstream package is a Kaldi binding and recommends conda-forge Kaldi/Kalpy.
+# Install it separately in the MFA environment if your setup script requires it.

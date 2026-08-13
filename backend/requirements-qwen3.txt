@@ -16,10 +16,18 @@
 flask==2.3.3
 
 # ====================== Qwen3-ASR / ForcedAligner ======================
-qwen-asr>=1.0.0
-transformers>=4.40.0
-accelerate>=0.27.0
-
+# 【修复】原先是 qwen-asr>=1.0.0——但 qwen-asr 在 PyPI 上从未发布到
+# 1.0.0（截至本次核对最新版本是 0.0.6），这个版本条件永远无法被满足，
+# 会导致 pip 报 "No matching distribution found for qwen-asr>=1.0.0"。
+# 改为不锁版本，直接安装当前最新的 0.0.6。
+qwen-asr==0.0.6
+# qwen-asr 自身在 PyPI 上精确锁定了 transformers==4.57.6 /
+# accelerate==1.12.0（见其 requires_dist），下面两行的宽松下限不会与
+# 之冲突，pip 解析时最终会以 qwen-asr 的精确锁定版本为准；这里保留
+# 宽松下限只是为了在 qwen-asr 未来放宽自己的锁定范围时仍有一个基本
+# 版本保障，不需要跟着精确改动。
+transformers==4.57.6
+accelerate==1.12.0
 # ====================== 基础数值库 ======================
 numpy==1.26.4
 
@@ -41,5 +49,9 @@ tqdm
 # --index-url https://download.pytorch.org/whl/cu118
 
 # CPU Only（推荐，无显卡）
+# 【修复】+cpu 这个 build 后缀的 wheel 不在 PyPI 默认源上，必须显式指定
+# CPU 专属索引才能被 pip 找到，否则会报
+# "ERROR: Could not find a version that satisfies the requirement torch==2.3.1+cpu"
+# （和 requirements-nemo.txt 里已经验证过的写法保持一致）。
 torch==2.3.1+cpu
-#⚠️ 注意：这里千万不要再写任何 --index-url 了！(--index-url https://download.pytorch.org/whl/cpu)
+--index-url https://download.pytorch.org/whl/cpu
