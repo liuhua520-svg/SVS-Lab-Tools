@@ -22,6 +22,20 @@
 #   官方推荐 Python 3.12（见 https://github.com/QwenLM/Qwen3-TTS
 #   Environment Setup 一节），这里与之保持一致。
 
+# 【修复】原先 --index-url 写在文件末尾 torch 那几行旁边（此前还曾错误
+# 地写成 --extra-index-url + cu118 放在顶部、但下面激活的是 +cu121，两处
+# 不一致）。这里统一为一条规则：pip 对 requirements 文件里的
+# --index-url/--extra-index-url 是"全局生效"的，不是只作用于紧邻的那几
+# 行。用 --index-url 会把默认 PyPI 源整个替换掉，导致同一文件里的
+# flask / qwen-tts / transformers 等其它包全部只在
+# download.pytorch.org/whl/cpu（只托管 PyTorch 系列 wheel）里找，报
+# "Could not find a version that satisfies the requirement flask==2.3.3
+# (from versions: none)"。改为 --extra-index-url 并放在文件顶部：追加而
+# 非替换默认源，PyPI 包正常从 PyPI 装，torch 系列在 PyPI 找不到时才去
+# PyTorch 官方索引找，与 requirements.txt / requirements-nemo.txt /
+# requirements-qwen3.txt 三个文件的写法保持一致。
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 # ====================== 服务框架 ======================
 flask==2.3.3
 
@@ -64,35 +78,22 @@ tqdm
 # 详见 https://github.com/Dao-AILab/flash-attention
 
 # ====================== PyTorch (根据硬件三选一，与主项目一致) ======================
-# 【修复】原先文件顶部写死了一行全局
-# "--extra-index-url https://download.pytorch.org/whl/cu118"，但下面
-# 实际激活（未注释）的却是 +cu121 版本——PyTorch 官方按 CUDA 版本分开
-# 托管各自的 wheel 索引，cu118 索引里没有 +cu121 标记的包，两者对不上号
-# 会导致 pip 报 "ERROR: No matching distribution found for
-# torch==2.3.1+cu121"。改为和 requirements.txt / requirements-nemo.txt /
-# requirements-qwen3.txt 三个文件一致的写法：默认激活 CPU Only（不需要
-# 任何 --index-url，直接走 PyPI 默认源即可获取到 CPU 版 wheel），GPU
-# 选项按需手动取消注释，并把对应正确的 --index-url 一起打开。
+# 注意：CUDA 版 wheel（+cu121 / +cu118）不在 PyPI 默认源上，只在文件顶部
+# 那行 --extra-index-url 指向的 PyTorch 官方索引里。若切换到 GPU 选项，
+# 顶部的 --extra-index-url 需要改成对应 CUDA 版本的索引地址（cu121 或
+# cu118），不要再在这里逐个选项各写一条 --index-url。
 
 # CUDA 12.1（用于 RTX 30/40 系等现代显卡）
 # torch==2.3.1+cu121
 # torchvision==0.18.1+cu121
 # torchaudio==2.3.1+cu121
-# --index-url https://download.pytorch.org/whl/cu121
 
 # CUDA 11.8（旧版显卡保留选项，如 GTX10系显卡 等 Pascal 架构）
 # torch==2.3.1+cu118
 # torchvision==0.18.1+cu118
 # torchaudio==2.3.1+cu118
-# --index-url https://download.pytorch.org/whl/cu118
 
 # CPU Only（无显卡，默认激活）
-# 【修复】+cpu 这个 build 后缀的 wheel 不在 PyPI 默认源上，必须显式指定
-# CPU 专属索引才能被 pip 找到，否则会报
-# "ERROR: Could not find a version that satisfies the requirement torch==2.3.1+cpu"
-# （之前的注释说不需要 --index-url 是错的，与 requirements-nemo.txt 里
-# 已经验证过的写法统一）。
 torch==2.3.1+cpu
 torchvision==0.18.1+cpu
 torchaudio==2.3.1+cpu
---index-url https://download.pytorch.org/whl/cpu
