@@ -1,5 +1,5 @@
 @echo off
-REM SVS Lab Aligner å®Œæ•´ä¸€é”®å®‰è£…è„šæœ¬ (Windows)
+REM SVS Lab Aligner ÍêÕûÒ»¼ü°²×°½Å±¾ (Windows)
 chcp 936 >nul
 setlocal enabledelayedexpansion
 
@@ -9,46 +9,46 @@ set "ENV_PREFIX=%CD%\.mfa_env"
 set "KALDI_ENV_PREFIX=%CD%\.kaldi_env"
 set "REQUIREMENTS_FILE=%CD%\backend\requirements.txt"
 
-REM å®šä¹‰MFAæ”¯æŒçš„è¯­è¨€
+REM ¶¨ÒåMFAÖ§³ÖµÄÓïÑÔ
 set "LANGUAGES=cmn eng jpn kor yue"
-set "LANG_NAME_cmn=ä¸­æ–‡æ™®é€šè¯"
-set "LANG_NAME_eng=è‹±è¯­"
-set "LANG_NAME_jpn=æ—¥è¯­"
-set "LANG_NAME_kor=éŸ©è¯­"
-set "LANG_NAME_yue=ç²¤è¯­"
+set "LANG_NAME_cmn=ÖÐÎÄÆÕÍ¨»°"
+set "LANG_NAME_eng=Ó¢Óï"
+set "LANG_NAME_jpn=ÈÕÓï"
+set "LANG_NAME_kor=º«Óï"
+set "LANG_NAME_yue=ÔÁÓï"
 
 cls
 echo.
 echo ================================================================================
 echo.
-echo               SVS Lab Aligner å®Œæ•´å®‰è£…ç¨‹åº (Windows)
+echo               SVS Lab Aligner ÍêÕû°²×°³ÌÐò (Windows)
 echo.
-echo   æœ¬è„šæœ¬å°†è‡ªåŠ¨å®Œæˆä»¥ä¸‹æ­¥éª¤:
-echo     - æ£€æŸ¥ Conda å’Œ Node.js çŽ¯å¢ƒ
-echo     - åˆ›å»ºè™šæ‹ŸçŽ¯å¢ƒå¹¶æ ¹æ® requirements.txt å®‰è£…æ‰€æœ‰ä¾èµ–
-echo     - å®‰è£…å¹¶æž„å»º Vue å‰ç«¯
-echo     - äº¤äº’å¼é€‰æ‹©è¯­è¨€æ¨¡åž‹å¹¶ä¸‹è½½
-echo     - (å¯é€‰) åˆ›å»ºç‹¬ç«‹çŽ¯å¢ƒå¹¶å®‰è£… NeMo Forced Aligner
-echo     - (å¯é€‰) åˆ›å»ºç‹¬ç«‹çŽ¯å¢ƒå¹¶å®‰è£… Qwen3-ASR/ForcedAligner
-echo     - (å¯é€‰) åˆ›å»ºç‹¬ç«‹çŽ¯å¢ƒå¹¶å®‰è£… Qwen3-TTS
+echo   ±¾½Å±¾½«×Ô¶¯Íê³ÉÒÔÏÂ²½Öè:
+echo     - ¼ì²é Conda ºÍ Node.js »·¾³
+echo     - ´´½¨ÐéÄâ»·¾³²¢¸ù¾Ý requirements.txt °²×°ËùÓÐÒÀÀµ
+echo     - °²×°²¢¹¹½¨ Vue Ç°¶Ë
+echo     - ½»»¥Ê½Ñ¡ÔñÓïÑÔÄ£ÐÍ²¢ÏÂÔØ
+echo     - (¿ÉÑ¡) ´´½¨¶ÀÁ¢»·¾³²¢°²×° NeMo Forced Aligner
+echo     - (¿ÉÑ¡) ´´½¨¶ÀÁ¢»·¾³²¢°²×° Qwen3-ASR/ForcedAligner
+echo     - (¿ÉÑ¡) ´´½¨¶ÀÁ¢»·¾³²¢°²×° Qwen3-TTS
 echo.
-echo   é¢„è®¡è€—æ—¶: 15-30 åˆ†é’Ÿ (å–å†³äºŽç½‘ç»œå’Œæ¨¡åž‹å¤§å°)
+echo   Ô¤¼ÆºÄÊ±: 15-30 ·ÖÖÓ (È¡¾öÓÚÍøÂçºÍÄ£ÐÍ´óÐ¡)
 echo.
 echo ================================================================================
 echo.
 pause
 
 REM -----------------------------------------------------------------
-REM Step 1: æ£€æŸ¥ç³»ç»Ÿä¾èµ– (Conda & Node)
+REM Step 1: ¼ì²éÏµÍ³ÒÀÀµ (Conda & Node)
 REM -----------------------------------------------------------------
 cls
 echo.
 echo ================================================================================
-echo Step 1/8: æ£€æŸ¥ç³»ç»Ÿä¾èµ–
+echo Step 1/8: ¼ì²éÏµÍ³ÒÀÀµ
 echo ================================================================================
 echo.
 
-REM 1.1 åŠ¨æ€å¯»æ‰¾ Conda
+REM 1.1 ¶¯Ì¬Ñ°ÕÒ Conda
 set "CONDA_BAT="
 for %%p in (
     "%USERPROFILE%\miniconda3\condabin\conda.bat"
@@ -67,214 +67,248 @@ for %%p in (
         goto :conda_found
     )
 )
-REM æ£€æŸ¥çŽ¯å¢ƒå˜é‡ PATH ä¸­æ˜¯å¦æœ‰ conda
+REM ¼ì²é»·¾³±äÁ¿ PATH ÖÐÊÇ·ñÓÐ conda
 for %%X in (conda.bat) do (set "CONDA_BAT=%%~$PATH:X")
 
 :conda_found
 if not defined CONDA_BAT (
-    echo [ERROR] Conda æœªæ‰¾åˆ°ï¼è¯·ç¡®ä¿å·²å®‰è£… Miniconda3 æˆ– Miniforgeã€‚
-    echo   Miniconda3 ä¸‹è½½åœ°å€: https://docs.conda.io/projects/miniconda/en/latest/
-	echo   Miniforge ä¸‹è½½åœ°å€: https://github.com/conda-forge/miniforge/releases
+    echo [ERROR] Conda Î´ÕÒµ½£¡ÇëÈ·±£ÒÑ°²×° Miniconda3 »ò Miniforge¡£
+    echo   Miniconda3 ÏÂÔØµØÖ·: https://docs.conda.io/projects/miniconda/en/latest/
+	echo   Miniforge ÏÂÔØµØÖ·: https://github.com/conda-forge/miniforge/releases
     pause
     exit /b 1
 )
-echo [OK] å‘çŽ° Conda: %CONDA_BAT%
+echo [OK] ·¢ÏÖ Conda: %CONDA_BAT%
 
-REM 1.2 æ£€æŸ¥ Node.js
+REM 1.2 ¼ì²é Node.js
 where node >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Node.js æœªæ‰¾åˆ°ï¼å‰ç«¯æž„å»ºéœ€è¦ Node.js çŽ¯å¢ƒã€‚
-    echo   ä¸‹è½½åœ°å€: https://nodejs.org/
+    echo [ERROR] Node.js Î´ÕÒµ½£¡Ç°¶Ë¹¹½¨ÐèÒª Node.js »·¾³¡£
+    echo   ÏÂÔØµØÖ·: https://nodejs.org/
     pause
     exit /b 1
 )
-echo [OK] å‘çŽ° Node.js
+echo [OK] ·¢ÏÖ Node.js
 
 REM -----------------------------------------------------------------
-REM Step 2: åˆ›å»º Conda çŽ¯å¢ƒ
+REM Step 2: ´´½¨ Conda »·¾³
 REM -----------------------------------------------------------------
 cls
 echo.
 echo ================================================================================
-echo Step 2/8: åˆ›å»º MFA è™šæ‹ŸçŽ¯å¢ƒ
+echo Step 2/8: ´´½¨ MFA ÐéÄâ»·¾³
 echo ================================================================================
 echo.
-echo çŽ¯å¢ƒä½ç½®: %ENV_PREFIX%
+echo »·¾³Î»ÖÃ: %ENV_PREFIX%
 echo.
 
 if exist "%ENV_PREFIX%" (
-    echo [!] å‘çŽ°å·²å­˜åœ¨çš„çŽ¯å¢ƒ
-    set /p "CHOICE=æ˜¯å¦åˆ é™¤å¹¶é‡æ–°åˆ›å»º? (y/n): "
+    echo [!] ·¢ÏÖÒÑ´æÔÚµÄ»·¾³
+    set /p "CHOICE=ÊÇ·ñÉ¾³ý²¢ÖØÐÂ´´½¨? (y/n): "
     if /i "!CHOICE!"=="y" (
-        echo æ­£åœ¨åˆ é™¤æ—§çŽ¯å¢ƒ...
+        echo ÕýÔÚÉ¾³ý¾É»·¾³...
         call "%CONDA_BAT%" env remove -y -p "%ENV_PREFIX%" >nul 2>&1
     ) else (
-        echo [OK] ä½¿ç”¨çŽ°æœ‰çŽ¯å¢ƒ
+        echo [OK] Ê¹ÓÃÏÖÓÐ»·¾³
         goto :skip_env_create
     )
 )
 
-echo åˆ›å»ºçŽ¯å¢ƒä¸­... è¯·è€å¿ƒç­‰å¾…ï¼ˆå¯èƒ½éœ€è¦å‡ åˆ†é’Ÿï¼‰...
+echo ´´½¨»·¾³ÖÐ... ÇëÄÍÐÄµÈ´ý£¨¿ÉÄÜÐèÒª¼¸·ÖÖÓ£©...
 call "%CONDA_BAT%" create -y -p "%ENV_PREFIX%" -c conda-forge python=3.10 pip >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] çŽ¯å¢ƒåˆ›å»ºå¤±è´¥
+    echo [ERROR] »·¾³´´½¨Ê§°Ü
     pause
     exit /b 1
 )
 
 :skip_env_create
-echo [OK] MFA çŽ¯å¢ƒå·²å‡†å¤‡
+echo [OK] MFA »·¾³ÒÑ×¼±¸
 echo.
 
 REM -----------------------------------------------------------------
-REM Step 2.1: é¢„è£… PyAV 11.0.0ï¼ˆWhisperX 3.2.0 / faster-whisper 1.0.0ï¼‰
+REM Step 2.1: Ô¤×° PyAV 11.0.0£¨WhisperX 3.2.0 / faster-whisper 1.0.0£©
 REM -----------------------------------------------------------------
-REM PyPI ä¸Š av==11.0.0 å½“å‰ä¼šè½åˆ°æºç åŒ…ï¼›Windows ç¼–è¯‘éœ€è¦ FFmpeg çš„ avformat.libã€‚
-REM conda-forge æä¾› Python 3.10 / win-64 çš„ av 11.0.0 äºŒè¿›åˆ¶åŒ…ï¼Œå› æ­¤å…ˆç”¨ conda å®‰è£…ï¼Œ
-REM å†æ‰§è¡Œ pip requirementsï¼Œpip ä¼šç›´æŽ¥å¤ç”¨å·²å®‰è£…çš„ avï¼Œä¸å†å°è¯•æºç ç¼–è¯‘ã€‚
-echo [*] å®‰è£… PyAV 11.0.0 äºŒè¿›åˆ¶ä¾èµ–ï¼ˆconda-forgeï¼‰...
+REM PyPI ÉÏ av==11.0.0 µ±Ç°»áÂäµ½Ô´Âë°ü£»Windows ±àÒëÐèÒª FFmpeg µÄ avformat.lib¡£
+REM conda-forge Ìá¹© Python 3.10 / win-64 µÄ av 11.0.0 ¶þ½øÖÆ°ü£¬Òò´ËÏÈÓÃ conda °²×°£¬
+REM ÔÙÖ´ÐÐ pip requirements£¬pip »áÖ±½Ó¸´ÓÃÒÑ°²×°µÄ av£¬²»ÔÙ³¢ÊÔÔ´Âë±àÒë¡£
+echo [*] °²×° PyAV 11.0.0 ¶þ½øÖÆÒÀÀµ£¨conda-forge£©...
 call "%CONDA_BAT%" install -y -p "%ENV_PREFIX%" -c conda-forge av=11.0.0
 if errorlevel 1 (
-    echo [ERROR] PyAV 11.0.0 å®‰è£…å¤±è´¥ï¼Œè¯·æ£€æŸ¥ conda-forge ç½‘ç»œæˆ–ä¸Šæ–¹é”™è¯¯ã€‚
+    echo [ERROR] PyAV 11.0.0 °²×°Ê§°Ü£¬Çë¼ì²é conda-forge ÍøÂç»òÉÏ·½´íÎó¡£
     pause
     exit /b 1
 )
-echo [OK] PyAV 11.0.0 å·²å®‰è£…
+echo [OK] PyAV 11.0.0 ÒÑ°²×°
 echo.
 
 REM -----------------------------------------------------------------
-REM Step 2.5: ç”¨ conda åœ¨ã€ç‹¬ç«‹çŽ¯å¢ƒã€‘é‡Œåªè£… kaldi è¿™ä¸ªäºŒè¿›åˆ¶ä¾èµ–
+REM Step 2.5: ÓÃ conda ÔÚ¡¾¶ÀÁ¢»·¾³¡¿ÀïÖ»×° kaldi Õâ¸ö¶þ½øÖÆÒÀÀµ
 REM -----------------------------------------------------------------
-REM ã€ä¿®å¤ã€‘æ­¤å‰è¿™ä¸€æ­¥æ˜¯ `conda install -p "%ENV_PREFIX%" ... kaldi`ï¼ŒæŠŠ
-REM kaldi ç›´æŽ¥è£…è¿›äº† .mfa_env å†…éƒ¨ï¼Œä¸Ž setup.shï¼ˆLinux/Mac ç‰ˆï¼‰åˆ›å»ºç‹¬ç«‹
-REM .kaldi_env çš„åšæ³•ä¸ä¸€è‡´ï¼Œä¹Ÿä¸Ž pack_runtime.bat / mfa_utils.py é‡Œ
-REM kaldi_env_dir() çš„å‡è®¾ï¼ˆkaldi åº”è¯¥åœ¨ç‹¬ç«‹çš„ .kaldi_env ç›®å½•ä¸‹ï¼‰å¯¹ä¸ä¸Šã€‚
-REM è£…è¿›åŒä¸€ä¸ªçŽ¯å¢ƒè™½ç„¶é  mfa_utils.py çš„å…œåº•é€»è¾‘ä»èƒ½è·‘èµ·æ¥ï¼Œä½†ä¼šå¯¼è‡´ï¼š
-REM   1) pack_runtime.bat æ£€æµ‹ä¸åˆ° .kaldi_envï¼Œæ‰“å‡ºæ¥çš„ runtime\ ç¼ºå°‘
-REM      kaldi_env è¿™ä¸ªç‹¬ç«‹ç›®å½•ï¼Œåªæ˜¯"å‡‘å·§"å› ä¸º kaldi å·²ç»åœ¨ mfa_env é‡Œ
-REM      è€Œä¸å‡ºé”™ï¼Œå±žäºŽè²Œåˆç¥žç¦»ï¼›
-REM   2) ä»¥åŽæƒ³æ¢æŽ‰/å‡çº§ kaldi ç‰ˆæœ¬æ—¶ï¼Œä¸èƒ½åªé‡å»º .kaldi_envï¼Œå¿…é¡»è¿ž
-REM      .mfa_env ä¸€èµ·é‡å»ºï¼Œéº»çƒ¦å¾—å¤šã€‚
-REM çŽ°åœ¨æ”¹ä¸ºåœ¨ç‹¬ç«‹çš„ .kaldi_env é‡Œè£… kaldiï¼Œä¸Ž setup.sh ä¿æŒä¸€è‡´ã€‚
+REM ¡¾ÐÞ¸´¡¿´ËÇ°ÕâÒ»²½ÊÇ `conda install -p "%ENV_PREFIX%" ... kaldi`£¬°Ñ
+REM kaldi Ö±½Ó×°½øÁË .mfa_env ÄÚ²¿£¬Óë setup.sh£¨Linux/Mac °æ£©´´½¨¶ÀÁ¢
+REM .kaldi_env µÄ×ö·¨²»Ò»ÖÂ£¬Ò²Óë pack_runtime.bat / mfa_utils.py Àï
+REM kaldi_env_dir() µÄ¼ÙÉè£¨kaldi Ó¦¸ÃÔÚ¶ÀÁ¢µÄ .kaldi_env Ä¿Â¼ÏÂ£©¶Ô²»ÉÏ¡£
+REM ×°½øÍ¬Ò»¸ö»·¾³ËäÈ»¿¿ mfa_utils.py µÄ¶µµ×Âß¼­ÈÔÄÜÅÜÆðÀ´£¬µ«»áµ¼ÖÂ£º
+REM   1) pack_runtime.bat ¼ì²â²»µ½ .kaldi_env£¬´ò³öÀ´µÄ runtime\ È±ÉÙ
+REM      kaldi_env Õâ¸ö¶ÀÁ¢Ä¿Â¼£¬Ö»ÊÇ"´ÕÇÉ"ÒòÎª kaldi ÒÑ¾­ÔÚ mfa_env Àï
+REM      ¶ø²»³ö´í£¬ÊôÓÚÃ²ºÏÉñÀë£»
+REM   2) ÒÔºóÏë»»µô/Éý¼¶ kaldi °æ±¾Ê±£¬²»ÄÜÖ»ÖØ½¨ .kaldi_env£¬±ØÐëÁ¬
+REM      .mfa_env Ò»ÆðÖØ½¨£¬Âé·³µÃ¶à¡£
+REM ÏÖÔÚ¸ÄÎªÔÚ¶ÀÁ¢µÄ .kaldi_env Àï×° kaldi£¬Óë setup.sh ±£³ÖÒ»ÖÂ¡£
 REM
-REM æ³¨æ„ï¼šè¿™é‡Œæ•…æ„ä¸ç”¨ `conda install -c conda-forge montreal-forced-aligner`
-REM ï¼ˆå®˜æ–¹ conda å®Œæ•´åŒ…ï¼‰ï¼Œå› ä¸ºé‚£ä¸ªåŒ…åœ¨ Windows ä¸Šä¼šè¿žå¸¦è£…ä¸Šä¸€å † GDK/pango/
-REM cairo ä¹‹ç±»çš„å›¾å½¢æ¸²æŸ“ä¾èµ–ï¼ˆé€šå¸¸æ˜¯ç»™ fstdraw ä¹‹ç±»çš„å¯è§†åŒ–å­å‘½ä»¤ç”¨çš„ï¼‰ï¼Œ
-REM ä¸”ç»å¸¸åœ¨è¿™ä¸€æ­¥å› ä¸º post-link è„šæœ¬ï¼ˆgdk-pixbuf-query-loaders ç­‰ï¼‰æŠ¥é”™
-REM è£…ä¸ä¸Šã€‚MFA å®˜æ–¹æ–‡æ¡£ä¹Ÿè¯´æ˜Žæ”¯æŒ"conda åªè£… kaldi/pynini è¿™äº›äºŒè¿›åˆ¶ï¼Œ
-REM MFA æœ¬ä½“èµ° pip"çš„æ··åˆå®‰è£…æ–¹å¼ï¼ŒäºŒè€…æ•ˆæžœä¸€è‡´ï¼Œä¸”ä¸ä¼šç¢° GDK ç»„ä»¶ã€‚
-REM MFA æ ¸å¿ƒçš„å¼ºåˆ¶å¯¹é½æµç¨‹åªä¾èµ– kaldi å¯æ‰§è¡Œæ–‡ä»¶æœ¬èº«ï¼Œè£…ä¸è£… GDK å®Œå…¨
-REM ä¸å½±å“å¯¹é½ç»“æžœï¼Œåªæ˜¯ä¸èƒ½ç”¨å¯è§†åŒ–è°ƒè¯•å‘½ä»¤è€Œå·²ã€‚
-echo [*] åˆ›å»ºç‹¬ç«‹çš„ kaldi çŽ¯å¢ƒ (.kaldi_env)...
+REM ×¢Òâ£ºÕâÀï¹ÊÒâ²»ÓÃ `conda install -c conda-forge montreal-forced-aligner`
+REM £¨¹Ù·½ conda ÍêÕû°ü£©£¬ÒòÎªÄÇ¸ö°üÔÚ Windows ÉÏ»áÁ¬´ø×°ÉÏÒ»¶Ñ GDK/pango/
+REM cairo Ö®ÀàµÄÍ¼ÐÎäÖÈ¾ÒÀÀµ£¨Í¨³£ÊÇ¸ø fstdraw Ö®ÀàµÄ¿ÉÊÓ»¯×ÓÃüÁîÓÃµÄ£©£¬
+REM ÇÒ¾­³£ÔÚÕâÒ»²½ÒòÎª post-link ½Å±¾£¨gdk-pixbuf-query-loaders µÈ£©±¨´í
+REM ×°²»ÉÏ¡£MFA ¹Ù·½ÎÄµµÒ²ËµÃ÷Ö§³Ö"conda Ö»×° kaldi/pynini ÕâÐ©¶þ½øÖÆ£¬
+REM MFA ±¾Ìå×ß pip"µÄ»ìºÏ°²×°·½Ê½£¬¶þÕßÐ§¹ûÒ»ÖÂ£¬ÇÒ²»»áÅö GDK ×é¼þ¡£
+REM MFA ºËÐÄµÄÇ¿ÖÆ¶ÔÆëÁ÷³ÌÖ»ÒÀÀµ kaldi ¿ÉÖ´ÐÐÎÄ¼þ±¾Éí£¬×°²»×° GDK ÍêÈ«
+REM ²»Ó°Ïì¶ÔÆë½á¹û£¬Ö»ÊÇ²»ÄÜÓÃ¿ÉÊÓ»¯µ÷ÊÔÃüÁî¶øÒÑ¡£
+echo [*] ´´½¨¶ÀÁ¢µÄ kaldi »·¾³ (.kaldi_env)...
 if exist "%KALDI_ENV_PREFIX%" (
-    echo [OK] .kaldi_env å·²å­˜åœ¨ï¼Œè·³è¿‡åˆ›å»º
+    echo [OK] .kaldi_env ÒÑ´æÔÚ£¬Ìø¹ý´´½¨
 ) else (
     call "%CONDA_BAT%" create -y -p "%KALDI_ENV_PREFIX%" -c conda-forge kaldi
     if errorlevel 1 (
-        echo [ERROR] kaldi å®‰è£…å¤±è´¥ï¼Œè¯·æ£€æŸ¥ä¸Šæ–¹æŠ¥é”™ä¿¡æ¯ï¼ˆç½‘ç»œé—®é¢˜å±…å¤šï¼Œå¯é‡è·‘æœ¬è„šæœ¬ï¼‰ã€‚
+        echo [ERROR] kaldi °²×°Ê§°Ü£¬Çë¼ì²éÉÏ·½±¨´íÐÅÏ¢£¨ÍøÂçÎÊÌâ¾Ó¶à£¬¿ÉÖØÅÜ±¾½Å±¾£©¡£
         pause
         exit /b 1
     )
 )
-echo [OK] kaldi å·²å®‰è£…åˆ°ç‹¬ç«‹çŽ¯å¢ƒ: %KALDI_ENV_PREFIX%
+echo [OK] kaldi ÒÑ°²×°µ½¶ÀÁ¢»·¾³: %KALDI_ENV_PREFIX%
 echo.
 
 REM -----------------------------------------------------------------
-REM Step 3: å®‰è£…ä¾èµ– (é€šè¿‡ requirements.txt)
+REM Step 3: °²×°ÒÀÀµ (Í¨¹ý requirements.txt)
 REM -----------------------------------------------------------------
 cls
 echo.
 echo ================================================================================
-echo Step 3/8: å®‰è£… Python ä¾èµ–
+echo Step 3/8: °²×° Python ÒÀÀµ
 echo ================================================================================
 echo.
 
 if not exist "%REQUIREMENTS_FILE%" (
-    echo [ERROR] æ‰¾ä¸åˆ° %REQUIREMENTS_FILE%
+    echo [ERROR] ÕÒ²»µ½ %REQUIREMENTS_FILE%
     pause
     exit /b 1
 )
 
-echo [*] å‡çº§ pip/setuptools/wheel...
+echo [*] Éý¼¶ pip/setuptools/wheel...
 call "%CONDA_BAT%" run --no-capture-output -p "%ENV_PREFIX%" python -m pip install --upgrade pip setuptools wheel
 
-echo [*] æ ¹æ® requirements.txt å®‰è£…æ‰€æœ‰ä¾èµ– (å« pip ç‰ˆ montreal-forced-aligner)...
-echo   requirements.txt é‡Œçš„ montreal-forced-aligner è¿™é‡Œèµ° pip å®‰è£…ï¼ˆçº¯ Python
-echo   èƒ¶æ°´ä»£ç ï¼Œè¿è¡Œæ—¶è°ƒç”¨ä¸Šé¢ç‹¬ç«‹ .kaldi_env é‡Œè£…å¥½çš„ kaldi å¯æ‰§è¡Œæ–‡ä»¶ï¼‰ï¼Œ
-echo   è€Œä¸æ˜¯èµ° conda çš„å®Œæ•´åŒ…ï¼Œå› æ­¤ä¸ä¼šå†è§¦å‘ GDK ç»„ä»¶å®‰è£…ã€‚
-echo   è¯·è€å¿ƒç­‰å¾…ï¼Œè¿™å¯èƒ½éœ€è¦è¾ƒé•¿æ—¶é—´...
+echo [*] ¸ù¾Ý requirements.txt °²×°ËùÓÐÒÀÀµ (º¬ pip °æ montreal-forced-aligner)...
+echo   requirements.txt ÀïµÄ montreal-forced-aligner ÕâÀï×ß pip °²×°£¨´¿ Python
+echo   ½ºË®´úÂë£¬ÔËÐÐÊ±µ÷ÓÃÉÏÃæ¶ÀÁ¢ .kaldi_env Àï×°ºÃµÄ kaldi ¿ÉÖ´ÐÐÎÄ¼þ£©£¬
+echo   ¶ø²»ÊÇ×ß conda µÄÍêÕû°ü£¬Òò´Ë²»»áÔÙ´¥·¢ GDK ×é¼þ°²×°¡£
+echo   ÇëÄÍÐÄµÈ´ý£¬Õâ¿ÉÄÜÐèÒª½Ï³¤Ê±¼ä...
 call "%CONDA_BAT%" run --no-capture-output -p "%ENV_PREFIX%" python -m pip install -r "%REQUIREMENTS_FILE%"
 if errorlevel 1 (
-    echo [ERROR] ä¾èµ–å®‰è£…å¤±è´¥ï¼Œè¯·æ£€æŸ¥ä¸Šæ–¹æŠ¥é”™ä¿¡æ¯ã€‚
-    echo     å¦‚æžœæŠ¥é”™å’Œ kalpy-kaldi æœ‰å…³ï¼šè¿™ä¸ªåŒ…åœ¨ PyPI ä¸Šåªæä¾›æºç åˆ†å‘ï¼Œ
-    echo     éœ€è¦æœ¬æœºå…·å¤‡ C++ ç¼–è¯‘å·¥å…·é“¾æ‰èƒ½è£…ï¼›è£…ä¸ä¸Šçš„è¯å¯ä»¥æ”¹ç”¨
+    echo [ERROR] ÒÀÀµ°²×°Ê§°Ü£¬Çë¼ì²éÉÏ·½±¨´íÐÅÏ¢¡£
+    echo     Èç¹û±¨´íºÍ kalpy-kaldi ÓÐ¹Ø£ºÕâ¸ö°üÔÚ PyPI ÉÏÖ»Ìá¹©Ô´Âë·Ö·¢£¬
+    echo     ÐèÒª±¾»ú¾ß±¸ C++ ±àÒë¹¤¾ßÁ´²ÅÄÜ×°£»×°²»ÉÏµÄ»°¿ÉÒÔ¸ÄÓÃ
     echo       "%CONDA_BAT%" install -y -p "%ENV_PREFIX%" -c conda-forge kalpy
-    echo     å†é‡è·‘æœ¬è„šæœ¬ï¼ˆæ­¤æ—¶ pip ä¼šæ£€æµ‹åˆ° kalpy-kaldi å·²ç”¨ conda è£…å¥½è€Œè·³è¿‡ï¼‰ã€‚
+    echo     ÔÙÖØÅÜ±¾½Å±¾£¨´ËÊ± pip »á¼ì²âµ½ kalpy-kaldi ÒÑÓÃ conda ×°ºÃ¶øÌø¹ý£©¡£
     pause
     exit /b 1
 )
-echo [OK] æ‰€æœ‰ Python ä¾èµ–å·²å®‰è£…
+echo [OK] ËùÓÐ Python ÒÀÀµÒÑ°²×°
 echo.
 
 REM -----------------------------------------------------------------
-REM Step 4: å®‰è£…å¹¶æž„å»ºå‰ç«¯
+REM Step 3.5: ²¿Êð speechbrain Windows Â·¾¶·Ö¸ô·û bug ²¹¶¡
+REM -----------------------------------------------------------------
+REM ¡¾ÐÞ¸´¡¿speechbrain£¨MFA Í¨¹ý alt_aligners.py ÓÃµ½µÄ¿ÉÑ¡ÒÀÀµ£©ÔÚ
+REM Windows ÉÏÓÐÒ»¸öÀÁ¼ÓÔØÄ£¿éÅÐ¶ÏÂ·¾¶·Ö¸ô·ûÊ±Ð´ËÀÁËÕýÐ±¸ÜµÄ bug£¬»áµ¼ÖÂ
+REM MFA ÅÜ MFCC ÌØÕ÷ÌáÈ¡Ê±£¬Ò»´Î´¿´âµÄÄÚ²¿ inspect.stack() Ì½²â±»´íÎóµØ
+REM Éý¼¶³ÉÕæÊµµÄ import ³¢ÊÔ£¬½ø¶øÒòÎª k2/flair µÈÎ´°²×°µÄ¿ÉÑ¡ÒÀÀµÖ±½Ó
+REM ±¨´íÖÐ¶Ï¶ÔÆëÈÎÎñ£¨±íÏÖÎª "ModuleNotFoundError: No module named 'k2'"
+REM »òÀàËÆÐÅÏ¢£¬MFA ×Ô¼ºµÄ±¨´íÎÄ°¸»áÌáÊ¾"¸ÄÓÃ Python 3.12"»ò"×°
+REM standard-aifc standard-sunau"£¬ÕâÁ½Ìõ¶¼ÊÇÎóµ¼£¬¸úÕæÕýÔ­ÒòÎÞ¹Ø£¬ÕÕ×ö
+REM Ò²½â¾ö²»ÁËÎÊÌâ£©¡£
+REM Ïê¼û backend\mfa_env_sitecustomize.py ÎÄ¼þÍ·²¿×¢ÊÍ¡£
+REM
+REM sitecustomize.py ÊÇ CPython ±ê×¼¹³×Ó£¬Ö»Òª·ÅÔÚ site-packages ¸ùÄ¿Â¼ÏÂ
+REM ¾Í»áÔÚ¸Ã»·¾³Ã¿´ÎÆô¶¯Ê±×Ô¶¯ÉúÐ§£¬²»ÐèÒª MFA »òÈÎºÎµ÷ÓÃ·½´úÂëÏÔÊ½
+REM import Ëü£¬Òò´Ë¿ÉÒÔÔÚÕâÀï"²¿ÊðÒ»´Î£¬Ö®ºó MFA Ã¿´ÎÅÜ¶ÔÆë¶¼×Ô¶¯ÉúÐ§"¡£
+for /f "delims=" %%P in ('call "%CONDA_BAT%" run -p "%ENV_PREFIX%" python -c "import site; print(site.getsitepackages()[0])"') do set "MFA_SITE_PACKAGES=%%P"
+if not defined MFA_SITE_PACKAGES (
+    echo [!] Î´ÄÜ¶¨Î» .mfa_env µÄ site-packages Ä¿Â¼£¬Ìø¹ý speechbrain ²¹¶¡²¿Êð
+    echo     £¨²»Ó°Ïì´ó²¿·Ö¹¦ÄÜ£¬Ö»ÓÐÔÚ MFA ±¨ k2/flair Ïà¹Ø ImportError Ê±²ÅÐèÒªËü£©
+) else (
+    if exist "%CD%\backend\mfa_env_sitecustomize.py" (
+        copy /y "%CD%\backend\mfa_env_sitecustomize.py" "%MFA_SITE_PACKAGES%\sitecustomize.py" >nul
+        if errorlevel 1 (
+            echo [!] speechbrain ²¹¶¡²¿ÊðÊ§°Ü£¨·ÇÖÂÃü£¬Ìø¹ý£©
+        ) else (
+            echo [OK] speechbrain Windows Â·¾¶·Ö¸ô·û²¹¶¡ÒÑ²¿Êðµ½ .mfa_env
+        )
+    ) else (
+        echo [!] Î´ÕÒµ½ backend\mfa_env_sitecustomize.py£¬Ìø¹ý²¹¶¡²¿Êð
+    )
+)
+echo.
+
+REM -----------------------------------------------------------------
+REM Step 4: °²×°²¢¹¹½¨Ç°¶Ë
 REM -----------------------------------------------------------------
 cls
 echo.
 echo ================================================================================
-echo Step 4/8: å®‰è£…å¹¶æž„å»ºå‰ç«¯
+echo Step 4/8: °²×°²¢¹¹½¨Ç°¶Ë
 echo ================================================================================
 echo.
 
 cd frontend
 if not exist "package.json" (
-    echo [ERROR] æœªæ‰¾åˆ° frontend\package.json
+    echo [ERROR] Î´ÕÒµ½ frontend\package.json
     cd ..
     pause
     exit /b 1
 )
 
-echo [*] å®‰è£… npm åŒ…...
+echo [*] °²×° npm °ü...
 call npm install --legacy-peer-deps >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] npm ä¾èµ–å®‰è£…å¤±è´¥
+    echo [ERROR] npm ÒÀÀµ°²×°Ê§°Ü
     cd ..
     pause
     exit /b 1
 )
-echo [OK] npm ä¾èµ–å·²å®‰è£…
+echo [OK] npm ÒÀÀµÒÑ°²×°
 
-echo [*] æž„å»ºå‰ç«¯åº”ç”¨...
+echo [*] ¹¹½¨Ç°¶ËÓ¦ÓÃ...
 call npm run build >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] å‰ç«¯æž„å»ºå¤±è´¥
+    echo [ERROR] Ç°¶Ë¹¹½¨Ê§°Ü
     cd ..
     pause
     exit /b 1
 )
-echo [OK] å‰ç«¯å·²æž„å»º
+echo [OK] Ç°¶ËÒÑ¹¹½¨
 cd ..
 
 REM -----------------------------------------------------------------
-REM Step 5: è¯­è¨€æ¨¡åž‹é…ç½®
+REM Step 5: ÓïÑÔÄ£ÐÍÅäÖÃ
 REM -----------------------------------------------------------------
 cls
 echo.
 echo ================================================================================
-echo Step 5/8: ä¸‹è½½ MFA è¯­è¨€æ¨¡åž‹
+echo Step 5/8: ÏÂÔØ MFA ÓïÑÔÄ£ÐÍ
 echo ================================================================================
 echo.
-echo æ”¯æŒçš„è¯­è¨€:
+echo Ö§³ÖµÄÓïÑÔ:
 echo   - cmn - %LANG_NAME_cmn%
 echo   - eng - %LANG_NAME_eng%
 echo   - jpn - %LANG_NAME_jpn%
 echo   - kor - %LANG_NAME_kor%
 echo   - yue - %LANG_NAME_yue%
 echo.
-echo è¯´æ˜Ž:
-echo   è¾“å…¥ y     - ä¸‹è½½è¯¥è¯­è¨€çš„é¢„è®­ç»ƒæ¨¡åž‹
-echo   è¾“å…¥ n     - è·³è¿‡è¯¥è¯­è¨€
-echo   è¾“å…¥ all   - ä¸‹è½½æ‰€æœ‰å‰©ä½™è¯­è¨€
+echo ËµÃ÷:
+echo   ÊäÈë y     - ÏÂÔØ¸ÃÓïÑÔµÄÔ¤ÑµÁ·Ä£ÐÍ
+echo   ÊäÈë n     - Ìø¹ý¸ÃÓïÑÔ
+echo   ÊäÈë all   - ÏÂÔØËùÓÐÊ£ÓàÓïÑÔ
 echo.
 
 set "INSTALL_ALL=false"
@@ -284,61 +318,61 @@ for %%L in (%LANGUAGES%) do (
     if "!INSTALL_ALL!"=="true" (
         set "CHOICE=y"
     ) else (
-        set /p "CHOICE=ä¸‹è½½ %%L - !LANG_NAME_%%L! (y/n/all): "
+        set /p "CHOICE=ÏÂÔØ %%L - !LANG_NAME_%%L! (y/n/all): "
     )
     
     if /i "!CHOICE!"=="all" (
-        echo [OK] é€‰æ‹©æ‰€æœ‰å‰©ä½™è¯­è¨€
+        echo [OK] Ñ¡ÔñËùÓÐÊ£ÓàÓïÑÔ
         set "INSTALL_ALL=true"
         set "SELECTED_LANGS=!SELECTED_LANGS! %%L"
     ) else if /i "!CHOICE!"=="y" (
-        echo [OK] é€‰æ‹© %%L
+        echo [OK] Ñ¡Ôñ %%L
         set "SELECTED_LANGS=!SELECTED_LANGS! %%L"
     ) else (
-        echo [!] è·³è¿‡ %%L
+        echo [!] Ìø¹ý %%L
     )
 )
 
 echo.
 if "!SELECTED_LANGS!"=="" (
-    echo [!] æœªé€‰æ‹©ä»»ä½•è¯­è¨€æ¨¡åž‹ï¼Œå¯åŽç»­æ‰‹åŠ¨ä¸‹è½½ã€‚
+    echo [!] Î´Ñ¡ÔñÈÎºÎÓïÑÔÄ£ÐÍ£¬¿ÉºóÐøÊÖ¶¯ÏÂÔØ¡£
 ) else (
-    echo [OK] å¼€å§‹ä¸‹è½½é€‰å®šæ¨¡åž‹: !SELECTED_LANGS!
+    echo [OK] ¿ªÊ¼ÏÂÔØÑ¡¶¨Ä£ÐÍ: !SELECTED_LANGS!
     echo.
     for %%L in (!SELECTED_LANGS!) do (
-        echo [*] ä¸‹è½½ %%L æ¨¡åž‹...
+        echo [*] ÏÂÔØ %%L Ä£ÐÍ...
         call "%CONDA_BAT%" run -p "%ENV_PREFIX%" python -c "import sys; sys.path.insert(0, 'backend'); from mfa_utils import MFAChecker; success, msg = MFAChecker.download_model('%%L'); sys.exit(0 if success else 1)"
         if errorlevel 1 (
-            echo   [!] %%L æ¨¡åž‹ä¸‹è½½å¤±è´¥ï¼Œè¯·æ£€æŸ¥ç½‘ç»œåŽé‡è¯•ã€‚
+            echo   [!] %%L Ä£ÐÍÏÂÔØÊ§°Ü£¬Çë¼ì²éÍøÂçºóÖØÊÔ¡£
         ) else (
-            echo   [OK] %%L æ¨¡åž‹å·²ä¸‹è½½
+            echo   [OK] %%L Ä£ÐÍÒÑÏÂÔØ
         )
     )
 )
 
 REM -----------------------------------------------------------------
-REM Step 6: NeMo Forced Aligner ç‹¬ç«‹çŽ¯å¢ƒï¼ˆå¯é€‰ï¼‰
+REM Step 6: NeMo Forced Aligner ¶ÀÁ¢»·¾³£¨¿ÉÑ¡£©
 REM -----------------------------------------------------------------
 cls
 echo.
 echo ================================================================================
-echo Step 6/8: NeMo Forced Aligner ç‹¬ç«‹çŽ¯å¢ƒ (å¯é€‰)
+echo Step 6/8: NeMo Forced Aligner ¶ÀÁ¢»·¾³ (¿ÉÑ¡)
 echo ================================================================================
 echo.
-echo NeMo Forced Aligner æ˜¯ä¸€ä¸ªå¯é€‰çš„å¯¹é½åŽç«¯ (NVIDIA CTC å¼ºåˆ¶å¯¹é½)ã€‚
-echo ç”±äºŽ nemo_toolkit å¯¹ packaging/fsspec/omegaconf/hydra-core/lightning
-echo ç­‰æ ¸å¿ƒä¾èµ–æœ‰ä¸¥æ ¼ç‰ˆæœ¬é™åˆ¶ï¼Œä¸Žä¸»çŽ¯å¢ƒä¸€èµ·å®‰è£…ä¼šäº§ç”Ÿä¾èµ–å†²çªï¼Œ
-echo å› æ­¤å®ƒéœ€è¦è¿è¡Œåœ¨ç‹¬ç«‹çš„çŽ¯å¢ƒé‡Œï¼Œä½œä¸ºä¸€ä¸ªæœ¬åœ°æœåŠ¡ (ç«¯å£ 5002)
-echo ä¾›ä¸»åŽç«¯é€šè¿‡ HTTP è°ƒç”¨ã€‚ä¸å®‰è£…ä¹Ÿå®Œå…¨ä¸å½±å“ MFA / WhisperX / Qwen3 åŽç«¯ä½¿ç”¨ã€‚
+echo NeMo Forced Aligner ÊÇÒ»¸ö¿ÉÑ¡µÄ¶ÔÆëºó¶Ë (NVIDIA CTC Ç¿ÖÆ¶ÔÆë)¡£
+echo ÓÉÓÚ nemo_toolkit ¶Ô packaging/fsspec/omegaconf/hydra-core/lightning
+echo µÈºËÐÄÒÀÀµÓÐÑÏ¸ñ°æ±¾ÏÞÖÆ£¬ÓëÖ÷»·¾³Ò»Æð°²×°»á²úÉúÒÀÀµ³åÍ»£¬
+echo Òò´ËËüÐèÒªÔËÐÐÔÚ¶ÀÁ¢µÄ»·¾³Àï£¬×÷ÎªÒ»¸ö±¾µØ·þÎñ (¶Ë¿Ú 5002)
+echo ¹©Ö÷ºó¶ËÍ¨¹ý HTTP µ÷ÓÃ¡£²»°²×°Ò²ÍêÈ«²»Ó°Ïì MFA / WhisperX / Qwen3 ºó¶ËÊ¹ÓÃ¡£
 echo.
 
 set "NEMO_ENV_PREFIX=%CD%\.nemo_env"
 set "NEMO_REQ_FILE=%CD%\backend\requirements-nemo.txt"
 set "INSTALL_ALL_OPTIONAL=false"
-set /p "NEMO_CHOICE=å®‰è£…å¯é€‰ç‹¬ç«‹çŽ¯å¢ƒ? (y/n/all): "
+set /p "NEMO_CHOICE=°²×°¿ÉÑ¡¶ÀÁ¢»·¾³? (y/n/all): "
 
 if /i "!NEMO_CHOICE!"=="all" (
-    echo [OK] å·²é€‰æ‹© ALLï¼šè‡ªåŠ¨å®‰è£… NeMo + Qwen3-ASR/ForcedAligner + Qwen3-TTSï¼Œä¸å†é‡å¤è¯¢é—®ã€‚
+    echo [OK] ÒÑÑ¡Ôñ ALL£º×Ô¶¯°²×° NeMo + Qwen3-ASR/ForcedAligner + Qwen3-TTS£¬²»ÔÙÖØ¸´Ñ¯ÎÊ¡£
     set "INSTALL_ALL_OPTIONAL=true"
     set "NEMO_CHOICE=y"
 )
@@ -348,73 +382,73 @@ if /i "!NEMO_CHOICE!"=="y" (
     set "NEMO_CREATE_FAILED=0"
 
     if exist "%NEMO_ENV_PREFIX%" (
-        echo [!] NeMo çŽ¯å¢ƒå·²å­˜åœ¨: %NEMO_ENV_PREFIX%
-        set /p "NEMO_RECREATE=æ˜¯å¦åˆ é™¤å¹¶é‡æ–°åˆ›å»º? (y/n): "
+        echo [!] NeMo »·¾³ÒÑ´æÔÚ: %NEMO_ENV_PREFIX%
+        set /p "NEMO_RECREATE=ÊÇ·ñÉ¾³ý²¢ÖØÐÂ´´½¨? (y/n): "
         if /i "!NEMO_RECREATE!"=="y" (
-            echo æ­£åœ¨åˆ é™¤æ—§ NeMo çŽ¯å¢ƒ...
+            echo ÕýÔÚÉ¾³ý¾É NeMo »·¾³...
             call "%CONDA_BAT%" env remove -y -p "%NEMO_ENV_PREFIX%" >nul 2>&1
         ) else (
-            echo [OK] ä½¿ç”¨çŽ°æœ‰ NeMo çŽ¯å¢ƒ
+            echo [OK] Ê¹ÓÃÏÖÓÐ NeMo »·¾³
             set "NEMO_NEED_CREATE=0"
         )
     )
 
     if "!NEMO_NEED_CREATE!"=="1" (
-        echo åˆ›å»º NeMo ç‹¬ç«‹çŽ¯å¢ƒä¸­... è¯·è€å¿ƒç­‰å¾…ï¼ˆå¯èƒ½éœ€è¦å‡ åˆ†é’Ÿï¼‰...
+        echo ´´½¨ NeMo ¶ÀÁ¢»·¾³ÖÐ... ÇëÄÍÐÄµÈ´ý£¨¿ÉÄÜÐèÒª¼¸·ÖÖÓ£©...
         call "%CONDA_BAT%" create -y -p "%NEMO_ENV_PREFIX%" -c conda-forge python=3.10 pip >nul 2>&1
         if errorlevel 1 (
-            echo [ERROR] NeMo çŽ¯å¢ƒåˆ›å»ºå¤±è´¥ï¼Œå¯ç¨åŽæ‰‹åŠ¨æ‰§è¡Œï¼š
+            echo [ERROR] NeMo »·¾³´´½¨Ê§°Ü£¬¿ÉÉÔºóÊÖ¶¯Ö´ÐÐ£º
             echo     "%CONDA_BAT%" create -y -p "%NEMO_ENV_PREFIX%" -c conda-forge python=3.10 pip
             set "NEMO_CREATE_FAILED=1"
         )
     )
 
     if "!NEMO_CREATE_FAILED!"=="0" (
-        echo [OK] NeMo çŽ¯å¢ƒå·²å‡†å¤‡
+        echo [OK] NeMo »·¾³ÒÑ×¼±¸
         if not exist "%NEMO_REQ_FILE%" (
-            echo [ERROR] æ‰¾ä¸åˆ° %NEMO_REQ_FILE%
+            echo [ERROR] ÕÒ²»µ½ %NEMO_REQ_FILE%
         ) else (
-            echo [*] æ ¹æ® requirements-nemo.txt å®‰è£… NeMo ç‹¬ç«‹çŽ¯å¢ƒä¾èµ–ï¼ˆå®‰è£…è¿‡ç¨‹ä¼šå®žæ—¶æ˜¾ç¤ºï¼‰...
+            echo [*] ¸ù¾Ý requirements-nemo.txt °²×° NeMo ¶ÀÁ¢»·¾³ÒÀÀµ£¨°²×°¹ý³Ì»áÊµÊ±ÏÔÊ¾£©...
             call "%CONDA_BAT%" run --no-capture-output -p "%NEMO_ENV_PREFIX%" python -m pip install --upgrade pip setuptools wheel
             call "%CONDA_BAT%" run --no-capture-output -p "%NEMO_ENV_PREFIX%" python -m pip install -r "%NEMO_REQ_FILE%"
             if errorlevel 1 (
-                echo [ERROR] NeMo ä¾èµ–å®‰è£…å¤±è´¥ï¼Œå¯ç¨åŽæ‰‹åŠ¨æ‰§è¡Œï¼š
+                echo [ERROR] NeMo ÒÀÀµ°²×°Ê§°Ü£¬¿ÉÉÔºóÊÖ¶¯Ö´ÐÐ£º
                 echo     "%CONDA_BAT%" run --no-capture-output -p "%NEMO_ENV_PREFIX%" python -m pip install -r "%NEMO_REQ_FILE%"
             ) else (
-                echo [OK] NeMo Forced Aligner ä¾èµ–å·²å®‰è£…
-                echo [OK] é¦–æ¬¡å¯åŠ¨ nemo_server.py æ—¶ä¼šæŒ‰æ‰€é€‰è¯­è¨€è‡ªåŠ¨ä¸‹è½½æ¨¡åž‹æƒé‡ï¼ˆæ•°ç™¾ MB ~ 1GBï¼‰
+                echo [OK] NeMo Forced Aligner ÒÀÀµÒÑ°²×°
+                echo [OK] Ê×´ÎÆô¶¯ nemo_server.py Ê±»á°´ËùÑ¡ÓïÑÔ×Ô¶¯ÏÂÔØÄ£ÐÍÈ¨ÖØ£¨Êý°Ù MB ~ 1GB£©
             )
         )
     )
 ) else (
-    echo [OK] å·²è·³è¿‡ï¼Œå¯åŽç»­æ‰‹åŠ¨è¿è¡Œä»¥ä¸‹å‘½ä»¤å®‰è£…ï¼š
+    echo [OK] ÒÑÌø¹ý£¬¿ÉºóÐøÊÖ¶¯ÔËÐÐÒÔÏÂÃüÁî°²×°£º
     echo     "%CONDA_BAT%" create -y -p "%CD%\.nemo_env" -c conda-forge python=3.10 pip
     echo     "%CONDA_BAT%" run --no-capture-output -p "%CD%\.nemo_env" python -m pip install -r "%NEMO_REQ_FILE%"
 )
 
 REM -----------------------------------------------------------------
-REM Step 7: Qwen3-ASR / Qwen3-ForcedAligner ç‹¬ç«‹çŽ¯å¢ƒï¼ˆå¯é€‰ï¼‰
+REM Step 7: Qwen3-ASR / Qwen3-ForcedAligner ¶ÀÁ¢»·¾³£¨¿ÉÑ¡£©
 REM -----------------------------------------------------------------
 cls
 echo.
 echo ================================================================================
-echo Step 7/8: Qwen3-ASR / Qwen3-ForcedAligner ç‹¬ç«‹çŽ¯å¢ƒ (å¯é€‰)
+echo Step 7/8: Qwen3-ASR / Qwen3-ForcedAligner ¶ÀÁ¢»·¾³ (¿ÉÑ¡)
 echo ================================================================================
 echo.
-echo Qwen3-ASR / Qwen3-ForcedAligner æ˜¯å¯é€‰çš„å¯¹é½/è¯†åˆ«åŽç«¯ï¼Œä½œä¸ºä¸€ä¸ªæœ¬åœ°
-echo æœåŠ¡ (ç«¯å£ 5001) ä¾›ä¸»åŽç«¯é€šè¿‡ HTTP è°ƒç”¨ã€‚ä¸å®‰è£…ä¸å½±å“ MFA / WhisperX /
-echo NeMo åŽç«¯ä½¿ç”¨ã€‚ä¾èµ–è§ backend\requirements-qwen3.txt (Python 3.10)ã€‚
+echo Qwen3-ASR / Qwen3-ForcedAligner ÊÇ¿ÉÑ¡µÄ¶ÔÆë/Ê¶±ðºó¶Ë£¬×÷ÎªÒ»¸ö±¾µØ
+echo ·þÎñ (¶Ë¿Ú 5001) ¹©Ö÷ºó¶ËÍ¨¹ý HTTP µ÷ÓÃ¡£²»°²×°²»Ó°Ïì MFA / WhisperX /
+echo NeMo ºó¶ËÊ¹ÓÃ¡£ÒÀÀµ¼û backend\requirements-qwen3.txt (Python 3.10)¡£
 echo.
 
 set "QWEN3_ENV_PREFIX=%CD%\.qwen3_env"
 set "QWEN3_REQ_FILE=%CD%\backend\requirements-qwen3.txt"
 if /i "!INSTALL_ALL_OPTIONAL!"=="true" (
     set "QWEN3_CHOICE=y"
-    echo [OK] ALLï¼šè‡ªåŠ¨å®‰è£… Qwen3-ASR/ForcedAlignerï¼Œä¸å†è¯¢é—®ã€‚
+    echo [OK] ALL£º×Ô¶¯°²×° Qwen3-ASR/ForcedAligner£¬²»ÔÙÑ¯ÎÊ¡£
 ) else (
-    set /p "QWEN3_CHOICE=æ˜¯å¦çŽ°åœ¨åˆ›å»ºç‹¬ç«‹çŽ¯å¢ƒå¹¶å®‰è£… Qwen3-ASR/ForcedAligner? (y/n): "
+    set /p "QWEN3_CHOICE=ÊÇ·ñÏÖÔÚ´´½¨¶ÀÁ¢»·¾³²¢°²×° Qwen3-ASR/ForcedAligner? (y/n): "
     if /i "!QWEN3_CHOICE!"=="all" (
-        echo [OK] å·²é€‰æ‹© ALLï¼šåŽç»­ Qwen3-TTS ä¹Ÿè‡ªåŠ¨å®‰è£…ã€‚
+        echo [OK] ÒÑÑ¡Ôñ ALL£ººóÐø Qwen3-TTS Ò²×Ô¶¯°²×°¡£
         set "INSTALL_ALL_OPTIONAL=true"
         set "QWEN3_CHOICE=y"
     )
@@ -423,77 +457,77 @@ if /i "!INSTALL_ALL_OPTIONAL!"=="true" (
 
 if /i "!QWEN3_CHOICE!"=="y" (
     if not exist "%QWEN3_REQ_FILE%" (
-        echo [ERROR] æ‰¾ä¸åˆ° %QWEN3_REQ_FILE%ï¼Œè·³è¿‡ Qwen3-ASR å®‰è£…
+        echo [ERROR] ÕÒ²»µ½ %QWEN3_REQ_FILE%£¬Ìø¹ý Qwen3-ASR °²×°
     ) else (
         set "QWEN3_NEED_CREATE=1"
         set "QWEN3_CREATE_FAILED=0"
 
         if exist "%QWEN3_ENV_PREFIX%" (
-            echo [!] Qwen3-ASR çŽ¯å¢ƒå·²å­˜åœ¨: %QWEN3_ENV_PREFIX%
-            set /p "QWEN3_RECREATE=æ˜¯å¦åˆ é™¤å¹¶é‡æ–°åˆ›å»º? (y/n): "
+            echo [!] Qwen3-ASR »·¾³ÒÑ´æÔÚ: %QWEN3_ENV_PREFIX%
+            set /p "QWEN3_RECREATE=ÊÇ·ñÉ¾³ý²¢ÖØÐÂ´´½¨? (y/n): "
             if /i "!QWEN3_RECREATE!"=="y" (
-                echo æ­£åœ¨åˆ é™¤æ—§ Qwen3-ASR çŽ¯å¢ƒ...
+                echo ÕýÔÚÉ¾³ý¾É Qwen3-ASR »·¾³...
                 call "%CONDA_BAT%" env remove -y -p "%QWEN3_ENV_PREFIX%" >nul 2>&1
             ) else (
-                echo [OK] ä½¿ç”¨çŽ°æœ‰ Qwen3-ASR çŽ¯å¢ƒ
+                echo [OK] Ê¹ÓÃÏÖÓÐ Qwen3-ASR »·¾³
                 set "QWEN3_NEED_CREATE=0"
             )
         )
 
         if "!QWEN3_NEED_CREATE!"=="1" (
-            echo åˆ›å»º Qwen3-ASR ç‹¬ç«‹çŽ¯å¢ƒä¸­... è¯·è€å¿ƒç­‰å¾…ï¼ˆå¯èƒ½éœ€è¦å‡ åˆ†é’Ÿï¼‰...
+            echo ´´½¨ Qwen3-ASR ¶ÀÁ¢»·¾³ÖÐ... ÇëÄÍÐÄµÈ´ý£¨¿ÉÄÜÐèÒª¼¸·ÖÖÓ£©...
             call "%CONDA_BAT%" create -y -p "%QWEN3_ENV_PREFIX%" -c conda-forge python=3.10 pip >nul 2>&1
             if errorlevel 1 (
-                echo [ERROR] Qwen3-ASR çŽ¯å¢ƒåˆ›å»ºå¤±è´¥ï¼Œå¯ç¨åŽæ‰‹åŠ¨æ‰§è¡Œï¼š
+                echo [ERROR] Qwen3-ASR »·¾³´´½¨Ê§°Ü£¬¿ÉÉÔºóÊÖ¶¯Ö´ÐÐ£º
                 echo     "%CONDA_BAT%" create -y -p "%QWEN3_ENV_PREFIX%" -c conda-forge python=3.10 pip
                 set "QWEN3_CREATE_FAILED=1"
             )
         )
 
         if "!QWEN3_CREATE_FAILED!"=="0" (
-            echo [OK] Qwen3-ASR çŽ¯å¢ƒå·²å‡†å¤‡
-            echo [*] åœ¨ç‹¬ç«‹çŽ¯å¢ƒä¸­å®‰è£… Qwen3-ASR/ForcedAligner ä¾èµ–ï¼ˆå®‰è£…è¿‡ç¨‹ä¼šå®žæ—¶æ˜¾ç¤ºï¼‰...
+            echo [OK] Qwen3-ASR »·¾³ÒÑ×¼±¸
+            echo [*] ÔÚ¶ÀÁ¢»·¾³ÖÐ°²×° Qwen3-ASR/ForcedAligner ÒÀÀµ£¨°²×°¹ý³Ì»áÊµÊ±ÏÔÊ¾£©...
             call "%CONDA_BAT%" run --no-capture-output -p "%QWEN3_ENV_PREFIX%" python -m pip install --upgrade pip setuptools wheel
             call "%CONDA_BAT%" run --no-capture-output -p "%QWEN3_ENV_PREFIX%" python -m pip install -r "%QWEN3_REQ_FILE%"
             if errorlevel 1 (
-                echo [ERROR] Qwen3-ASR ä¾èµ–å®‰è£…å¤±è´¥ï¼Œå¯ç¨åŽæ‰‹åŠ¨æ‰§è¡Œï¼š
+                echo [ERROR] Qwen3-ASR ÒÀÀµ°²×°Ê§°Ü£¬¿ÉÉÔºóÊÖ¶¯Ö´ÐÐ£º
                 echo     "%CONDA_BAT%" run -p "%QWEN3_ENV_PREFIX%" python -m pip install -r "%QWEN3_REQ_FILE%"
             ) else (
-                echo [OK] Qwen3-ASR/ForcedAligner ä¾èµ–å·²å®‰è£…
-                echo [OK] é¦–æ¬¡å¯åŠ¨ qwen3_server.py æ—¶ä¼šè‡ªåŠ¨ä¸‹è½½æ¨¡åž‹æƒé‡
+                echo [OK] Qwen3-ASR/ForcedAligner ÒÀÀµÒÑ°²×°
+                echo [OK] Ê×´ÎÆô¶¯ qwen3_server.py Ê±»á×Ô¶¯ÏÂÔØÄ£ÐÍÈ¨ÖØ
             )
         )
     )
 ) else (
-    echo [OK] å·²è·³è¿‡ï¼Œå¯åŽç»­æ‰‹åŠ¨è¿è¡Œä»¥ä¸‹å‘½ä»¤å®‰è£…ï¼š
+    echo [OK] ÒÑÌø¹ý£¬¿ÉºóÐøÊÖ¶¯ÔËÐÐÒÔÏÂÃüÁî°²×°£º
     echo     "%CONDA_BAT%" create -y -p "%CD%\.qwen3_env" -c conda-forge python=3.10 pip
     echo     "%CONDA_BAT%" run -p "%CD%\.qwen3_env" python -m pip install -r "%QWEN3_REQ_FILE%"
 )
 
 REM -----------------------------------------------------------------
-REM Step 8: Qwen3-TTS ç‹¬ç«‹çŽ¯å¢ƒï¼ˆå¯é€‰ï¼‰
+REM Step 8: Qwen3-TTS ¶ÀÁ¢»·¾³£¨¿ÉÑ¡£©
 REM -----------------------------------------------------------------
-cls
+
 echo.
 echo ================================================================================
-echo Step 8/8: Qwen3-TTS ç‹¬ç«‹çŽ¯å¢ƒ (å¯é€‰)
+echo Step 8/8: Qwen3-TTS ¶ÀÁ¢»·¾³ (¿ÉÑ¡)
 echo ================================================================================
 echo.
-echo Qwen3-TTS æ˜¯å¯é€‰çš„è¯­éŸ³åˆæˆåŽç«¯ (Custom Voice / Voice Design / Voice
-echo Clone^)ï¼Œä½œä¸ºä¸€ä¸ªæœ¬åœ°æœåŠ¡ ^(ç«¯å£ 5003^) ä¾›ä¸»åŽç«¯é€šè¿‡ HTTP è°ƒç”¨ã€‚ä¸å®‰è£…
-echo ä¸å½±å“å…¶å®ƒåŠŸèƒ½ä½¿ç”¨ã€‚å®˜æ–¹è¦æ±‚ Python 3.12ï¼Œä¾èµ–è§
-echo backend\requirements-qwen3tts.txtã€‚
+echo Qwen3-TTS ÊÇ¿ÉÑ¡µÄÓïÒôºÏ³Éºó¶Ë (Custom Voice / Voice Design / Voice
+echo Clone^)£¬×÷ÎªÒ»¸ö±¾µØ·þÎñ ^(¶Ë¿Ú 5003^) ¹©Ö÷ºó¶ËÍ¨¹ý HTTP µ÷ÓÃ¡£²»°²×°
+echo ²»Ó°ÏìÆäËü¹¦ÄÜÊ¹ÓÃ¡£¹Ù·½ÒªÇó Python 3.12£¬ÒÀÀµ¼û
+echo backend\requirements-qwen3tts.txt¡£
 echo.
 
 set "QWEN3TTS_ENV_PREFIX=%CD%\.qwen3tts_env"
 set "QWEN3TTS_REQ_FILE=%CD%\backend\requirements-qwen3tts.txt"
 if /i "!INSTALL_ALL_OPTIONAL!"=="true" (
     set "QWEN3TTS_CHOICE=y"
-    echo [OK] ALLï¼šè‡ªåŠ¨å®‰è£… Qwen3-TTSï¼Œä¸å†è¯¢é—®ã€‚
+    echo [OK] ALL£º×Ô¶¯°²×° Qwen3-TTS£¬²»ÔÙÑ¯ÎÊ¡£
 ) else (
-    set /p "QWEN3TTS_CHOICE=æ˜¯å¦çŽ°åœ¨åˆ›å»ºç‹¬ç«‹çŽ¯å¢ƒå¹¶å®‰è£… Qwen3-TTS? (y/n): "
+    set /p "QWEN3TTS_CHOICE=ÊÇ·ñÏÖÔÚ´´½¨¶ÀÁ¢»·¾³²¢°²×° Qwen3-TTS? (y/n): "
     if /i "!QWEN3TTS_CHOICE!"=="all" (
-        echo [OK] å·²é€‰æ‹© ALLï¼Œå®‰è£… Qwen3-TTSã€‚
+        echo [OK] ÒÑÑ¡Ôñ ALL£¬°²×° Qwen3-TTS¡£
         set "INSTALL_ALL_OPTIONAL=true"
         set "QWEN3TTS_CHOICE=y"
     )
@@ -502,64 +536,64 @@ if /i "!INSTALL_ALL_OPTIONAL!"=="true" (
 
 if /i "!QWEN3TTS_CHOICE!"=="y" (
     if not exist "%QWEN3TTS_REQ_FILE%" (
-        echo [ERROR] æ‰¾ä¸åˆ° %QWEN3TTS_REQ_FILE%ï¼Œè·³è¿‡ Qwen3-TTS å®‰è£…
+        echo [ERROR] ÕÒ²»µ½ %QWEN3TTS_REQ_FILE%£¬Ìø¹ý Qwen3-TTS °²×°
     ) else (
         set "QWEN3TTS_NEED_CREATE=1"
         set "QWEN3TTS_CREATE_FAILED=0"
 
         if exist "%QWEN3TTS_ENV_PREFIX%" (
-            echo [!] Qwen3-TTS çŽ¯å¢ƒå·²å­˜åœ¨: %QWEN3TTS_ENV_PREFIX%
-            set /p "QWEN3TTS_RECREATE=æ˜¯å¦åˆ é™¤å¹¶é‡æ–°åˆ›å»º? (y/n): "
+            echo [!] Qwen3-TTS »·¾³ÒÑ´æÔÚ: %QWEN3TTS_ENV_PREFIX%
+            set /p "QWEN3TTS_RECREATE=ÊÇ·ñÉ¾³ý²¢ÖØÐÂ´´½¨? (y/n): "
             if /i "!QWEN3TTS_RECREATE!"=="y" (
-                echo æ­£åœ¨åˆ é™¤æ—§ Qwen3-TTS çŽ¯å¢ƒ...
+                echo ÕýÔÚÉ¾³ý¾É Qwen3-TTS »·¾³...
                 call "%CONDA_BAT%" env remove -y -p "%QWEN3TTS_ENV_PREFIX%" >nul 2>&1
             ) else (
-                echo [OK] ä½¿ç”¨çŽ°æœ‰ Qwen3-TTS çŽ¯å¢ƒ
+                echo [OK] Ê¹ÓÃÏÖÓÐ Qwen3-TTS »·¾³
                 set "QWEN3TTS_NEED_CREATE=0"
             )
         )
 
         if "!QWEN3TTS_NEED_CREATE!"=="1" (
-            echo åˆ›å»º Qwen3-TTS ç‹¬ç«‹çŽ¯å¢ƒä¸­... è¯·è€å¿ƒç­‰å¾…ï¼ˆå¯èƒ½éœ€è¦å‡ åˆ†é’Ÿï¼‰...
+            echo ´´½¨ Qwen3-TTS ¶ÀÁ¢»·¾³ÖÐ... ÇëÄÍÐÄµÈ´ý£¨¿ÉÄÜÐèÒª¼¸·ÖÖÓ£©...
             call "%CONDA_BAT%" create -y -p "%QWEN3TTS_ENV_PREFIX%" -c conda-forge python=3.12 pip >nul 2>&1
             if errorlevel 1 (
-                echo [ERROR] Qwen3-TTS çŽ¯å¢ƒåˆ›å»ºå¤±è´¥ï¼Œå¯ç¨åŽæ‰‹åŠ¨æ‰§è¡Œï¼š
+                echo [ERROR] Qwen3-TTS »·¾³´´½¨Ê§°Ü£¬¿ÉÉÔºóÊÖ¶¯Ö´ÐÐ£º
                 echo     "%CONDA_BAT%" create -y -p "%QWEN3TTS_ENV_PREFIX%" -c conda-forge python=3.12 pip
                 set "QWEN3TTS_CREATE_FAILED=1"
             )
         )
 
         if "!QWEN3TTS_CREATE_FAILED!"=="0" (
-            echo [OK] Qwen3-TTS çŽ¯å¢ƒå·²å‡†å¤‡
-            echo [*] åœ¨ç‹¬ç«‹çŽ¯å¢ƒä¸­å®‰è£… Qwen3-TTS ä¾èµ–ï¼ˆå®‰è£…è¿‡ç¨‹ä¼šå®žæ—¶æ˜¾ç¤ºï¼‰...
+            echo [OK] Qwen3-TTS »·¾³ÒÑ×¼±¸
+            echo [*] ÔÚ¶ÀÁ¢»·¾³ÖÐ°²×° Qwen3-TTS ÒÀÀµ£¨°²×°¹ý³Ì»áÊµÊ±ÏÔÊ¾£©...
             call "%CONDA_BAT%" run --no-capture-output -p "%QWEN3TTS_ENV_PREFIX%" python -m pip install --upgrade pip setuptools wheel
             call "%CONDA_BAT%" run --no-capture-output -p "%QWEN3TTS_ENV_PREFIX%" python -m pip install -r "%QWEN3TTS_REQ_FILE%"
             if errorlevel 1 (
-                echo [ERROR] Qwen3-TTS ä¾èµ–å®‰è£…å¤±è´¥ï¼Œå¯ç¨åŽæ‰‹åŠ¨æ‰§è¡Œï¼š
+                echo [ERROR] Qwen3-TTS ÒÀÀµ°²×°Ê§°Ü£¬¿ÉÉÔºóÊÖ¶¯Ö´ÐÐ£º
                 echo     "%CONDA_BAT%" run -p "%QWEN3TTS_ENV_PREFIX%" python -m pip install -r "%QWEN3TTS_REQ_FILE%"
             ) else (
-                echo [OK] Qwen3-TTS ä¾èµ–å·²å®‰è£…
-                echo [OK] é¦–æ¬¡å¯åŠ¨ qwen3tts_server.py æ—¶ä¼šè‡ªåŠ¨ä¸‹è½½æ¨¡åž‹æƒé‡
+                echo [OK] Qwen3-TTS ÒÀÀµÒÑ°²×°
+                echo [OK] Ê×´ÎÆô¶¯ qwen3tts_server.py Ê±»á×Ô¶¯ÏÂÔØÄ£ÐÍÈ¨ÖØ
             )
         )
     )
 ) else (
-    echo [OK] å·²è·³è¿‡ï¼Œå¯åŽç»­æ‰‹åŠ¨è¿è¡Œä»¥ä¸‹å‘½ä»¤å®‰è£…ï¼š
+    echo [OK] ÒÑÌø¹ý£¬¿ÉºóÐøÊÖ¶¯ÔËÐÐÒÔÏÂÃüÁî°²×°£º
     echo     "%CONDA_BAT%" create -y -p "%CD%\.qwen3tts_env" -c conda-forge python=3.12 pip
     echo     "%CONDA_BAT%" run -p "%CD%\.qwen3tts_env" python -m pip install -r "%QWEN3TTS_REQ_FILE%"
 )
 
 REM -----------------------------------------------------------------
-REM ç»“æŸ
+REM ½áÊø
 REM -----------------------------------------------------------------
-cls
+
 echo.
 echo ================================================================================
-echo                        å®‰è£…å…¨éƒ¨å®Œæˆ
+echo                        °²×°È«²¿Íê³É
 echo ================================================================================
 echo.
-echo ä¸‹ä¸€æ­¥:
-echo    åŒå‡»è¿è¡Œ run.bat å³å¯å¯åŠ¨åº”ç”¨ç¨‹åºã€‚
+echo ÏÂÒ»²½:
+echo    Ë«»÷ÔËÐÐ run.bat ¼´¿ÉÆô¶¯Ó¦ÓÃ³ÌÐò¡£
 echo.
 pause
 exit /b 0
