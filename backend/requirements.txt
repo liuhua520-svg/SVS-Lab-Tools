@@ -36,14 +36,14 @@ montreal-forced-aligner==3.3.9
 # ModuleNotFoundError: No module named 'pgvector'。
 pgvector==0.3.6
 textgrid==1.5
-pypinyin==0.53.0
-pycantonese==5.0.0
-sudachipy==0.6.8
-sudachidict-core==20240409
-jamo==0.4.1
-nltk==3.10.2
-num2words==0.5.14
-g2p_en==2.1.0
+pypinyin>=0.53.0
+pycantonese>=5.0.0
+sudachipy>=0.6.8
+sudachidict-core>=20240409
+jamo>=0.4.1
+nltk>=3.10.2
+num2words>=0.5.14
+g2p_en>=2.1.0
 
 # 【修复】MFA 的 tokenization/spacy.py 在实际跑对齐前会按语言检查专用分词器
 # 是否已安装，缺哪个就直接报 ImportError 中断当前任务（不是安装失败，是运行
@@ -84,11 +84,11 @@ huggingface-hub==0.36.2
 # qwen-asr installed.
 
 # Traditional -> Simplified Chinese conversion
-opencc-python-reimplemented==0.1.7
+opencc-python-reimplemented>=0.1.7
 
 # Edge TTS / Windows SAPI helper
-edge-tts>==7.0
-pywin32>==306; sys_platform == "win32"
+edge-tts>=7.0.0
+pywin32>=306; sys_platform == "win32"
 
 # Project file formats
 ruamel.yaml==0.19.1
