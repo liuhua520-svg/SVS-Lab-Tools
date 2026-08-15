@@ -101,7 +101,7 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 #### LGPL-3.0（除 `srt_composer.py` 为 MIT）
 | 包名 | 版本 | 链接 |
 |------|------|------|
-| edge-tts | 7.2.8 | [GitHub](https://github.com/rany2/edge-tts) |
+| edge-tts | >7.0 | [GitHub](https://github.com/rany2/edge-tts) |
 
 > num2words 与 edge-tts 均以未修改的第三方库形式通过 pip 引入，未做二次
 > 分发或静态链接；LGPL 合规细节见 `THIRD-PARTY-NOTICES.txt` 第 4 节。
@@ -109,7 +109,7 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 #### PSF-2.0 License（仅 Windows，`sys_platform == "win32"`）
 | 包名 | 版本 | 链接 |
 |------|------|------|
-| pywin32 | 312 | [GitHub](https://github.com/mhammond/pywin32) |
+| pywin32 | >306 | [GitHub](https://github.com/mhammond/pywin32) |
 
 #### 多重许可证（tqdm）
 | 包名 | 版本 | 说明 | 链接 |
