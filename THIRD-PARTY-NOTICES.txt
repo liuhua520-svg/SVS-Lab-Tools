@@ -80,12 +80,12 @@ under one of them is not necessarily installed in every deployment.
   License: MIT
   Link: https://github.com/corydolphin/flask-cors
 
-- requests==2.34.2
+- requests
   Copyright (c) 2014 Kenneth Reitz
   License: Apache-2.0
   Link: https://github.com/psf/requests
 
-- tqdm==4.70.0
+- tqdm
   License: MIT AND MPL-2.0 (dual-licensed; project also references the
   original tqdm codebase which additionally carries a portion of its
   history under MPL-2.0)
@@ -220,7 +220,7 @@ under one of them is not necessarily installed in every deployment.
   separate copyright/license terms from the wrapper code itself.
 
 === TTS (EdgeTTS) / Windows SAPI helper ===
-- edge-tts==7.2.8
+- edge-tts>==7.0
   Copyright (c) 2014-2023 Christopher Down; Copyright (c) 2025- rany
   License: LGPL-3.0-or-later, except src/edge_tts/srt_composer.py which is
   MIT
@@ -229,7 +229,7 @@ under one of them is not necessarily installed in every deployment.
   LGPL compliance notes. This package drives both the "EdgeTTS" engine
   and, via pywin32 below, the "Narrator (Windows)" / SAPI5 engine.
 
-- pywin32==312 (Windows only; sys_platform == "win32")
+- pywin32>==306 (Windows only; sys_platform == "win32")
   Copyright (c) Mark Hammond and the pywin32 contributors
   License: PSF-2.0 (Python Software Foundation License)
   Link: https://github.com/mhammond/pywin32
