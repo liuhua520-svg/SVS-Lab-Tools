@@ -1685,16 +1685,12 @@ class MFAProcessor:
             ]
             
             timeout_seconds = 600 if lang in ('ja', 'ko') else 300
-            
-            env = os.environ.copy()
-            mfa_env_dir = MFAChecker.env_dir()
-            env["CONDA_PREFIX"] = str(mfa_env_dir)
-            lib_bin = mfa_env_dir / "Library" / "bin"
-            if lib_bin.exists():
-                env["PATH"] = str(lib_bin) + os.pathsep + env.get("PATH", "")
-            lib_dir = mfa_env_dir / "lib"
-            if lib_dir.exists():
-                env["LD_LIBRARY_PATH"] = str(lib_dir) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+
+            # 【修复 v2】统一走 build_kaldi_subprocess_env：设置 CONDA_PREFIX/
+            # PATH/LD_LIBRARY_PATH（.mfa_env + .kaldi_env）以及关键的
+            # KALDI_ROOT（kalpy-kaldi 靠这个定位 Kaldi 共享库，不是靠扫 PATH，
+            # 之前只设 PATH 在 Windows 上不够用）。
+            env = MFAChecker.build_kaldi_subprocess_env()
             
             # 用 Popen 而非 subprocess.run，这样调用方（app.py 的任务取消机制）
             # 可以拿到子进程句柄，在用户点击"停止"时直接 terminate，不必等
