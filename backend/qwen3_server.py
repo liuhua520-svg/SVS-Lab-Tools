@@ -59,6 +59,25 @@ FORCED_ALIGNER_ID = "Qwen/Qwen3-ForcedAligner-0.6B"
 _model = None
 _model_lock = threading.Lock()
 
+# ═════════════════════════════════════════════════════════════════════════
+# 独立的 Qwen3-ForcedAligner（强制对齐，已知文本→时间戳）模型槽位。
+#
+# 与上面的 _model（Qwen3ASRModel，语音→文本+时间戳）完全独立维护：
+#   - _model 内部虽然也挂了一个 forced_aligner 子组件（见 load_model()
+#     里 kwargs["forced_aligner"] = FORCED_ALIGNER_ID），但那是
+#     Qwen3ASRModel.transcribe() 在"转写"过程中内部调用的，接口是
+#     "音频→文字+时间戳"，不接受调用方传入参考文本；
+#   - 这里的 _fa_model 是 qwen_asr.Qwen3ForcedAligner 本身，接口是
+#     .align(audio=, text=, language=) → 已知文本对齐到音频，这是
+#     alt_aligners.py 里 Qwen3ForcedAligner（Qwen3-FA 客户端）真正需要
+#     的能力，因此必须单独 from_pretrained 加载，不能复用 _model。
+# 两个模型可以同时常驻显存/内存（各自独立缓存，互不清空对方），也可以
+# 只按需加载其中一个——具体取决于用户实际用到了哪个功能。
+# ═════════════════════════════════════════════════════════════════════════
+_fa_model = None
+_fa_model_lock = threading.Lock()
+_fa_model_device: str = "auto"
+
 # 当前 HTTP server 实例（在 __main__ 里用 werkzeug.serving.make_server 创建），
 # /restart 需要拿到它才能在重启前"干净地"关闭监听端口，见 restart() 里的说明。
 _httpd = None
@@ -399,6 +418,74 @@ def load_model(device_override: str = "auto", batch_size: int = 8):
             return None
 
 
+def load_forced_aligner(device_override: str = "auto"):
+    """
+    惰性加载并缓存独立的 Qwen3-ForcedAligner 模型（.align() 接口，见上方
+    _fa_model 说明）。逻辑与 load_model() 对称，但没有 batch_size 这个轴
+    ——Qwen3-ForcedAligner 官方接口本身不支持按批调用，每次都是单条音频
+    单次前向，这一点与 alt_aligners.py 里 Qwen3ForcedAligner._load_model()
+    的注释保持一致（迁移到这里之前，那份注释本身就是这么写的）。
+    """
+    global _fa_model, _fa_model_device
+
+    with _fa_model_lock:
+        if _fa_model is not None and _fa_model_device == device_override:
+            return _fa_model
+
+        if _fa_model is not None:
+            logger.info(
+                f"[Qwen3-FA] 配置从 device='{_fa_model_device}' 变为 "
+                f"device='{device_override}'，重新加载模型..."
+            )
+            _fa_model = None
+            try:
+                import torch as _torch_reload
+                if _torch_reload.cuda.is_available():
+                    _torch_reload.cuda.empty_cache()
+            except Exception:
+                pass
+
+        logger.info("正在初始化 Qwen3-ForcedAligner 服务...")
+        device_map, dtype = _pick_device_and_dtype(device_override)
+        logger.info(f"[Qwen3-FA] 使用设备: {device_map}, dtype: {dtype}")
+
+        from qwen_asr import Qwen3ForcedAligner as Qwen3FA
+
+        try:
+            _fa_model = Qwen3FA.from_pretrained(
+                FORCED_ALIGNER_ID, dtype=dtype, device_map=device_map,
+            )
+            _fa_model_device = device_map
+            logger.info("✅ Qwen3-ForcedAligner 模型加载成功！服务已就绪。")
+            return _fa_model
+        except Exception as e:
+            # 与 load_model() 同样的道理：加载阶段本身也可能因为显存不足
+            # 或 CUDA 环境问题失败，命中时自动整体切换到 CPU 重新加载。
+            if device_map.startswith("cuda") and _is_cuda_oom_or_env_error(e):
+                logger.warning(f"⚠️  在 GPU 上加载 Qwen3-ForcedAligner 失败（{e}），自动切换到 CPU 重新加载...")
+                try:
+                    import torch as _torch_oom
+                    if _torch_oom.cuda.is_available():
+                        _torch_oom.cuda.empty_cache()
+                except Exception:
+                    pass
+                try:
+                    _fa_model = Qwen3FA.from_pretrained(
+                        FORCED_ALIGNER_ID, dtype=__import__("torch").float32, device_map="cpu",
+                    )
+                    _fa_model_device = "cpu"
+                    logger.info("✅ Qwen3-ForcedAligner 模型加载成功（已回退到 CPU）！服务已就绪。")
+                    return _fa_model
+                except Exception as e2:
+                    logger.error(f"❌ CPU 兜底加载仍然失败: {e2}", exc_info=True)
+                    _fa_model = None
+                    return None
+
+            logger.error(f"❌ Qwen3-ForcedAligner 模型加载失败: {e}", exc_info=True)
+            _fa_model = None
+            return None
+
+
 @app.get("/")
 def health():
     return jsonify(
@@ -567,6 +654,91 @@ def asr():
 
     except Exception as e:
         logger.error(f"推理失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.post("/align")
+def align():
+    """
+    独立强制对齐接口：已知文本 + 音频 → 该段音频自身时间轴（从 0 开始）
+    上的逐 token 时间戳，供 alt_aligners.py 里的 Qwen3ForcedAligner
+    客户端调用（替代此前直接 import qwen_asr 在 .mfa_env 里本地加载模型
+    的做法，见该类顶部注释）。
+
+    这里只做"调用模型拿原始结果"这一件事，分句/分块规划、退化区间检测
+    与自愈修复、LAB 文本组装等后处理逻辑全部保留在客户端（alt_aligners.py
+    的 Qwen3ForcedAligner 类里），不搬过来——那些逻辑不依赖 qwen_asr，
+    没有理由拉长每次 HTTP 往返，也避免这个服务进程和客户端进程的后处理
+    逻辑出现两份、日后改一处忘改另一处。
+    """
+    data = request.get_json(force=True) or {}
+
+    device_override = data.get("device", "auto")
+    if device_override not in ("auto", "cpu", "cuda"):
+        device_override = "auto"
+
+    audio_path = data.get("audio")
+    text = data.get("text")
+    language = data.get("language")
+
+    if not audio_path:
+        return jsonify({"success": False, "error": "缺少 audio 参数"}), 400
+    if not text:
+        return jsonify({"success": False, "error": "缺少 text 参数"}), 400
+
+    audio_path = str(audio_path)
+    if not Path(audio_path).exists():
+        return jsonify({"success": False, "error": "音频文件不存在"}), 400
+
+    model = load_forced_aligner(device_override)
+    if model is None:
+        return jsonify({"success": False, "error": "模型未加载"}), 500
+
+    try:
+        # 官方接口：results[0][0].text / start_time / end_time
+        #
+        # 【显存不足自动降级】与 /asr 同样的道理：加载阶段成功不代表推理
+        # 阶段一定成功，命中 CUDA OOM / 环境错误时整体切换到 CPU 重新
+        # 加载模型再重试一次。Qwen3-ForcedAligner 官方接口本身没有
+        # batch_size 可调（每次都是单条音频单次前向），所以这里只有一级
+        # 降级（直接切 CPU），不像 /asr 那样先腰斩批大小再切 CPU。
+        try:
+            results = model.align(audio=audio_path, text=text, language=language)
+        except Exception as e:
+            if not _is_cuda_oom_or_env_error(e):
+                raise
+            logger.warning(f"[Qwen3-FA] 推理失败（{e}），自动切换到 CPU 重新加载并重试...")
+            try:
+                import torch as _torch_oom
+                if _torch_oom.cuda.is_available():
+                    _torch_oom.cuda.empty_cache()
+            except Exception:
+                pass
+            model = load_forced_aligner("cpu")
+            if model is None:
+                return jsonify({"success": False, "error": "显存不足自动降级后模型仍加载失败"}), 500
+            results = model.align(audio=audio_path, text=text, language=language)
+
+        items = results[0] if results else []
+        entries = [
+            {
+                "text": getattr(item, "text", "") or "",
+                "start_time": float(item.start_time),
+                "end_time": float(item.end_time),
+            }
+            for item in items
+        ]
+
+        return jsonify(
+            {
+                "success": True,
+                "entries": entries,
+                "model_id": FORCED_ALIGNER_ID,
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"[Qwen3-FA] 对齐失败: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
 

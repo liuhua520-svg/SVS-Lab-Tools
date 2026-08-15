@@ -17,8 +17,8 @@ torchaudio==2.3.1+cpu
 # Web/API
 flask==2.3.3
 flask-cors==4.0.0
-requests
-tqdm
+requests==2.34.2
+tqdm==4.70.0
 
 # Audio / DSP
 soundfile==0.12.1
@@ -69,6 +69,19 @@ ctranslate2==4.4.0
 transformers==4.39.3
 tokenizers==0.15.2
 huggingface-hub==0.36.2
+
+# NOTE: qwen-asr is intentionally NOT installed here (removed — previously
+# caused `pip install -r requirements.txt` to fail with ResolutionImpossible:
+# qwen-asr==0.0.6 hard-pins transformers==4.57.6, which directly conflicts
+# with transformers==4.39.3 required above for whisperx/faster-whisper, and
+# every published qwen-asr version (0.0.1-0.0.6) pins the same transformers
+# version, so no amount of pip backtracking can satisfy both at once).
+# Qwen3-FA (forced alignment) and Qwen3-ASR now BOTH run exclusively inside
+# the separate qwen3_server.py process (.qwen3_env, see requirements-qwen3.txt)
+# and are called over HTTP on 127.0.0.1:5001 — alt_aligners.py's
+# Qwen3ForcedAligner class is a thin HTTP client (POST /align), matching the
+# pattern Qwen3ASRAligner (POST /asr) already used. This env never needs
+# qwen-asr installed.
 
 # Traditional -> Simplified Chinese conversion
 opencc-python-reimplemented==0.1.7
