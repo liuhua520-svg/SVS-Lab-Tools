@@ -51,9 +51,9 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 | flask-cors | 4.0.0 | [GitHub](https://github.com/corydolphin/flask-cors) |
 | montreal-forced-aligner | 3.3.9 | [GitHub](https://github.com/MontrealCorpusTools/Montreal-Forced-Aligner) |
 | textgrid | 1.5 | [GitHub](https://github.com/kylebgorman/textgrid) |
-| pypinyin | 0.53.0 | [GitHub](https://github.com/mozillazg/python-pinyin) |
-| pycantonese | 5.0.0 | [GitHub](https://github.com/pycantonese/pycantonese) |
-| jamo | 0.4.1 | [GitHub](https://github.com/JDongian/python-jamo) |
+| pypinyin | >0.53.0 | [GitHub](https://github.com/mozillazg/python-pinyin) |
+| pycantonese | >5.0.0 | [GitHub](https://github.com/pycantonese/pycantonese) |
+| jamo | >0.4.1 | [GitHub](https://github.com/JDongian/python-jamo) |
 | pyworld | 0.3.5 | [GitHub](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder) |
 | torchcrepe | 0.0.24 | [GitHub](https://github.com/maxrmorrison/torchcrepe) |
 | ctranslate2 | 4.4.0 | [GitHub](https://github.com/OpenNMT/CTranslate2) |
@@ -83,12 +83,12 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 #### Apache License 2.0
 | 包名 | 版本 | 链接 |
 |------|------|------|
-| requests | 2.34.2 | [GitHub](https://github.com/psf/requests) |
-| sudachipy | 0.6.8 | [GitHub](https://github.com/WorksApplications/sudachi) |
-| sudachidict-core | 20240409 | [GitHub](https://github.com/WorksApplications/SudachiDict) |
-| nltk | 3.10.2 | [GitHub](https://github.com/nltk/nltk) |
-| g2p_en | 2.1.0 | [GitHub](https://github.com/Kyubyong/g2p) |
-| opencc-python-reimplemented | 0.1.7 | [PyPI](https://pypi.org/project/opencc-python-reimplemented/) |
+| requests | >2.34.2 | [GitHub](https://github.com/psf/requests) |
+| sudachipy | >0.6.8 | [GitHub](https://github.com/WorksApplications/sudachi) |
+| sudachidict-core | >20240409 | [GitHub](https://github.com/WorksApplications/SudachiDict) |
+| nltk | >3.10.2 | [GitHub](https://github.com/nltk/nltk) |
+| g2p_en | >2.1.0 | [GitHub](https://github.com/Kyubyong/g2p) |
+| opencc-python-reimplemented | >0.1.7 | [PyPI](https://pypi.org/project/opencc-python-reimplemented/) |
 | transformers | 4.39.3 | [GitHub](https://github.com/huggingface/transformers) |
 | tokenizers | 0.15.2 | [GitHub](https://github.com/huggingface/tokenizers) |
 | huggingface-hub | 0.36.2 | [GitHub](https://github.com/huggingface/huggingface_hub) |
@@ -96,12 +96,12 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 #### LGPL-2.1-or-later
 | 包名 | 版本 | 链接 |
 |------|------|------|
-| num2words | 0.5.14 | [GitHub](https://github.com/savoirfairelinux/num2words) |
+| >num2words | 0.5.14 | [GitHub](https://github.com/savoirfairelinux/num2words) |
 
 #### LGPL-3.0（除 `srt_composer.py` 为 MIT）
 | 包名 | 版本 | 链接 |
 |------|------|------|
-| edge-tts | >7.0 | [GitHub](https://github.com/rany2/edge-tts) |
+| edge-tts | >7.0.0 | [GitHub](https://github.com/rany2/edge-tts) |
 
 > num2words 与 edge-tts 均以未修改的第三方库形式通过 pip 引入，未做二次
 > 分发或静态链接；LGPL 合规细节见 `THIRD-PARTY-NOTICES.txt` 第 4 节。
@@ -114,7 +114,7 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 #### 多重许可证（tqdm）
 | 包名 | 版本 | 说明 | 链接 |
 |------|------|------|------|
-| tqdm | 4.70.0 | MIT AND MPL-2.0 | [GitHub](https://github.com/tqdm/tqdm) |
+| tqdm | >4.70.0 | MIT AND MPL-2.0 | [GitHub](https://github.com/tqdm/tqdm) |
 
 ---
 
