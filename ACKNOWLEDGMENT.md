@@ -98,7 +98,7 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 |------|------|------|
 | num2words | 0.5.14 | [GitHub](https://github.com/savoirfairelinux/num2words) |
 
-#### LGPL-3.0-or-later（除 `srt_composer.py` 为 MIT）
+#### LGPL-3.0（除 `srt_composer.py` 为 MIT）
 | 包名 | 版本 | 链接 |
 |------|------|------|
 | edge-tts | 7.2.8 | [GitHub](https://github.com/rany2/edge-tts) |
