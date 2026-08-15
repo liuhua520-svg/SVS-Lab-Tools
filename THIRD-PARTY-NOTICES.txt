@@ -1,6 +1,12 @@
 THIRD-PARTY-NOTICES
 
-This repository includes third-party software and data packages in addition to the project source code.
+This repository includes third-party software in addition to the project
+source code. This notice is generated from the four backend dependency
+manifests (backend/requirements.txt, backend/requirements-nemo.txt,
+backend/requirements-qwen3.txt, backend/requirements-qwen3tts.txt) and
+frontend/package.json, and was verified against each package's published
+license metadata (PyPI project page / npm registry / upstream repository
+LICENSE file) as of the date in section 9 below.
 
 Project source code:
 - Repository: liuhua520-svg/SVS-Lab-Tools
@@ -20,11 +26,50 @@ See the repository LICENSE file for the full text of the MIT License.
 
 --------------------------------------------------------------------
 
-2. Third-party Dependencies
+2. How this project uses third-party software
 
-Based on backend/requirements.txt
+SVS Lab Tools runs as four separate Python processes, each with its own
+dependency set, to avoid version conflicts between packages that pin
+incompatible transitive dependencies (see the comments at the top of each
+requirements file for details):
 
-=== 核心框架 ===
+- Main backend (backend/requirements.txt)       -> app.py, port 5000
+- Qwen3-ASR / Qwen3-ForcedAligner (backend/requirements-qwen3.txt)
+                                                 -> qwen3_server.py, port 5001
+- NVIDIA NeMo Forced Aligner (backend/requirements-nemo.txt)
+                                                 -> nemo_server.py, port 5002
+- Qwen3-TTS (backend/requirements-qwen3tts.txt) -> qwen3tts_server.py, port 5003
+
+The three optional service environments (Qwen3-ASR/FA, NeMo, Qwen3-TTS) are
+only required if the corresponding feature is enabled; a package listed
+under one of them is not necessarily installed in every deployment.
+
+--------------------------------------------------------------------
+
+3. Python dependencies - Main backend (backend/requirements.txt)
+
+=== Core / numerics ===
+- numpy==1.26.4
+  License: BSD-3-Clause
+  Link: https://github.com/numpy/numpy
+
+- setuptools==81.0.0
+  License: MIT
+  Link: https://github.com/pypa/setuptools
+
+=== PyTorch ===
+- torch==2.3.1 (+cpu build)
+  Copyright (c) 2016- Facebook, Inc and PyTorch contributors
+  License: BSD-3-Clause
+  Link: https://github.com/pytorch/pytorch
+  Note: NVIDIA CUDA/cuDNN redistributables pulled in by GPU builds are
+  covered by NVIDIA's own license terms, not this project's license.
+
+- torchaudio==2.3.1 (+cpu build)
+  License: BSD-2-Clause
+  Link: https://github.com/pytorch/audio
+
+=== Web / API ===
 - flask==2.3.3
   Copyright 2010 Pallets
   License: BSD-3-Clause
@@ -35,24 +80,64 @@ Based on backend/requirements.txt
   License: MIT
   Link: https://github.com/corydolphin/flask-cors
 
-=== MFA 对齐 ===
+- requests==2.34.2
+  Copyright (c) 2014 Kenneth Reitz
+  License: Apache-2.0
+  Link: https://github.com/psf/requests
+
+- tqdm==4.70.0
+  License: MIT AND MPL-2.0 (dual-licensed; project also references the
+  original tqdm codebase which additionally carries a portion of its
+  history under MPL-2.0)
+  Link: https://github.com/tqdm/tqdm
+
+=== Audio / DSP ===
+- soundfile==0.12.1
+  Copyright (c) 2013-2024 Bastian Bechtold
+  License: BSD-3-Clause
+  Link: https://github.com/bastibe/python-soundfile
+
+- librosa==0.11.0
+  License: ISC
+  Link: https://github.com/librosa/librosa
+
+- resampy==0.4.3
+  Copyright (c) Brian McFee
+  License: ISC
+  Link: https://github.com/bmcfee/resampy
+
+- pyworld==0.3.5
+  License: MIT
+  Link: https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder
+  Note: Python wrapper around Morise et al.'s WORLD vocoder (BSD-style
+  license upstream); see the wrapper repository for details.
+
+- torchcrepe==0.0.24
+  Copyright (c) 2020 Max Morrison / Descript
+  License: MIT
+  Link: https://github.com/maxrmorrison/torchcrepe
+
+=== MFA / forced alignment / text processing ===
 - montreal-forced-aligner==3.3.9
-  Copyright (c) 2017 Montreal Corpus Tools
+  Copyright (c) Montreal Corpus Tools
   License: MIT
   Link: https://github.com/MontrealCorpusTools/Montreal-Forced-Aligner
+  Note: MFA depends on Kaldi (Apache-2.0) and, on this project's setup
+  path, kalpy/Kaldi are installed via conda-forge rather than pip; consult
+  https://github.com/kaldi-asr/kaldi for Kaldi's own license and
+  third-party notices if redistributing a bundled MFA/Kaldi environment.
 
 - textgrid==1.5
   Copyright (c) 2011-2023 Kyle Gorman
   License: MIT
   Link: https://github.com/kylebgorman/textgrid
 
-=== 语言支持 ===
 - pypinyin==0.53.0
   Copyright (c) 2014 mozillazg
   License: MIT
   Link: https://github.com/mozillazg/python-pinyin
 
-- pycantonese>=0.1.0
+- pycantonese==5.0.0
   Copyright (c) 2014-2024 Jackson Lee
   License: MIT
   Link: https://github.com/pycantonese/pycantonese
@@ -72,277 +157,307 @@ Based on backend/requirements.txt
   License: MIT
   Link: https://github.com/JDongian/python-jamo
 
-- opencc-python-reimplemented>=0.1.7
-  Copyright (c) Yichen Huang (Eugene)
+- nltk==3.10.2
+  License: Apache-2.0 (source code; NLTK's own documentation is
+  separately licensed CC BY-NC-ND, which is not redistributed by this
+  project)
+  Link: https://github.com/nltk/nltk
+  Note: nltk.download() fetches corpora/tokenizer data at runtime under
+  their own, individually-specified licenses; see section 6.
+
+- num2words==0.5.14
+  Copyright (c) Savoir-faire Linux and contributors
+  License: LGPL-2.1-or-later
+  Link: https://github.com/savoirfairelinux/num2words
+  Note: used as an unmodified library dependency (dynamic import), not
+  statically linked or modified; see section 4 for LGPL compliance notes.
+
+- g2p_en==2.1.0
+  Copyright (c) 2019 Kyubyong Park & Jongseok Kim
   License: Apache-2.0
-  Link: https://pypi.org/project/opencc-python-reimplemented/
+  Link: https://github.com/Kyubyong/g2p
 
-  Note:
-    Pure Python implementation of OpenCC.
-    Uses dictionary files originally developed by BYVoid.
-    Dictionary data may have separate copyright and license terms.
-
-=== 音频处理 ===
-- soundfile==0.12.1
-  Copyright (c) 2013-2024 Bastian Bechtold
-  License: MIT / LGPL-2.1
-  Link: https://github.com/bastibe/python-soundfile
-
-- librosa>=0.10.0
-  Copyright (c) 2015-2024 librosa developers
-  License: ISC
-  Link: https://github.com/librosa/librosa
-
-- numpy>=1.26.0,<2.0.0
-  Copyright (c) 2005-2023, NumPy Developers
-  License: BSD-3-Clause
-  Link: https://numpy.org/doc/stable/license.html
-
-=== F0 提取 ===
-- pyworld>=0.3.4
-  Copyright (c) 2016-2024 Jeremy C.H. Hsu
-  License: MIT
-  Link: https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder
-
-- torchcrepe==0.0.24
-  Copyright (c) 2020 Descript
-  License: MIT
-  Link: https://github.com/descriptinc/torchcrepe
-
-=== PyTorch ===
-- torch>=2.3.1
-  Copyright (c) 2016-2024, Facebook Inc.
-  License: BSD-3-Clause
-  Link: https://github.com/pytorch/pytorch
-
-  Note:
-  GPU acceleration packages provided by NVIDIA
-  are distributed under their own licenses.
-
-- torchaudio>=2.0.0
-  Copyright (c) 2017-2024, Facebook Inc.
-  License: BSD-2-Clause
-  Link: https://github.com/pytorch/audio
-
-=== 替代对齐后端 ===
-- whisperx>=3.2.0
+=== Alternate alignment backend (WhisperX) ===
+- whisperx==3.2.0
   Copyright (c) 2023 Max Bain
   License: BSD-2-Clause
   Link: https://github.com/m-bain/whisperX
+  Note: WhisperX source is BSD-2-Clause; alignment/ASR models it downloads
+  at runtime may carry different licenses depending on the selected model
+  and language (see section 6).
 
-  Note:
-  WhisperX source code is BSD-2-Clause.
-  Alignment models downloaded at runtime may use different
-  licenses depending on the selected language.
-
-- funasr>=1.1.0
-  Copyright (c) Alibaba Speech Lab
+- ctranslate2==4.4.0
+  Copyright (c) OpenNMT authors
   License: MIT
-  Link: https://github.com/modelscope/FunASR
+  Link: https://github.com/OpenNMT/CTranslate2
 
-  Note:
-  FunASR source code is licensed under the MIT License.
-  Pretrained models downloaded at runtime may be subject to
-  separate model licenses.
-
-- modelscope>=1.9.0
-  Copyright (c) 2021-2024 ModelScope
+- transformers==4.39.3
+  Copyright (c) Hugging Face
   License: Apache-2.0
-  Link: https://github.com/modelscope/modelscope
+  Link: https://github.com/huggingface/transformers
+  Note: this exact version is pinned in the main backend environment only
+  to satisfy WhisperX 3.2.0 / faster-whisper 1.0.0's compatibility
+  requirements; a newer, unrelated pin is used in the Qwen3-ASR and
+  Qwen3-TTS service environments (see sections 5.1 and 5.3).
 
-- accelerate>=0.27.0
+- tokenizers==0.15.2
+  Copyright (c) Hugging Face
+  License: Apache-2.0
+  Link: https://github.com/huggingface/tokenizers
+
+- huggingface-hub==0.36.2
+  Copyright (c) Hugging Face
+  License: Apache-2.0
+  Link: https://github.com/huggingface/huggingface_hub
+
+=== Traditional <-> Simplified Chinese conversion ===
+- opencc-python-reimplemented==0.1.7
+  Copyright (c) Yichen Huang (Eugene)
+  License: Apache-2.0
+  Link: https://pypi.org/project/opencc-python-reimplemented/
+  Note: pure-Python reimplementation of OpenCC; bundles dictionary data
+  originally developed by the OpenCC / BYVoid project, which may carry
+  separate copyright/license terms from the wrapper code itself.
+
+=== TTS (EdgeTTS) / Windows SAPI helper ===
+- edge-tts==7.2.8
+  Copyright (c) 2014-2023 Christopher Down; Copyright (c) 2025- rany
+  License: LGPL-3.0-or-later, except src/edge_tts/srt_composer.py which is
+  MIT
+  Link: https://github.com/rany2/edge-tts
+  Note: used as an unmodified library dependency; see section 4 for
+  LGPL compliance notes. This package drives both the "EdgeTTS" engine
+  and, via pywin32 below, the "Narrator (Windows)" / SAPI5 engine.
+
+- pywin32==312 (Windows only; sys_platform == "win32")
+  Copyright (c) Mark Hammond and the pywin32 contributors
+  License: PSF-2.0 (Python Software Foundation License)
+  Link: https://github.com/mhammond/pywin32
+
+=== Project file formats ===
+- ruamel.yaml==0.19.1
+  Copyright (c) Anthon van der Neut
+  License: MIT
+  Link: https://sourceforge.net/projects/ruamel-yaml/ (PyPI:
+  https://pypi.org/project/ruamel.yaml/)
+
+- mido==1.3.3
+  Copyright (c) 2013-2024 Ole Martin Bjorndalen
+  License: MIT
+  Link: https://github.com/mido/mido
+
+--------------------------------------------------------------------
+
+4. LGPL compliance note (num2words, edge-tts)
+
+num2words (LGPL-2.1-or-later) and edge-tts (LGPL-3.0-or-later, except the
+MIT-licensed srt_composer.py) are both consumed as ordinary, unmodified
+Python library dependencies via pip/PyPI - this project does not fork,
+statically link, or embed their source. Under LGPL section 6 (v2.1) /
+section 4 (v3.0), using an unmodified LGPL library in this way, and
+allowing the end user to independently upgrade or replace that library
+(e.g. by running `pip install -U num2words` / `pip install -U edge-tts` in
+the project's virtual environment), satisfies the license's linking
+requirements without imposing LGPL obligations on this project's own
+MIT-licensed source code. If you redistribute a bundled/frozen build (for
+example, one produced by the PyInstaller packaging path referenced in
+launcher.py) rather than the raw Python source, retain this notice and
+the ability to relink/replace these two libraries, and consult the full
+LGPL-2.1 and LGPL-3.0 texts at
+https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html and
+https://www.gnu.org/licenses/lgpl-3.0.html for your specific distribution
+scenario.
+
+--------------------------------------------------------------------
+
+5. Python dependencies - Optional service environments
+
+These packages are only installed in their respective dedicated conda
+environments (see the usage comment near the top of each requirements
+file) and are not part of the main backend environment.
+
+--- 5.1 Qwen3-ASR / Qwen3-ForcedAligner (backend/requirements-qwen3.txt) ---
+
+- flask==2.3.3            -> see section 3 (BSD-3-Clause)
+- numpy==1.26.4            -> see section 3 (BSD-3-Clause)
+- soundfile==0.12.1        -> see section 3 (BSD-3-Clause)
+- requests                 -> see section 3 (Apache-2.0)
+- tqdm                     -> see section 3 (MIT AND MPL-2.0)
+- torch==2.3.1 (+cpu build) -> see section 3 (BSD-3-Clause)
+
+- qwen-asr==0.0.6
+  Copyright (c) Alibaba Qwen Team
+  License: Apache-2.0 (package source code)
+  Link: https://github.com/QwenLM/Qwen3-ASR
+  Note: Qwen3-ASR-1.7B/0.6B and Qwen3-ForcedAligner-0.6B model weights are
+  downloaded separately at runtime and are distributed under their own
+  Apache-2.0 model license from Alibaba Cloud; see section 6.
+
+- transformers==4.57.6
+  License: Apache-2.0 (see section 3)
+  Note: this is qwen-asr's own precisely-pinned requirement and is
+  intentionally a different exact version from the transformers pin used
+  elsewhere in this project (see the note in section 3); kept in a
+  separate environment to avoid version conflicts.
+
+- accelerate==1.12.0
   Copyright (c) 2022-2024 The Hugging Face team
   License: Apache-2.0
   Link: https://github.com/huggingface/accelerate
 
-- g2p_en>=0.3.1
-  Copyright (c) 2017 Kyubyong Park
-  License: MIT
-  Link: https://github.com/Kyubyong/g2p
+--- 5.2 NVIDIA NeMo Forced Aligner (backend/requirements-nemo.txt) ---
 
-=== MIDI ===
-- mido>=1.3.0
-  Copyright (c) 2013-2024 Ole Martin Bjørndalen
-  License: MIT
-  Link: https://github.com/SpotlightKid/mido
+- flask==2.3.3             -> see section 3 (BSD-3-Clause)
+- soundfile==0.12.1         -> see section 3 (BSD-3-Clause)
+- requests, tqdm            -> see section 3
+- torch==2.6.0 / torchaudio==2.6.0 (+cpu build, or a CUDA build per the
+  commented-out options in the file) -> see section 3 (BSD-3-Clause /
+  BSD-2-Clause)
 
-=== TTS模块 ===
-- edge-tts >= 7.0
-  Copyright (c) 2014-2023 Christopher Down
-  Copyright (c) 2025- rany <rany@riseup.net>
-
-  License:
-  - LGPL-3.0 (all source files except srt_composer.py)
-  - MIT (src/edge_tts/srt_composer.py only)
-
-  Link: https://github.com/rany2/edge-tts
-
-- qwen-tts
-  Copyright (c) Alibaba Qwen Team
-  License: Apache-2.0
-  Link: https://github.com/QwenLM/Qwen3-TTS
-
-  Note:
-  Qwen3-TTS model weights
-  are distributed under separate model license terms.
-
-=== Windows 支持 ===
-
-- pywin32>=306; sys_platform == "win32"
-  Copyright (c) Mark Hammond et al.
-  License: PSF-2.0 (Python Software Foundation License)
-  Link: https://github.com/mhammond/pywin32
-
-=== 其他 ===
-- requests
-  Copyright (c) 2014 Kenneth Reitz
-  License: Apache-2.0
-  Link: https://github.com/psf/requests
-
-- tqdm
-  Copyright (c) 2013-2024 Noam Yorav-Raphael
-  License: MIT
-  Link: https://github.com/tqdm/tqdm
-
-=== Qwen3-ASR / Qwen3-ForcedAligner ===
-- qwen-asr>=1.0.0
-  Copyright (c) Alibaba Qwen Team
-  License: Apache-2.0
-  Link: https://github.com/QwenLM/Qwen3-ASR
-
-  Note:
-  Qwen3-ASR and Qwen3-ForcedAligner model weights
-  are distributed under separate model license terms.
-
-- transformers>=4.40.0
-  Copyright (c) Hugging Face
-  License: Apache-2.0
-  Link: https://github.com/huggingface/transformers
-
-=== NVIDIA NeMo ===
-
-- nemo_toolkit[asr]>=2.7.0,<2.8.0
+- nemo_toolkit[asr]==2.7.3
   Copyright (c) NVIDIA Corporation
   License: Apache-2.0
   Link: https://github.com/NVIDIA-NeMo/Speech
+  Note: this package pulls in a large transitive dependency tree
+  (packaging, fsspec, omegaconf, hydra-core, lightning, etc., each under
+  its own permissive license) which is why this project isolates it into
+  its own conda environment rather than installing it into the main
+  backend environment. Downloaded pretrained models and any NVIDIA
+  runtime/CUDA components used with this package are governed by their
+  own separate licenses, not by nemo_toolkit's Apache-2.0 license.
 
-  Note:
-  Downloaded pretrained models and NVIDIA runtime
-  components may have separate licenses.
+--- 5.3 Qwen3-TTS (backend/requirements-qwen3tts.txt) ---
+
+- flask==2.3.3              -> see section 3 (BSD-3-Clause)
+- numpy==1.26.4              -> see section 3 (BSD-3-Clause)
+- soundfile>=0.12.1          -> see section 3 (BSD-3-Clause)
+- requests, tqdm             -> see section 3
+- torch==2.3.1 / torchaudio==2.3.1 (+cpu build) -> see section 3
+
+- torchvision==0.18.1 (+cpu build)
+  Copyright (c) Soumith Chintala 2016, PyTorch contributors
+  License: BSD-3-Clause
+  Link: https://github.com/pytorch/vision
+
+- qwen-tts==0.1.1
+  Copyright (c) Alibaba Qwen Team
+  License: Apache-2.0 (package source code)
+  Link: https://github.com/QwenLM/Qwen3-TTS
+  Note: Qwen3-TTS-12Hz CustomVoice / VoiceDesign / Base (voice-clone)
+  model weights are downloaded separately at runtime and distributed
+  under their own Apache-2.0 model license from Alibaba Cloud; see
+  section 6.
+
+- transformers==4.57.3
+  License: Apache-2.0 (see section 3)
+  Note: this is qwen-tts's own precisely-pinned requirement; deliberately
+  kept in a separate environment from the Qwen3-ASR service (which pins a
+  different exact transformers version) to avoid the two packages'
+  independent pins conflicting in a shared environment.
+
+- accelerate==1.12.0
+  License: Apache-2.0 (see section 5.1)
 
 --------------------------------------------------------------------
 
-3. Frontend Dependencies (package.json)
+6. Downloaded models, dictionaries, and corpora (runtime, not bundled)
+
+This project's various components automatically download additional
+resources at runtime that are NOT part of this repository's source
+distribution and are NOT covered by this project's MIT license:
+
+- Montreal Forced Aligner acoustic models and pronunciation dictionaries
+  (downloaded via `mfa model download ...`)
+- WhisperX alignment / ASR models
+- Qwen3-ASR-1.7B / Qwen3-ASR-0.6B model weights (Apache-2.0, Alibaba
+  Cloud / Qwen Team)
+- Qwen3-ForcedAligner-0.6B model weights (Apache-2.0, Alibaba Cloud /
+  Qwen Team)
+- Qwen3-TTS-12Hz CustomVoice / VoiceDesign / Base model weights and the
+  Qwen3-TTS-Tokenizer-12Hz (Apache-2.0, Alibaba Cloud / Qwen Team)
+- NVIDIA NeMo Forced Aligner pretrained models
+- nltk corpora/tokenizer data fetched via nltk.download()
+- SudachiDict dictionary data (bundled via the sudachidict-core package
+  itself, Apache-2.0 - see section 3)
+- Any Microsoft Edge neural voices used through EdgeTTS, and any Windows
+  SAPI5 voices used through the "Narrator (Windows)" engine, are cloud/OS
+  services and are not distributed with this project at all.
+
+Unless explicitly bundled with this project's own release artifacts,
+these resources are downloaded on demand from their official sources at
+first use and remain subject to their own, individually stated licenses -
+review each resource's license before redistributing it alongside this
+project.
+
+--------------------------------------------------------------------
+
+7. Frontend dependencies (frontend/package.json)
 
 === MIT License ===
-
-- vue (^3.3.4)
-  Copyright (c) Vue.js contributors
-  License: MIT
+- vue (^3.3.4) - Copyright (c) Vue.js contributors
   Link: https://github.com/vuejs/core
-
-- element-plus (^2.4.1)
-  Copyright (c) Element Plus contributors
-  License: MIT
+- element-plus (^2.4.1) - Copyright (c) Element Plus contributors
   Link: https://github.com/element-plus/element-plus
-
-- @element-plus/icons-vue (^2.1.0)
-  Copyright (c) Element Plus contributors
-  License: MIT
+- @element-plus/icons-vue (^2.1.0) - Copyright (c) Element Plus contributors
   Link: https://github.com/element-plus/element-plus
-
-- axios (^1.5.0)
-  Copyright (c) Matt Zabriskie and contributors
-  License: MIT
+- axios (^1.5.0) - Copyright (c) Matt Zabriskie and contributors
   Link: https://github.com/axios/axios
-
-- vue-i18n (^11.4.6)
-  Copyright (c) Kazuya Kawaguchi and contributors
-  License: MIT
+- vue-i18n (^11.4.6) - Copyright (c) Kazuya Kawaguchi and contributors
   Link: https://github.com/intlify/vue-i18n
-
-- @vitejs/plugin-vue (^4.3.4)
-  Copyright (c) Vite contributors
-  License: MIT
+- @vitejs/plugin-vue (^4.3.4) - Copyright (c) Vite contributors
   Link: https://github.com/vitejs/vite-plugin-vue
-
-- @vue/tsconfig (^0.4.0)
-  Copyright (c) Vue.js contributors
-  License: MIT
+- @vue/tsconfig (^0.4.0) - Copyright (c) Vue.js contributors
   Link: https://github.com/vuejs/tsconfig
-
-- terser (^5.29.1)
-  Copyright (c) Mihai Bazon and contributors
-  License: BSD-2-Clause
-  Link: https://github.com/terser/terser
-
-- vite (^4.4.9)
-  Copyright (c) Vite contributors
-  License: MIT
+- vite (^4.4.9) - Copyright (c) Vite contributors
   Link: https://github.com/vitejs/vite
-
-- vue-tsc (^1.8.13)
-  Copyright (c) Vue Language Tools contributors
-  License: MIT
+- vue-tsc (^1.8.13) - Copyright (c) Vue Language Tools contributors
   Link: https://github.com/vuejs/language-tools
 
-=== Apache License 2.0 ===
+=== BSD-2-Clause ===
+- terser (^5.29.1) - Copyright (c) Mihai Bazon and contributors
+  Link: https://github.com/terser/terser
 
-- typescript (^5.1.6)
-  Copyright (c) Microsoft Corporation
-  License: Apache-2.0
+=== Apache-2.0 ===
+- typescript (^5.1.6) - Copyright (c) Microsoft Corporation
   Link: https://github.com/microsoft/TypeScript
 
 --------------------------------------------------------------------
 
-4. Distribution Requirements
+8. Distribution requirements
 
 When redistributing this project:
 
 - Include the project LICENSE file.
 - Include this THIRD-PARTY-NOTICES.txt file.
-- Preserve copyright notices contained in this repository.
-- Comply with the license terms of any bundled third-party software.
-- If redistributing bundled models, dictionaries, or other assets,
-  also comply with their respective licenses.
+- Preserve the copyright notices contained in this repository and in the
+  packages listed above.
+- Comply with the license terms of every bundled or referenced
+  third-party package - in particular the LGPL notice in section 4 if you
+  redistribute a frozen/bundled build rather than raw Python source, and
+  the Apache-2.0 NOTICE-preservation requirement for any Apache-licensed
+  package that ships its own NOTICE file.
+- If redistributing downloaded models, dictionaries, corpora, or other
+  runtime-fetched assets described in section 6, also comply with their
+  respective, separately-stated licenses.
+
+The permissive licenses listed above (MIT, BSD, Apache-2.0, ISC, PSF-2.0,
+etc.) generally allow commercial use and closed-source integration,
+provided their attribution and license-notice conditions are met. The
+LGPL-licensed packages (num2words, edge-tts) additionally require
+preserving end users' ability to relink or replace those specific
+libraries, as described in section 4. None of the packages listed above
+require this project's own MIT-licensed source code to be relicensed.
 
 --------------------------------------------------------------------
 
-5. Verification Note
+9. Verification note
 
-This notice was generated based on requirements.txt as of 2026-06-27.
-If dependencies are updated, review and update this file accordingly.
-
-The software licenses listed above are generally permissive
-(MIT, BSD, Apache-2.0, ISC, etc.) and generally allow commercial
-use and proprietary integration, provided that their respective
-license conditions (including attribution and license notice
-requirements) are satisfied.
-
-The commercial availability of downloaded models, dictionaries,
-or other runtime resources depends on the licenses of those
-individual resources.
-
---------------------------------------------------------------------
-
-6. Downloaded Models
-
-This project may automatically download pretrained models
-required for speech recognition, forced alignment or language
-processing.
-
-Examples include:
-
-- Montreal Forced Aligner acoustic models
-- Montreal Forced Aligner pronunciation dictionaries
-- WhisperX alignment models
-- FunASR pretrained models
-- Qwen3-ASR models
-- Qwen3-ForcedAligner models
-
-Unless explicitly bundled with this project,
-these models are downloaded from their official sources
-and remain subject to their own licenses.
-
-Users redistributing bundled models should also comply
-with the applicable model licenses.
+This notice was generated by cross-referencing backend/requirements.txt,
+backend/requirements-nemo.txt, backend/requirements-qwen3.txt,
+backend/requirements-qwen3tts.txt, and frontend/package.json against each
+package's published PyPI/npm license metadata and, where that metadata
+was ambiguous or unavailable, the upstream repository's LICENSE file, as
+of 2026-08-13. If dependencies are added, removed, or upgraded, regenerate
+or manually update this file to keep it accurate - license metadata can
+also change between package versions, so a version bump is a reasonable
+trigger to re-check the entries above.
