@@ -106,8 +106,11 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.`
 
-// 鸣谢数据源自 ACKNOWLEDGMENT.md / THIRD-PARTY-NOTICES.txt，按许可证类型分组。
-// 更新依赖时同步维护这里（以及仓库根目录的 ACKNOWLEDGMENT.md）。
+// 鸣谢数据源自仓库根目录的 ACKNOWLEDGMENT.md / THIRD-PARTY-NOTICES.txt，
+// 按「运行环境 -> 许可证类型」分组，与后端四个 requirements 文件
+// （requirements.txt / requirements-qwen3.txt / requirements-nemo.txt /
+// requirements-qwen3tts.txt）保持一一对应。更新依赖时请同步维护三处：
+// 这里、仓库根目录 ACKNOWLEDGMENT.md、THIRD-PARTY-NOTICES.txt。
 interface AckItem {
   name: string
   version: string
@@ -120,88 +123,132 @@ interface AckGroup {
 }
 
 const ackGroups: AckGroup[] = [
+  // ── 主后端 backend/requirements.txt ──────────────────────────────
   {
-    key: 'mit-backend',
-    title: 'MIT License — Python',
+    key: 'main-mit',
+    title: 'MIT License — 主后端',
     items: [
+      { name: 'setuptools', version: '81.0.0', link: 'https://github.com/pypa/setuptools' },
       { name: 'flask-cors', version: '4.0.0', link: 'https://github.com/corydolphin/flask-cors' },
       { name: 'montreal-forced-aligner', version: '3.3.9', link: 'https://github.com/MontrealCorpusTools/Montreal-Forced-Aligner' },
-      { name: 'pypinyin', version: '0.53.0', link: 'https://github.com/mozillazg/python-pinyin' },
+      { name: 'pgvector', version: '0.3.6', link: 'https://github.com/pgvector/pgvector-python' },
       { name: 'textgrid', version: '1.5', link: 'https://github.com/kylebgorman/textgrid' },
-      { name: 'pycantonese', version: '>=0.1.0', link: 'https://github.com/pycantonese/pycantonese' },
-      { name: 'pyworld', version: '>=0.3.4', link: 'https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder' },
-      { name: 'torchcrepe', version: '0.0.24', link: 'https://github.com/descriptinc/torchcrepe' },
-      { name: 'mido', version: '>=1.3.0', link: 'https://github.com/SpotlightKid/mido' },
-      { name: 'ctranslate2', version: '>=4.3.0', link: 'https://github.com/OpenNMT/CTranslate2' },
-      { name: 'tqdm', version: '-', link: 'https://github.com/tqdm/tqdm' },
+      { name: 'pypinyin', version: '0.53.0', link: 'https://github.com/mozillazg/python-pinyin' },
+      { name: 'pycantonese', version: '5.0.0', link: 'https://github.com/pycantonese/pycantonese' },
+      { name: 'jamo', version: '0.4.1', link: 'https://github.com/JDongian/python-jamo' },
+      { name: 'spacy-pkuseg', version: '1.0.1', link: 'https://github.com/explosion/spacy-pkuseg' },
+      { name: 'dragonmapper', version: '0.3.0', link: 'https://github.com/tsroten/dragonmapper' },
+      { name: 'pyworld', version: '0.3.5', link: 'https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder' },
+      { name: 'torchcrepe', version: '0.0.24', link: 'https://github.com/maxrmorrison/torchcrepe' },
+      { name: 'ctranslate2', version: '4.4.0', link: 'https://github.com/OpenNMT/CTranslate2' },
+      { name: 'ruamel.yaml', version: '0.19.1', link: 'https://pypi.org/project/ruamel.yaml/' },
+      { name: 'mido', version: '1.3.3', link: 'https://github.com/mido/mido' },
     ],
   },
   {
-    key: 'bsd3-backend',
-    title: 'BSD 3-Clause',
+    key: 'main-bsd3',
+    title: 'BSD 3-Clause — 主后端',
     items: [
-      { name: 'Flask', version: '2.3.3', link: 'https://github.com/pallets/flask' },
+      { name: 'numpy', version: '1.26.4', link: 'https://github.com/numpy/numpy' },
+      { name: 'torch', version: '2.3.1+cpu', link: 'https://github.com/pytorch/pytorch' },
+      { name: 'flask', version: '2.3.3', link: 'https://github.com/pallets/flask' },
       { name: 'soundfile', version: '0.12.1', link: 'https://github.com/bastibe/python-soundfile' },
-      { name: 'numpy', version: '=1.26.4', link: 'https://github.com/numpy/numpy' },
-      { name: 'torch', version: '>=2.3.1', link: 'https://github.com/pytorch/pytorch' },
+      { name: 'python-mecab-ko', version: '1.3.7', link: 'https://github.com/jonghwanhyeon/python-mecab-ko' },
     ],
   },
   {
-    key: 'bsd2-backend',
-    title: 'BSD 2-Clause',
+    key: 'main-bsd2',
+    title: 'BSD 2-Clause — 主后端',
     items: [
-      { name: 'WhisperX', version: '>=3.2.0', link: 'https://github.com/m-bain/whisperx' },
-      { name: 'torchaudio', version: '>=2.0.0', link: 'https://github.com/pytorch/audio' },
+      { name: 'torchaudio', version: '2.3.1+cpu', link: 'https://github.com/pytorch/audio' },
+      { name: 'whisperx', version: '3.2.0', link: 'https://github.com/m-bain/whisperX' },
     ],
   },
   {
-    key: 'apache-backend',
-    title: 'Apache License 2.0 — Python',
+    key: 'main-apache',
+    title: 'Apache License 2.0 — 主后端',
     items: [
+      { name: 'requests', version: '2.34.2', link: 'https://github.com/psf/requests' },
       { name: 'sudachipy', version: '0.6.8', link: 'https://github.com/WorksApplications/sudachi' },
       { name: 'sudachidict-core', version: '20240409', link: 'https://github.com/WorksApplications/SudachiDict' },
-      { name: 'funasr', version: '>=1.1.0', link: 'https://github.com/modelscope/FunASR' },
-      { name: 'modelscope', version: '>=1.9.0', link: 'https://github.com/modelscope/modelscope' },
-      { name: 'accelerate', version: '>=0.27.0', link: 'https://github.com/huggingface/accelerate' },
-      { name: 'g2p_en', version: '>=0.3.1', link: 'https://github.com/Kyubyong/g2p' },
-      { name: 'qwen-asr', version: '>=1.0.0', link: 'https://github.com/QwenLM/Qwen3-ASR' },
-	  { name: 'qwen-tts', version: '-', link: 'https://github.com/QwenLM/Qwen3-TTS' },
-      { name: 'nltk', version: '>=1.0.0', link: 'https://github.com/nltk/nltk' },
-      { name: 'requests', version: '-', link: 'https://github.com/psf/requests' },
-      { name: 'transformers', version: '>=4.40.0', link: 'https://github.com/huggingface/transformers' },
-      { name: 'nemo_toolkit[asr]', version: '>=2.7.0,<2.8.0', link: 'https://github.com/NVIDIA-NeMo/Speech' },
-	  { name: 'opencc-python-reimplemented', version: '>=0.1.7', link: 'https://github.com/yichen0831/opencc-python' },
+      { name: 'nltk', version: '3.10.2', link: 'https://github.com/nltk/nltk' },
+      { name: 'g2p_en', version: '2.1.0', link: 'https://github.com/Kyubyong/g2p' },
+      { name: 'hanziconv', version: '0.3.2', link: 'https://github.com/berniey/hanziconv' },
+      { name: 'opencc-python-reimplemented', version: '0.1.7', link: 'https://pypi.org/project/opencc-python-reimplemented/' },
+      { name: 'transformers', version: '4.39.3', link: 'https://github.com/huggingface/transformers' },
+      { name: 'tokenizers', version: '0.15.2', link: 'https://github.com/huggingface/tokenizers' },
+      { name: 'huggingface-hub', version: '0.36.2', link: 'https://github.com/huggingface/huggingface_hub' },
     ],
   },
   {
-    key: 'lgpl21-backend',
-    title: 'LGPL 2.1 License',
+    key: 'main-lgpl21',
+    title: 'LGPL 2.1 License — 主后端',
     items: [
-      { name: 'num2words', version: '>=0.5.13', link: 'https://github.com/savoirfairelinux/num2words' },
+      { name: 'num2words', version: '0.5.14', link: 'https://github.com/savoirfairelinux/num2words' },
     ],
   },
   {
-    key: 'lgpl3-backend',
-    title: 'LGPL 3.0 License',
+    key: 'main-lgpl3',
+    title: 'LGPL 3.0 License — 主后端',
     items: [
-      { name: 'edge-tts', version: '>=7.0', link: 'https://github.com/rany2/edge-tts' },
+      { name: 'edge-tts', version: '7.2.8', link: 'https://github.com/rany2/edge-tts' },
     ],
   },
   {
-    key: 'isc-backend',
-    title: 'ISC License',
+    key: 'main-isc',
+    title: 'ISC License — 主后端',
     items: [
-      { name: 'librosa', version: '>=0.10.0', link: 'https://github.com/librosa/librosa' },
-      { name: 'resampy', version: '>=0.4.2', link: 'https://github.com/bmcfee/resampy' },
+      { name: 'librosa', version: '0.11.0', link: 'https://github.com/librosa/librosa' },
+      { name: 'resampy', version: '0.4.3', link: 'https://github.com/bmcfee/resampy' },
     ],
   },
   {
-    key: 'psf-backend',
-    title: 'PSF 2.0 License',
+    key: 'main-psf',
+    title: 'PSF 2.0 License — 主后端',
     items: [
-      { name: 'pywin32', version: '>=306', link: 'https://github.com/mhammond/pywin32' },
+      { name: 'pywin32', version: '312 (Windows only)', link: 'https://github.com/mhammond/pywin32' },
     ],
   },
+  {
+    key: 'main-multi',
+    title: '多重许可证 (MIT AND MPL-2.0) — 主后端',
+    items: [
+      { name: 'tqdm', version: '4.70.0', link: 'https://github.com/tqdm/tqdm' },
+    ],
+  },
+  // ── Qwen3-ASR / Qwen3-ForcedAligner backend/requirements-qwen3.txt ──
+  {
+    key: 'qwen3-apache',
+    title: 'Apache License 2.0 — Qwen3-ASR/ForcedAligner',
+    items: [
+      { name: 'qwen-asr', version: '0.0.6', link: 'https://github.com/QwenLM/Qwen3-ASR' },
+      { name: 'accelerate', version: '1.12.0', link: 'https://github.com/huggingface/accelerate' },
+    ],
+  },
+  // ── NVIDIA NeMo 强制对齐 backend/requirements-nemo.txt ──────────────
+  {
+    key: 'nemo-apache',
+    title: 'Apache License 2.0 — NVIDIA NeMo',
+    items: [
+      { name: 'nemo_toolkit[asr]', version: '2.7.3', link: 'https://github.com/NVIDIA-NeMo/Speech' },
+    ],
+  },
+  // ── Qwen3-TTS backend/requirements-qwen3tts.txt ─────────────────────
+  {
+    key: 'qwen3tts-bsd3',
+    title: 'BSD 3-Clause — Qwen3-TTS',
+    items: [
+      { name: 'torchvision', version: '0.18.1+cpu', link: 'https://github.com/pytorch/vision' },
+    ],
+  },
+  {
+    key: 'qwen3tts-apache',
+    title: 'Apache License 2.0 — Qwen3-TTS',
+    items: [
+      { name: 'qwen-tts', version: '0.1.1', link: 'https://github.com/QwenLM/Qwen3-TTS' },
+    ],
+  },
+  // ── 前端 frontend/package.json ───────────────────────────────────
   {
     key: 'mit-frontend',
     title: 'MIT License — Frontend',
@@ -234,7 +281,7 @@ const ackGroups: AckGroup[] = [
 ]
 
 // 默认展开第一组，其余折叠，避免长列表默认铺满整页
-const activeGroups = ref<string[]>(['mit-backend'])
+const activeGroups = ref<string[]>(['main-mit'])
 </script>
 
 <style scoped>
