@@ -132,32 +132,32 @@ under one of them is not necessarily installed in every deployment.
   License: MIT
   Link: https://github.com/kylebgorman/textgrid
 
-- pypinyin==0.53.0
+- pypinyin>=0.53.0
   Copyright (c) 2014 mozillazg
   License: MIT
   Link: https://github.com/mozillazg/python-pinyin
 
-- pycantonese==5.0.0
+- pycantonese>=5.0.0
   Copyright (c) 2014-2024 Jackson Lee
   License: MIT
   Link: https://github.com/pycantonese/pycantonese
 
-- sudachipy==0.6.8
+- sudachipy>=0.6.8
   Copyright (c) 2017-2024 Works Applications
   License: Apache-2.0
   Link: https://github.com/WorksApplications/sudachi
 
-- sudachidict-core==20240409
+- sudachidict-core>=20240409
   Copyright (c) 2017-2024 Works Applications
   License: Apache-2.0
   Link: https://github.com/WorksApplications/SudachiDict
 
-- jamo==0.4.1
+- jamo>=0.4.1
   Copyright (c) 2015-2017 JDongian
   License: MIT
   Link: https://github.com/JDongian/python-jamo
 
-- nltk==3.10.2
+- nltk>=3.10.2
   License: Apache-2.0 (source code; NLTK's own documentation is
   separately licensed CC BY-NC-ND, which is not redistributed by this
   project)
@@ -165,14 +165,14 @@ under one of them is not necessarily installed in every deployment.
   Note: nltk.download() fetches corpora/tokenizer data at runtime under
   their own, individually-specified licenses; see section 6.
 
-- num2words==0.5.14
+- num2words>=0.5.14
   Copyright (c) Savoir-faire Linux and contributors
   License: LGPL-2.1-or-later
   Link: https://github.com/savoirfairelinux/num2words
   Note: used as an unmodified library dependency (dynamic import), not
   statically linked or modified; see section 4 for LGPL compliance notes.
 
-- g2p_en==2.1.0
+- g2p_en>=2.1.0
   Copyright (c) 2019 Kyubyong Park & Jongseok Kim
   License: Apache-2.0
   Link: https://github.com/Kyubyong/g2p
@@ -211,7 +211,7 @@ under one of them is not necessarily installed in every deployment.
   Link: https://github.com/huggingface/huggingface_hub
 
 === Traditional <-> Simplified Chinese conversion ===
-- opencc-python-reimplemented==0.1.7
+- opencc-python-reimplemented>=0.1.7
   Copyright (c) Yichen Huang (Eugene)
   License: Apache-2.0
   Link: https://pypi.org/project/opencc-python-reimplemented/
@@ -220,7 +220,7 @@ under one of them is not necessarily installed in every deployment.
   separate copyright/license terms from the wrapper code itself.
 
 === TTS (EdgeTTS) / Windows SAPI helper ===
-- edge-tts>==7.0
+- edge-tts>=7.0
   Copyright (c) 2014-2023 Christopher Down; Copyright (c) 2025- rany
   License: LGPL-3.0-or-later, except src/edge_tts/srt_composer.py which is
   MIT
@@ -229,7 +229,7 @@ under one of them is not necessarily installed in every deployment.
   LGPL compliance notes. This package drives both the "EdgeTTS" engine
   and, via pywin32 below, the "Narrator (Windows)" / SAPI5 engine.
 
-- pywin32>==306 (Windows only; sys_platform == "win32")
+- pywin32>=306 (Windows only; sys_platform == "win32")
   Copyright (c) Mark Hammond and the pywin32 contributors
   License: PSF-2.0 (Python Software Foundation License)
   Link: https://github.com/mhammond/pywin32
