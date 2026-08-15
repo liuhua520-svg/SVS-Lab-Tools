@@ -169,7 +169,16 @@ echo [*] 创建独立的 kaldi 环境 (.kaldi_env)...
 if exist "%KALDI_ENV_PREFIX%" (
     echo [OK] .kaldi_env 已存在，跳过创建
 ) else (
-    call "%CONDA_BAT%" create -y -p "%KALDI_ENV_PREFIX%" -c conda-forge kaldi
+    REM 【修复】必须显式指定 python=3.10，和 .mfa_env 保持一致！否则 conda
+    REM 会按当前 conda-forge 上最新的 Python 版本解析依赖（截至这次修复时
+    REM 实测会装出 Python 3.14），导致装进来的 kalpy 编译出的 _kalpy.pyd
+    REM 是 cp314 ABI 的二进制扩展模块，而 .mfa_env 跑的是 Python 3.10——
+    REM 两者 ABI 不兼容，3.10 解释器找不到/加载不了 cp314 的 .pyd，表现为
+    REM `import _kalpy` 报 ModuleNotFoundError（哪怕文件真实存在于
+    REM site-packages 里，PYTHONPATH 也指对了，Python 的 import 机制在扫描
+    REM 扩展模块时也会因为 ABI tag 不匹配而当作"没有这个模块"跳过，不会
+    REM 报出更明确的 ABI 不匹配错误，非常容易误判成"没装/没找到"）。
+    call "%CONDA_BAT%" create -y -p "%KALDI_ENV_PREFIX%" -c conda-forge python=3.10 kaldi
     if errorlevel 1 (
         echo [ERROR] kaldi 安装失败，请检查上方报错信息（网络问题居多，可重跑本脚本）。
         pause
@@ -177,6 +186,91 @@ if exist "%KALDI_ENV_PREFIX%" (
     )
 )
 echo [OK] kaldi 已安装到独立环境: %KALDI_ENV_PREFIX%
+echo.
+
+REM -----------------------------------------------------------------
+REM Step 2.6: 在【同一个】 .kaldi_env 里装 kalpy（MFA 的 Kaldi Python 绑定）
+REM -----------------------------------------------------------------
+REM 【修复】kaldi 和 kalpy 是 conda-forge 上两个独立的包：kaldi 只提供裸的
+REM Kaldi 可执行文件/DLL 本身，kalpy 才是真正给 montreal-forced-aligner
+REM 调用的 pybind11 绑定，提供 _kalpy / kalpy 这两个 Python 模块。此前这
+REM 一步只装了 kaldi，没装 kalpy，导致 mfa align / mfa version 等命令
+REM 一律报 "ModuleNotFoundError: No module named '_kalpy'"。
+REM 装进 .kaldi_env（而不是 .mfa_env），是因为：
+REM   1) kalpy 依赖 kaldi 的共享库，装在同一个 conda 前缀里最省心，conda
+REM      会自动处理好两者的版本匹配；
+REM   2) .mfa_env 走的是 pip 安装 montreal-forced-aligner（见 Step 3），
+REM      刻意不通过 conda 装完整包以避免 GDK/pango 图形依赖，kalpy 单独
+REM      装进 .kaldi_env 不会触发这些依赖；
+REM   3) mfa_utils.py 的 build_kaldi_subprocess_env() 会在启动 mfa 子进程
+REM      时把 .kaldi_env 的 site-packages 目录通过 PYTHONPATH 传给
+REM      .mfa_env 的 Python，让它能找到装在 .kaldi_env 里的 kalpy。
+REM 【关键】上面创建 .kaldi_env 时必须已经指定了 python=3.10——kalpy 会
+REM 编译出一个和 .kaldi_env 的 Python 版本绑定的二进制扩展模块
+REM （_kalpy.cp3XX-win_amd64.pyd），如果 .kaldi_env 和 .mfa_env 的 Python
+REM 大版本不一致（例如 .kaldi_env 意外装成了 3.14 而 .mfa_env 是 3.10），
+REM 即使这里 kalpy 装成功、PYTHONPATH 也传对了，.mfa_env 的 Python 依然
+REM 无法加载这个 ABI 不匹配的 .pyd，还是会报 ModuleNotFoundError。
+echo [*] 在 .kaldi_env 中安装 kalpy（MFA 的 Kaldi Python 绑定）...
+call "%CONDA_BAT%" install -y -p "%KALDI_ENV_PREFIX%" -c conda-forge kalpy
+if errorlevel 1 (
+    echo [ERROR] kalpy 安装失败，请检查上方报错信息（网络问题居多，可重跑本脚本）。
+    echo     也可稍后手动执行：
+    echo       "%CONDA_BAT%" install -y -p "%KALDI_ENV_PREFIX%" -c conda-forge kalpy
+    pause
+    exit /b 1
+)
+echo [OK] kalpy 已安装到独立环境: %KALDI_ENV_PREFIX%
+echo.
+
+REM 【安全检查】如果 .kaldi_env 是旧版脚本（未锁定 python 版本）创建后
+REM 残留下来的，即使这里 kalpy 装"成功"了，ABI 也可能和 .mfa_env 对不上。
+REM 直接核对 _kalpy 编译出的 .pyd 文件名里的 cp3XX 标签是否为 cp310，
+REM 尽早暴露问题，而不是等用户实际跑对齐任务时才看到一头雾水的
+REM ModuleNotFoundError。
+set "KALPY_PYD_FOUND="
+for %%F in ("%KALDI_ENV_PREFIX%\Lib\site-packages\_kalpy.cp310-win_amd64.pyd") do (
+    if exist "%%F" set "KALPY_PYD_FOUND=1"
+)
+if not defined KALPY_PYD_FOUND (
+    echo [ERROR] 未找到 _kalpy.cp310-win_amd64.pyd —— .kaldi_env 里 kalpy
+    echo     编译出的扩展模块可能不是 Python 3.10 版本，和 .mfa_env 的
+    echo     Python 3.10 ABI 不兼容，运行时会报 ModuleNotFoundError。
+    echo     这通常是 .kaldi_env 由旧版脚本（未锁定 python 版本）创建后
+    echo     残留下来的。请手动删除后重跑本脚本：
+    echo       rmdir /s /q "%KALDI_ENV_PREFIX%"
+    pause
+    exit /b 1
+)
+echo [OK] kalpy 的 _kalpy.cp310-win_amd64.pyd 版本与 .mfa_env 匹配
+echo.
+REM -----------------------------------------------------------------
+REM Step 2.7: 在同一个 .kaldi_env 里安装 pynini（MFA 的 G2P/文本规整依赖）
+REM -----------------------------------------------------------------
+REM 【修复】montreal_forced_aligner\data.py 在 import 时会无条件
+REM `import pynini`，pynini 是 OpenFst/OpenGrm 的 C++ 绑定，和 kaldi/kalpy
+REM 一样只能从 conda-forge 装，PyPI 上只有 manylinux 的 wheel，Windows
+REM 下 pip 根本装不出来。之前本脚本只特化处理了 kaldi/kalpy，漏掉了
+REM pynini，表现为运行时报 "ModuleNotFoundError: No module named
+REM 'pynini'"。装进同一个 .kaldi_env（而不是另开一个环境）是因为：
+REM   1) 和 kalpy 一样需要链接同一套 OpenFst 共享库，装在同一个 conda
+REM      前缀里 conda 会自动处理好二者的版本匹配；
+REM   2) backend\mfa_utils.py 的 _kalpy_shim_dir() 已经同步扩展为会把
+REM      pynini/pywrapfst 也一并收进那个只含必要文件的瘦身 shim 目录，
+REM      不需要再为 pynini 单独做一套 PYTHONPATH 注入逻辑。
+REM 【非致命】pynini 目前只在部分语言的 G2P/文本规整路径上用到，
+REM 不是 mfa align 主流程的强依赖，所以这里安装失败时不中断安装，只给出
+REM 警告，避免因为这个可选依赖的网络波动阻塞整个安装流程。
+echo [*] 在 .kaldi_env 中安装 pynini（MFA 的 G2P/文本规整依赖）...
+call "%CONDA_BAT%" install -y -p "%KALDI_ENV_PREFIX%" -c conda-forge pynini
+if errorlevel 1 (
+    echo [!] pynini 安装失败（非致命，不中断安装）。部分语言的文本规整/G2P
+    echo     功能可能会报 ModuleNotFoundError: No module named 'pynini'。
+    echo     可稍后手动重试：
+    echo       "%CONDA_BAT%" install -y -p "%KALDI_ENV_PREFIX%" -c conda-forge pynini
+) else (
+    echo [OK] pynini 已安装到独立环境: %KALDI_ENV_PREFIX%
+)
 echo.
 
 REM -----------------------------------------------------------------
@@ -206,10 +300,6 @@ echo   请耐心等待，这可能需要较长时间...
 call "%CONDA_BAT%" run --no-capture-output -p "%ENV_PREFIX%" python -m pip install -r "%REQUIREMENTS_FILE%"
 if errorlevel 1 (
     echo [ERROR] 依赖安装失败，请检查上方报错信息。
-    echo     如果报错和 kalpy-kaldi 有关：这个包在 PyPI 上只提供源码分发，
-    echo     需要本机具备 C++ 编译工具链才能装；装不上的话可以改用
-    echo       "%CONDA_BAT%" install -y -p "%ENV_PREFIX%" -c conda-forge kalpy
-    echo     再重跑本脚本（此时 pip 会检测到 kalpy-kaldi 已用 conda 装好而跳过）。
     pause
     exit /b 1
 )
@@ -232,17 +322,50 @@ REM
 REM sitecustomize.py 是 CPython 标准钩子，只要放在 site-packages 根目录下
 REM 就会在该环境每次启动时自动生效，不需要 MFA 或任何调用方代码显式
 REM import 它，因此可以在这里"部署一次，之后 MFA 每次跑对齐都自动生效"。
-for /f "delims=" %%P in ('call "%CONDA_BAT%" run -p "%ENV_PREFIX%" python -c "import site; print(site.getsitepackages()[0])"') do set "MFA_SITE_PACKAGES=%%P"
+REM 【修复】之前直接用 for /f 捕获 `conda run ... python -c "..."` 的 stdout
+REM 来拿 site-packages 路径，实测不稳定：conda run 的输出在不同 conda
+REM 版本上时不时会混进额外的提示行/空行（社区已有多个上游 issue
+REM 专门讨论 conda run 输出捕获不准确的问题），`for /f` 只会保留最后
+REM 一行非空输出并覆盖变量，如果最后一行恰好不是真正的路径（比如
+REM 是个空行或 conda 自己的提示），MFA_SITE_PACKAGES 会被设成错误的值，而
+REM `if not defined MFA_SITE_PACKAGES` 这个检查只能检查变量是否为空，检查不出
+REM "值是错的这种情况"，导致后面 copy 静静失败或复制到错误位置、且不会报错。
+REM 改用让 Python 自己把路径写进一个临时文件（完全避开 stdout 多行/杂讯问
+REM 题，只看文件内容），再用 set /p 从文件读回来，读完就删除临时文件。另外
+REM 加一道最低限度的合法性检查（路径必须存在且是目录），避免即使文件里写进去的
+REM 是一个看起来像路径但实际不存在的字符串、后面 copy 时一头雾水地失败。
+REM 进一步加固：不用内联 `python -c "..."`，改为先写一个临时 .py 脚本文件在
+REM 磁盘上。`python -c` 这一层内联字符串要经过 batch -> conda.bat -> cmd /c 多层
+REM 转发，嵌套引号/转义在某些 conda 版本上存在被错误拆分的风险（尤其是项目路径
+REM 包含空格时）；写成独立的 .py 文件后只需要传一个文件路径给 python，彻底避开多层
+REM 引号转义问题。
+set "MFA_SITE_PACKAGES_TMP=%TEMP%\mfa_site_packages_%RANDOM%.txt"
+set "MFA_SITE_PACKAGES_SCRIPT=%TEMP%\mfa_site_packages_%RANDOM%.py"
+(
+    echo import site
+    echo with open^(r"%MFA_SITE_PACKAGES_TMP%", "w", encoding="utf-8"^) as _f:
+    echo     _f.write^(site.getsitepackages^(^)[0]^)
+) > "%MFA_SITE_PACKAGES_SCRIPT%"
+call "%CONDA_BAT%" run --no-capture-output -p "%ENV_PREFIX%" python "%MFA_SITE_PACKAGES_SCRIPT%"
+del /q "%MFA_SITE_PACKAGES_SCRIPT%" >nul 2>&1
+set "MFA_SITE_PACKAGES="
+if exist "%MFA_SITE_PACKAGES_TMP%" (
+    set /p "MFA_SITE_PACKAGES=" < "%MFA_SITE_PACKAGES_TMP%"
+    del /q "%MFA_SITE_PACKAGES_TMP%" >nul 2>&1
+)
 if not defined MFA_SITE_PACKAGES (
     echo [!] 未能定位 .mfa_env 的 site-packages 目录，跳过 speechbrain 补丁部署
     echo     （不影响大部分功能，只有在 MFA 报 k2/flair 相关 ImportError 时才需要它）
+) else if not exist "%MFA_SITE_PACKAGES%" (
+    echo [!] 获取到的 .mfa_env site-packages 路径不存在，跳过 speechbrain 补丁部署：%MFA_SITE_PACKAGES%
+    echo     （conda run 输出可能被其他信息污染，可手动确认路径后重试）
 ) else (
     if exist "%CD%\backend\mfa_env_sitecustomize.py" (
         copy /y "%CD%\backend\mfa_env_sitecustomize.py" "%MFA_SITE_PACKAGES%\sitecustomize.py" >nul
         if errorlevel 1 (
             echo [!] speechbrain 补丁部署失败（非致命，跳过）
         ) else (
-            echo [OK] speechbrain Windows 路径分隔符补丁已部署到 .mfa_env
+            echo [OK] speechbrain Windows 路径分隔符补丁已部署到 .mfa_env\sitecustomize.py: %MFA_SITE_PACKAGES%
         )
     ) else (
         echo [!] 未找到 backend\mfa_env_sitecustomize.py，跳过补丁部署
@@ -507,7 +630,7 @@ if /i "!QWEN3_CHOICE!"=="y" (
 REM -----------------------------------------------------------------
 REM Step 8: Qwen3-TTS 独立环境（可选）
 REM -----------------------------------------------------------------
-
+cls
 echo.
 echo ================================================================================
 echo Step 8/8: Qwen3-TTS 独立环境 (可选)
