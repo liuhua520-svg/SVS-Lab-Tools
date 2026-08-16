@@ -21,7 +21,7 @@ cls
 echo.
 echo ================================================================================
 echo.
-echo               SVS Lab Aligner 完整安装程序 (Windows)
+echo               SVS Lab Tools 完整安装程序 (Windows)
 echo.
 echo   本脚本将自动完成以下步骤:
 echo     - 检查 Conda 和 Node.js 环境
@@ -330,8 +330,6 @@ REM 一行非空输出并覆盖变量，如果最后一行恰好不是真正的路径（比如
 REM 是个空行或 conda 自己的提示），MFA_SITE_PACKAGES 会被设成错误的值，而
 REM `if not defined MFA_SITE_PACKAGES` 这个检查只能检查变量是否为空，检查不出
 REM "值是错的这种情况"，导致后面 copy 静静失败或复制到错误位置、且不会报错。
-REM 改用让 Python 自己把路径写进一个临时文件（完全避开 stdout 多行/杂讯问
-REM 题，只看文件内容），再用 set /p 从文件读回来，读完就删除临时文件。另外
 REM 加一道最低限度的合法性检查（路径必须存在且是目录），避免即使文件里写进去的
 REM 是一个看起来像路径但实际不存在的字符串、后面 copy 时一头雾水地失败。
 REM 进一步加固：不用内联 `python -c "..."`，改为先写一个临时 .py 脚本文件在
@@ -339,12 +337,28 @@ REM 磁盘上。`python -c` 这一层内联字符串要经过 batch -> conda.bat -> cmd /c 多层
 REM 转发，嵌套引号/转义在某些 conda 版本上存在被错误拆分的风险（尤其是项目路径
 REM 包含空格时）；写成独立的 .py 文件后只需要传一个文件路径给 python，彻底避开多层
 REM 引号转义问题。
+REM
+REM 【关键修复，实测确认】最初用 `site.getsitepackages()[0]` 取第一个候选路径，
+REM 结果在这台机器的 conda/Windows 组合下，`getsitepackages()[0]` 返回的是
+REM 环境根目录本身（例如 F:\svslabtools\.mfa_env），而不是期望的
+REM F:\svslabtools\.mfa_env\Lib\site-packages —— 这个路径本身是真实存在的目录
+REM （环境根目录当然存在），所以脚本里"路径必须存在"这道合法性检查完全没能
+REM 拦下这个错误，copy 命令"成功"把 sitecustomize.py 复制到了环境根目录，而不是
+REM site-packages 目录，导致 Python 启动时根本不会 import 到它，补丁没有真正生效，
+REM 且没有任何报错或警告能提示这一点。
+REM `site.getsitepackages()` 在不同平台/发行版上返回的候选列表顺序和内容并不
+REM 保证一致（POSIX 下通常是 <prefix>/lib/pythonX.Y/site-packages，但 Windows 下
+REM 有的构建会把 <prefix> 本身也列进候选列表，且不保证在哪个位置），不能依赖
+REM "第一项就是 site-packages" 这个假设。改用 `sysconfig.get_paths()["purelib"]`
+REM ——这是标准库里专门用来精确回答"这个 Python 解释器的纯 Python 第三方包应该
+REM 装在哪"这个问题的 API，跟 pip 实际安装目标目录用的是同一套逻辑，不存在
+REM "返回的是环境根目录还是 site-packages 子目录"这种歧义。
 set "MFA_SITE_PACKAGES_TMP=%TEMP%\mfa_site_packages_%RANDOM%.txt"
 set "MFA_SITE_PACKAGES_SCRIPT=%TEMP%\mfa_site_packages_%RANDOM%.py"
 (
-    echo import site
+    echo import sysconfig
     echo with open^(r"%MFA_SITE_PACKAGES_TMP%", "w", encoding="utf-8"^) as _f:
-    echo     _f.write^(site.getsitepackages^(^)[0]^)
+    echo     _f.write^(sysconfig.get_paths^(^)["purelib"]^)
 ) > "%MFA_SITE_PACKAGES_SCRIPT%"
 call "%CONDA_BAT%" run --no-capture-output -p "%ENV_PREFIX%" python "%MFA_SITE_PACKAGES_SCRIPT%"
 del /q "%MFA_SITE_PACKAGES_SCRIPT%" >nul 2>&1
@@ -353,19 +367,35 @@ if exist "%MFA_SITE_PACKAGES_TMP%" (
     set /p "MFA_SITE_PACKAGES=" < "%MFA_SITE_PACKAGES_TMP%"
     del /q "%MFA_SITE_PACKAGES_TMP%" >nul 2>&1
 )
+REM 【关键修复，实测确认】仅仅"路径存在"不足以说明这是正确的 site-packages
+REM 目录——之前 sysconfig.get_paths()["purelib"] 换掉 site.getsitepackages()[0]
+REM 之前，拿到的错误路径（环境根目录）同样是真实存在的目录，"存在性检查"
+REM 完全没能拦下这个问题。这里再加一道最低成本的额外校验：路径的最后一段
+REM 目录名必须是 site-packages（大小写不敏感，Windows 文件系统本身也不区分），
+REM 不满足就当作获取失败处理，避免同类"看似合法但语义不对"的路径蒙混过关。
+for %%D in ("%MFA_SITE_PACKAGES%") do set "MFA_SITE_PACKAGES_LEAF=%%~nxD"
 if not defined MFA_SITE_PACKAGES (
     echo [!] 未能定位 .mfa_env 的 site-packages 目录，跳过 speechbrain 补丁部署
     echo     （不影响大部分功能，只有在 MFA 报 k2/flair 相关 ImportError 时才需要它）
 ) else if not exist "%MFA_SITE_PACKAGES%" (
     echo [!] 获取到的 .mfa_env site-packages 路径不存在，跳过 speechbrain 补丁部署：%MFA_SITE_PACKAGES%
     echo     （conda run 输出可能被其他信息污染，可手动确认路径后重试）
+) else if /i not "%MFA_SITE_PACKAGES_LEAF%"=="site-packages" (
+    echo [!] 获取到的路径末级目录名不是 site-packages，跳过 speechbrain 补丁部署，避免装错位置：%MFA_SITE_PACKAGES%
+    echo     （可能是 sysconfig.get_paths 在这套 Python/conda 组合下返回了非预期的路径，可手动确认后重试）
 ) else (
     if exist "%CD%\backend\mfa_env_sitecustomize.py" (
         copy /y "%CD%\backend\mfa_env_sitecustomize.py" "%MFA_SITE_PACKAGES%\sitecustomize.py" >nul
         if errorlevel 1 (
             echo [!] speechbrain 补丁部署失败（非致命，跳过）
+        ) else if not exist "%MFA_SITE_PACKAGES%\sitecustomize.py" (
+            REM 【关键修复，实测确认】copy 命令的 errorlevel 是 0（"成功"）不代表
+            REM 目标文件真的落盘——之前调试时曾出现 copy 报告成功、但由于目标目录
+            REM 判断错误导致文件实际没有出现在预期位置的情况。这里加一道二次验证，
+            REM 不满足就明确报错而不是盲目打印 [OK]。
+            echo [!] copy 命令返回成功但目标文件未出现在磁盘上，请手动确认: %MFA_SITE_PACKAGES%\sitecustomize.py
         ) else (
-            echo [OK] speechbrain Windows 路径分隔符补丁已部署到 .mfa_env\sitecustomize.py: %MFA_SITE_PACKAGES%
+            echo [OK] speechbrain Windows 路径分隔符补丁已部署到 .mfa_env\Lib\site-packages\sitecustomize.py: %MFA_SITE_PACKAGES%
         )
     ) else (
         echo [!] 未找到 backend\mfa_env_sitecustomize.py，跳过补丁部署
@@ -709,7 +739,7 @@ if /i "!QWEN3TTS_CHOICE!"=="y" (
 REM -----------------------------------------------------------------
 REM 结束
 REM -----------------------------------------------------------------
-
+cls
 echo.
 echo ================================================================================
 echo                        安装全部完成
