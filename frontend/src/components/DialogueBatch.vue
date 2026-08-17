@@ -4653,12 +4653,20 @@ const downloadDialogueText = () => {
 
   const filename = `${stem}.txt`
 
+  // 【2026-08 变更，修复 pywebview 下载无反应】改用 Blob + blob: URL，
+  // 跟上面 downloadResult() 保持同一套写法（同一份原因见
+  // MFAProcessor.vue 里 _saveTextAsFile 的注释：data: URI 在部分
+  // Chromium 内嵌控件下不如 blob: URL 稳定；配合 launcher.py 里新打开的
+  // webview.settings['ALLOW_DOWNLOADS']，会弹出系统原生"另存为"对话框）。
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
+  const url = window.URL.createObjectURL(blob)
   const element = document.createElement('a')
-  element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(content))
-  element.setAttribute('download', filename)
+  element.href = url
+  element.download = filename
   document.body.appendChild(element)
   element.click()
   document.body.removeChild(element)
+  window.URL.revokeObjectURL(url)
 
   ElMessage.success(`✅ ${t('processor.downloadTextFile')}: ${filename}`)
 }

@@ -182,7 +182,7 @@ const ackGroups: AckGroup[] = [
   },
   {
     key: 'main-lgpl21-or-later',
-    title: 'LGPL 2.1+ License — 主后端',
+    title: 'LGPL 2.1 or later License — 主后端',
     items: [
       { name: 'num2words', version: '0.5.14', link: 'https://github.com/savoirfairelinux/num2words' },
     ],

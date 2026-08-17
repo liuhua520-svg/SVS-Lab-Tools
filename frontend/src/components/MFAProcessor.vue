@@ -4827,6 +4827,27 @@ if (processingMode.value === 'project-only') {
   }
 }
 
+// 【2026-08 变更，修复 pywebview 下载无反应】统一走 blob: URL 触发下载，
+// 不再用 data: URI。原因：pywebview 原生窗口默认关闭下载能力
+// （webview.settings['ALLOW_DOWNLOADS'] 默认 False，见 launcher.py），
+// 之前即使打开这个开关，data: URI 在部分 Chromium 内嵌控件下也存在
+// 「download 属性不生效、文件名丢失」的已知边缘情况（不同浏览器内核对
+// data: URI 下载的处理不完全一致，行为不如 blob: URL 稳定可靠）。
+// blob: URL 是本文件里 downloadProject（工程文件下载）一直在用、且已经
+// 验证有效的写法，这里统一成同一套实现，触发的是浏览器标准下载流程——
+// 在 launcher.py 打开 ALLOW_DOWNLOADS 后，会弹出系统原生"另存为"对话框。
+const _saveTextAsFile = (content: string, filename: string, mimeType = 'text/plain;charset=utf-8') => {
+  const blob = new Blob([content], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  const element = document.createElement('a')
+  element.href = url
+  element.download = filename
+  document.body.appendChild(element)
+  element.click()
+  document.body.removeChild(element)
+  URL.revokeObjectURL(url)
+}
+
 const downloadLab = () => {
   if (!result.value?.labContent) {
     ElMessage.warning(t('processor.noLabContent'))
@@ -4848,12 +4869,7 @@ const downloadLab = () => {
 
   const filename = `${stem}.lab`
 
-  const element = document.createElement('a')
-  element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(result.value.labContent))
-  element.setAttribute('download', filename)
-  document.body.appendChild(element)
-  element.click()
-  document.body.removeChild(element)
+  _saveTextAsFile(result.value.labContent, filename)
 
   ElMessage.success(`✅ ${t('processor.downloadLabFile')}: ${filename}`)
 }
@@ -4892,12 +4908,7 @@ const downloadText = () => {
 
   const filename = `${stem}.txt`
 
-  const element = document.createElement('a')
-  element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(content))
-  element.setAttribute('download', filename)
-  document.body.appendChild(element)
-  element.click()
-  document.body.removeChild(element)
+  _saveTextAsFile(content, filename)
 
   ElMessage.success(`✅ ${t('processor.downloadTextFile')}: ${filename}`)
 }

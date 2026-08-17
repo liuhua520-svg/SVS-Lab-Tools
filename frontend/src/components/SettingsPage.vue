@@ -28,11 +28,6 @@
           />
         </el-form-item>
 
-        <el-form-item :label="t('settings.hideConsoleWindow')">
-          <el-switch v-model="form.hide_console_window" />
-          <p class="help-text">{{ t('settings.hideConsoleWindowHint') }}</p>
-        </el-form-item>
-
         <el-alert type="warning" :closable="false" show-icon class="restart-hint">
           <template #title>{{ t('settings.restartHint') }}</template>
         </el-alert>
@@ -408,6 +403,11 @@ interface AppSettings {
   auto_update_models: boolean
   use_mirror: boolean
   mirror_url: string
+  // 【2026-08 起，历史遗留字段】早期版本用于控制"是否隐藏四个后端进程的
+  // 命令提示符窗口"；现在 launcher.py 正常启动这些进程时已经从系统层面
+  // 直接不创建任何窗口（不再依赖这个开关去事后隐藏），所以这里不再在
+  // 表单里渲染对应控件，只保留字段本身用于兼容旧版本写过的设置文件（读取
+  // /保存时不报错、不丢字段），不会展示给用户、也不会被用户修改。
   hide_console_window: boolean
   // 独立开关：勾选后，下次完整启动本应用（重新打开 exe 启动器）时不再
   // 拉起对应的微服务进程；只在下次启动时生效，不影响当前正在运行的
