@@ -126,7 +126,7 @@ const ackGroups: AckGroup[] = [
   // ── 主后端 backend/requirements.txt ──────────────────────────────
   {
     key: 'main-mit',
-    title: 'MIT License — 主后端',
+    title: 'MIT License — Backend',
     items: [
       { name: 'setuptools', version: '81.0.0', link: 'https://github.com/pypa/setuptools' },
       { name: 'flask-cors', version: '4.0.0', link: 'https://github.com/corydolphin/flask-cors' },
@@ -147,7 +147,7 @@ const ackGroups: AckGroup[] = [
   },
   {
     key: 'main-bsd3',
-    title: 'BSD 3-Clause — 主后端',
+    title: 'BSD 3-Clause — Backend',
     items: [
       { name: 'numpy', version: '1.26.4', link: 'https://github.com/numpy/numpy' },
       { name: 'torch', version: '2.3.1+cpu', link: 'https://github.com/pytorch/pytorch' },
@@ -158,7 +158,7 @@ const ackGroups: AckGroup[] = [
   },
   {
     key: 'main-bsd2',
-    title: 'BSD 2-Clause — 主后端',
+    title: 'BSD 2-Clause — Backend',
     items: [
       { name: 'torchaudio', version: '2.3.1+cpu', link: 'https://github.com/pytorch/audio' },
       { name: 'whisperx', version: '3.2.0', link: 'https://github.com/m-bain/whisperX' },
@@ -166,7 +166,7 @@ const ackGroups: AckGroup[] = [
   },
   {
     key: 'main-apache',
-    title: 'Apache License 2.0 — 主后端',
+    title: 'Apache License 2.0 — Backend',
     items: [
       { name: 'requests', version: '2.34.2', link: 'https://github.com/psf/requests' },
       { name: 'sudachipy', version: '0.6.8', link: 'https://github.com/WorksApplications/sudachi' },
@@ -182,21 +182,21 @@ const ackGroups: AckGroup[] = [
   },
   {
     key: 'main-lgpl21-or-later',
-    title: 'LGPL 2.1 or later License — 主后端',
+    title: 'LGPL 2.1 or later License — Backend',
     items: [
       { name: 'num2words', version: '0.5.14', link: 'https://github.com/savoirfairelinux/num2words' },
     ],
   },
   {
     key: 'main-lgpl3',
-    title: 'LGPL 3.0 License — 主后端',
+    title: 'LGPL 3.0 License — Backend',
     items: [
       { name: 'edge-tts', version: '7.2.8', link: 'https://github.com/rany2/edge-tts' },
     ],
   },
   {
     key: 'main-isc',
-    title: 'ISC License — 主后端',
+    title: 'ISC License — Backend',
     items: [
       { name: 'librosa', version: '0.11.0', link: 'https://github.com/librosa/librosa' },
       { name: 'resampy', version: '0.4.3', link: 'https://github.com/bmcfee/resampy' },
@@ -204,14 +204,14 @@ const ackGroups: AckGroup[] = [
   },
   {
     key: 'main-psf',
-    title: 'PSF 2.0 License — 主后端',
+    title: 'PSF 2.0 License — Backend',
     items: [
       { name: 'pywin32', version: '312 (Windows only)', link: 'https://github.com/mhammond/pywin32' },
     ],
   },
   {
     key: 'main-multi',
-    title: '多重许可证 (MIT AND MPL-2.0) — 主后端',
+    title: '多重许可证 (MIT AND MPL-2.0) — Backend',
     items: [
       { name: 'tqdm', version: '4.70.0', link: 'https://github.com/tqdm/tqdm' },
     ],
