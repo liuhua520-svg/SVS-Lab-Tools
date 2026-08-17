@@ -19,7 +19,7 @@ pyinstaller ^
   --onedir ^
   --noconsole ^
   --clean ^
-  --icon="icon.ico" ^
+  --icon="./assets/icon/icon.ico" ^
   --hidden-import=clr_loader ^
   --hidden-import=pythonnet ^
   launcher.py
