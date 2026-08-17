@@ -69,6 +69,8 @@ except Exception as _settings_err:
 # 一次"），放在这里调用一次即可覆盖"进程刚启动时窗口该不该隐藏"；
 # 之后 /restart 触发的自重启会拉起全新进程，新进程执行到这里时会重新读
 # 到最新设置，无需额外处理。仅在 Windows 上生效，其余平台直接跳过。
+# 【2026-08 起】launcher.py 正常启动本进程时用 CREATE_NO_WINDOW，本身
+# 就没有控制台窗口，这里调用是无操作，详见 qwen3_server.py 里的同名说明。
 try:
     from app_settings import apply_console_visibility as _apply_console_visibility
     _apply_console_visibility()
@@ -404,8 +406,13 @@ def restart():
          完全释放；
       2) 端口释放后用 subprocess.Popen 启动全新 python 进程，不继承旧
          进程任何多余的线程/句柄状态，此时端口已空闲，一定能 bind 成功；
-      3) 不传 creationflags，新进程默认继承当前控制台窗口，日志依然打印
-         在同一个窗口里；
+      3) 【2026-08 变更】显式传入 stdout=sys.stdout, stderr=sys.stderr：
+         launcher.py 正常启动本进程时用 CREATE_NO_WINDOW（不再创建控制台
+         窗口），sys.stdout/sys.stderr 已经被重定向到 logs/nemo.log 文件
+         （详见 qwen3_server.py 里的同名说明）。之前这里不传
+         stdout/stderr，在 Windows 上配合 close_fds=True 意味着新进程不
+         继承任何标准句柄，会导致重启后日志彻底丢失甚至报错；现在显式
+         传当前进程的句柄过去，日志能在重启前后连续不丢失。
       4) 最后 os._exit(0) 立即结束旧进程。
     无论重启多少次，每次都是确定性的"干净关端口 → 起新进程"，不会有
     状态累积。
@@ -425,7 +432,12 @@ def restart():
 
         python = sys.executable
         try:
-            subprocess.Popen([python] + sys.argv, close_fds=True)
+            subprocess.Popen(
+                [python] + sys.argv,
+                close_fds=True,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+            )
         except Exception as e:
             logger.error(f"启动新进程失败: {e}", exc_info=True)
 

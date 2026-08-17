@@ -1135,10 +1135,11 @@ def update_settings():
     try:
         settings = app_settings.save_settings(data)
 
-        # 主服务（app.py 自己）的命令提示符窗口显示/隐藏可以立即生效，
-        # 不需要像 HF_HUB_OFFLINE / HF_ENDPOINT 那样重启进程——直接对当前
-        # 进程调用一次即可。Qwen3 / NeMo 两个微服务则随下面的自动重启一并
-        # 应用最新的 hide_console_window 值（新进程启动时会重新读取）。
+        # 【2026-08 起】launcher.py 改用 CREATE_NO_WINDOW 拉起本进程，不再
+        # 分配任何控制台窗口，所以下面这次调用在正常发布环境下是无操作
+        # （GetConsoleWindow() 返回空句柄，函数直接返回 False，不算错误）。
+        # 保留这次调用只是为了兼容"直接用 `python app.py` 在真实终端里
+        # 调试"的场景——这种场景下确实有一个真实控制台窗口，调用仍然有效。
         try:
             app_settings.apply_console_visibility()
         except Exception as e:
@@ -5181,10 +5182,14 @@ def open_browser(host: str, port: int):
 
 def main(host: str = "127.0.0.1", port: int = 5000):
     # 命令提示符窗口显示/隐藏：读取设置页面保存的配置，决定 app.py 自己
-    # 这个终端窗口是否隐藏。放在最前面调用，若设置为隐藏则连下面的启动
-    # 横幅也不会被看到——这是预期行为（用户主动选择了"启动即隐藏"）。
-    # 之后用户在设置页面切换该开关时，update_settings() 里还会对本进程
-    # 再调用一次，做到无需重启主服务即可立即生效。
+    # 这个终端窗口是否隐藏。【2026-08 起】launcher.py 正常启动时用
+    # CREATE_NO_WINDOW，本身就没有控制台窗口，这里调用是无操作（返回
+    # False，不算错误）；只有直接用 `python app.py` 在真实终端里调试时
+    # 才会真的隐藏/显示那个终端窗口。放在最前面调用，若设置为隐藏则连
+    # 下面的启动横幅也不会被看到——这是预期行为（用户主动选择了"启动即
+    # 隐藏"）。之后用户在设置页面切换该开关时，update_settings() 里还会
+    # 对本进程再调用一次，做到无需重启主服务即可立即生效（在有真实控制台
+    # 窗口的场景下）。
     try:
         app_settings.apply_console_visibility()
     except Exception as e:

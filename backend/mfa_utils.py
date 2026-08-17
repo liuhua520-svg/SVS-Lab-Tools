@@ -87,9 +87,24 @@ class MFAChecker:
         if env_dir and Path(env_dir).exists():
             return Path(env_dir)
 
+        # 旧版打包方式：隐藏目录直接放在应用根目录下（.mfa_env）。
         local_prefix = MFAChecker.project_root() / ".mfa_env"
         if local_prefix.exists():
             return local_prefix
+
+        # 【2026-08 补充】现行 launcher.py 的打包布局是
+        # <APP_ROOT>/runtime/mfa_env（不带前导点、统一放在 runtime/ 下，
+        # 与 qwen3_env / qwen3tts_env / nemo_env / kaldi_env 平级），而不是
+        # 上面那种旧版 .mfa_env 布局；launcher.py 本身也没有设置
+        # MFA_ENV_DIR 环境变量。之前这里漏掉这条查找路径，全靠下面
+        # sys.prefix 兜底"凑巧"算对——因为 backend/app.py 本来就是被
+        # runtime/mfa_env/python.exe 启动的，sys.prefix 自然就是这个目录。
+        # 但这只是巧合，换一种启动方式（比如未来某天从别的解释器 import
+        # 这个模块、或者需要在不同子进程里显式引用 mfa_env 路径时）就会
+        # 失效，所以还是补上显式的查找路径，不再单纯依赖巧合。
+        runtime_prefix = MFAChecker.project_root() / "runtime" / "mfa_env"
+        if runtime_prefix.exists():
+            return runtime_prefix
 
         return Path(sys.prefix)
 
@@ -97,20 +112,41 @@ class MFAChecker:
     def kaldi_env_dir() -> Optional[Path]:
         """
         独立的 kaldi 环境（setup.bat/setup.sh 用 `conda create -p .kaldi_env
-        -c conda-forge kaldi` 创建）。_kalpy 是纯粹的 Python 绑定，运行时
-        依赖这里面的 kaldi 动态库（Windows 下在 Library\\bin，Linux/Mac 下
-        在 lib），必须和 .mfa_env 的 PATH/LD_LIBRARY_PATH 一起传给子进程，
-        否则 `import _kalpy` 会因为找不到底层 DLL/so 而报
-        ModuleNotFoundError（表现具有迷惑性，看起来像没装包，实际是native
-        依赖没装进 PATH）。
+        -c conda-forge kaldi` 创建，或現行打包流程里的
+        runtime/kaldi_env）。_kalpy 是纯粹的 Python 绑定，运行时依赖这里面
+        的 kaldi 动态库（Windows 下在 Library\\bin，Linux/Mac 下在 lib），
+        必须和 mfa_env 的 PATH/LD_LIBRARY_PATH 一起传给子进程，否则
+        `import _kalpy` 会因为找不到底层 DLL/so 而报 ModuleNotFoundError
+        （表现具有迷惑性，看起来像没装包，实际是 native 依赖没装进 PATH）。
+
+        【2026-08 排查记录】实际出现过"看起来像没装包"的另一种变体：不是
+        DLL 加载失败，而是这个函数直接返回 None（因为 .kaldi_env 和
+        runtime/kaldi_env 都没找到——例如打包用的是 runtime/kaldi_env 这种
+        新布局，而这里当时只认旧的 .kaldi_env），导致 build_env() 里
+        KALDI_ROOT / KALDI_ENV_DIR / PYTHONPATH 全部没有被设置，子进程连
+        "去哪儿找 _kalpy" 都不知道，报错是最上层的
+        `ModuleNotFoundError: No module named '_kalpy'`——比 DLL 加载失败
+        还要更前一步。两种失败现象都要看这个函数有没有正确定位到目录。
         """
         env_dir = os.environ.get("KALDI_ENV_DIR")
         if env_dir and Path(env_dir).exists():
             return Path(env_dir)
 
+        # 旧版打包方式：隐藏目录直接放在应用根目录下（.kaldi_env）。
         local_prefix = MFAChecker.project_root() / ".kaldi_env"
         if local_prefix.exists():
             return local_prefix
+
+        # 【2026-08 补充】现行打包布局：<APP_ROOT>/runtime/kaldi_env（不带
+        # 前导点，与 runtime/mfa_env 等平级，与 launcher.py 的 RUNTIME_DIR
+        # 约定一致）。这是本函数之前唯一缺失的一条查找路径，也是
+        # "ModuleNotFoundError: No module named '_kalpy'" 这个问题的根因：
+        # 走到这里之前的两条路径都找不到目录时，之前会直接返回 None，
+        # 导致上面 build_env() 完全没有机会设置 KALDI_ROOT / PYTHONPATH，
+        # 子进程运行 montreal_forced_aligner 时自然找不到 _kalpy。
+        runtime_prefix = MFAChecker.project_root() / "runtime" / "kaldi_env"
+        if runtime_prefix.exists():
+            return runtime_prefix
 
         return None
 
@@ -656,9 +692,14 @@ class MFAChecker:
         except Exception as e:
             hint = ""
             if kaldi_env_dir is None:
-                hint = "（未找到 .kaldi_env，请先运行 setup.bat/setup.sh 创建独立 kaldi 环境）"
+                hint = (
+                    "（未找到 kaldi 独立环境：既没有 <应用根目录>/.kaldi_env，"
+                    "也没有 <应用根目录>/runtime/kaldi_env，请先运行 "
+                    "setup.bat/setup.sh 创建独立 kaldi 环境，或确认打包目录"
+                    "结构是否完整）"
+                )
             elif kaldi_site_packages is None:
-                hint = "（.kaldi_env 里没找到 kalpy，请运行: conda install -y -p .kaldi_env -c conda-forge kalpy）"
+                hint = f"（{kaldi_env_dir} 里没找到 kalpy，请运行: conda install -y -p \"{kaldi_env_dir}\" -c conda-forge kalpy）"
             return False, f"{e}{hint}"
         finally:
             if added_dll_dir is not None:
@@ -703,9 +744,14 @@ class MFAChecker:
         except Exception as e:
             hint = ""
             if kaldi_env_dir is None:
-                hint = "（未找到 .kaldi_env，请先运行 setup.bat/setup.sh 创建独立 kaldi 环境）"
+                hint = (
+                    "（未找到 kaldi 独立环境：既没有 <应用根目录>/.kaldi_env，"
+                    "也没有 <应用根目录>/runtime/kaldi_env，请先运行 "
+                    "setup.bat/setup.sh 创建独立 kaldi 环境，或确认打包目录"
+                    "结构是否完整）"
+                )
             else:
-                hint = "（.kaldi_env 里没找到 pynini，请运行: conda install -y -p .kaldi_env -c conda-forge pynini）"
+                hint = f"（{kaldi_env_dir} 里没找到 pynini，请运行: conda install -y -p \"{kaldi_env_dir}\" -c conda-forge pynini）"
             return False, f"{e}{hint}"
         finally:
             if added_dll_dir is not None:

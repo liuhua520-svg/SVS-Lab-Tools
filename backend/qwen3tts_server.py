@@ -73,6 +73,8 @@ except Exception as _settings_err:
 
 # 命令提示符窗口显示/隐藏：同样读取设置页面保存的配置，仅在 Windows 上
 # 生效，其余平台直接跳过（详见 qwen3_server.py 里的同名说明）。
+# 【2026-08 起】launcher.py 正常启动本进程时用 CREATE_NO_WINDOW，本身
+# 就没有控制台窗口，这里调用是无操作，详见 qwen3_server.py 里的同名说明。
 try:
     from app_settings import apply_console_visibility as _apply_console_visibility
     _apply_console_visibility()
@@ -389,6 +391,11 @@ def restart():
     优雅自重启，与 qwen3_server.py 的 /restart 实现完全一致（"先干净关闭、
     再拉起全新独立进程"两步法，避免 execv 在 Windows 上的重复重启坑，见
     qwen3_server.py 里的详细说明）。
+
+    【2026-08 变更】同样显式传入 stdout=sys.stdout, stderr=sys.stderr，
+    让重启后的新进程继续写同一个 logs/qwen3tts.log 文件，而不是像之前
+    那样在 close_fds=True 且不传 stdout/stderr 的情况下丢失所有标准句柄
+    （详见 qwen3_server.py /restart 文档字符串里的完整说明）。
     """
     def _delayed_restart():
         time.sleep(0.5)
@@ -405,7 +412,12 @@ def restart():
 
         python = sys.executable
         try:
-            subprocess.Popen([python] + sys.argv, close_fds=True)
+            subprocess.Popen(
+                [python] + sys.argv,
+                close_fds=True,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+            )
         except Exception as e:
             logger.error(f"启动新进程失败: {e}", exc_info=True)
 

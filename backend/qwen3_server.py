@@ -42,6 +42,10 @@ except Exception as _settings_err:
 # 一次"），放在这里调用一次即可覆盖"进程刚启动时窗口该不该隐藏"；
 # 之后 /restart 触发的自重启会拉起全新进程，新进程执行到这里时会重新读
 # 到最新设置，无需额外处理。仅在 Windows 上生效，其余平台直接跳过。
+# 【2026-08 起】launcher.py 正常启动本进程时用 CREATE_NO_WINDOW，本身
+# 就没有控制台窗口，这里调用是无操作（GetConsoleWindow() 返回空句柄，
+# 函数直接返回 False，不算错误）；只有直接用 `python qwen3_server.py`
+# 在真实终端里调试时才会真的隐藏/显示那个终端窗口。
 try:
     from app_settings import apply_console_visibility as _apply_console_visibility
     _apply_console_visibility()
@@ -526,8 +530,18 @@ def restart():
       2) 端口释放后，用 subprocess.Popen 启动一个全新的 python 进程
          （同一套解释器 + 同一条命令行），它不继承旧进程任何多余的线程/
          句柄状态，此时端口已空闲，一定能 bind 成功；
-      3) 不传 creationflags，新进程默认继承当前控制台窗口，日志依然打印
-         在同一个窗口里，行为上和以前的"原地重启"观感一致；
+      3) 【2026-08 变更】显式传入 stdout=sys.stdout, stderr=sys.stdout：
+         launcher.py 正常启动本进程时，sys.stdout/sys.stderr 已经被重定向
+         到 logs/qwen3.log 文件（见 launcher.py _spawn()，用的是
+         CREATE_NO_WINDOW，不再创建控制台窗口）。之前这里不传
+         stdout/stderr，在 Windows 上配合 close_fds=True 意味着"新进程不
+         继承任何标准句柄"，会导致重启后的新进程里 print() 和
+         logging.StreamHandler(默认写 stderr) 全部失效（往一个无效句柄
+         写入），日志从重启那一刻起彻底丢失，且可能在某些 Python/OS 组合
+         下直接抛异常。现在显式传当前进程的 stdout/stderr 过去，新进程
+         会继续写同一个日志文件，重启前后日志连续不丢失。若是手动用
+         `python qwen3_server.py` 在真实终端调试，sys.stdout/stderr 就是
+         那个终端的句柄，行为与之前一致（继续打印在同一个窗口里）。
       4) 最后用 os._exit(0) 立即结束旧进程，不等待任何非必要的清理逻辑。
     这样无论重启多少次，每次都是"干净关端口 → 起新进程"的确定性流程，
     不会有状态累积。
@@ -547,7 +561,12 @@ def restart():
 
         python = sys.executable
         try:
-            subprocess.Popen([python] + sys.argv, close_fds=True)
+            subprocess.Popen(
+                [python] + sys.argv,
+                close_fds=True,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+            )
         except Exception as e:
             logger.error(f"启动新进程失败: {e}", exc_info=True)
 

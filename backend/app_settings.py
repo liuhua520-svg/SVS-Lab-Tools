@@ -50,11 +50,25 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "use_mirror": False,
     "mirror_url": "https://hf-mirror.com/",
 
-    # True  → 尝试隐藏 app.py / qwen3_server.py / nemo_server.py 三个进程
-    #         各自所在的命令提示符（终端）窗口；进程本身继续正常运行，
-    #         只是窗口不可见。
-    # False → 保持命令提示符窗口可见（默认，方便直接看日志）。
-    # 仅在 Windows 上生效，见 apply_console_visibility() 的说明。
+    # 【2026-08 起，历史遗留字段，正常发布环境下不再有实际效果】
+    # 早期版本：True → 尝试隐藏 app.py / qwen3_server.py / qwen3tts_server.py /
+    # nemo_server.py 四个进程各自所在的命令提示符（终端）窗口；进程本身
+    # 继续正常运行，只是窗口不可见。
+    #
+    # 现状：launcher.py 正常启动这四个进程时改用了 CREATE_NO_WINDOW，从
+    # 系统层面直接不分配任何控制台窗口——不管这个开关是 True 还是 False，
+    # 任务栏上都不会出现任何相关窗口/图标，日志改为写入 logs/<name>.log
+    # 文件查看。原因：CREATE_NEW_CONSOLE + ShowWindow(SW_HIDE) 这一套在
+    # 把"默认终端应用"设为 Windows Terminal 的 Windows 11 系统上（22H2
+    # 起的系统默认值）会被 Windows Terminal 接管出一个独立顶层窗口，隐藏
+    # 底层句柄对任务栏毫无效果，所以改为从源头不创建窗口。
+    #
+    # 保留这个字段只是为了兼容旧版本写过的设置文件（避免加载报错）；仅在
+    # 有人直接用 `python app.py` / `python qwen3_server.py` 等命令在真实
+    # 终端里手动调试时，apply_console_visibility() 仍会按这个值隐藏/显示
+    # 那个真实终端窗口——但这不是 launcher.py 正常拉起服务的路径。设置
+    # 页面的这个开关目前保留但已在提示文案里注明"当前版本已默认不显示，
+    # 无需再手动隐藏"。
     "hide_console_window": False,
 
     # True  → 下次完整启动本应用（即重新打开 exe 启动器）时，不再自动拉起
@@ -441,20 +455,40 @@ def apply_console_visibility() -> bool:
     显示或隐藏当前进程所在的命令提示符（控制台）窗口，取决于设置文件里
     hide_console_window 的当前值。
 
+    【2026-08 起，重要】launcher.py 正常拉起 app.py / qwen3_server.py /
+    qwen3tts_server.py / nemo_server.py 这四个服务时，已经改用
+    CREATE_NO_WINDOW，从系统层面直接不为子进程分配任何控制台窗口——这种
+    情况下本函数里的 GetConsoleWindow() 会返回空句柄，函数直接走
+    `if not hwnd: return False` 分支提前返回，是预期中的"无操作"，不会
+    报错也不会有任何副作用。本函数保留下来，只是为了兼容"有人直接用
+    `python app.py` 之类命令、在一个真实的命令提示符/PowerShell 窗口里
+    手动调试"这种场景——这种场景下确实存在一个真实控制台窗口，下面这套
+    ShowWindow() 逻辑仍然会按预期隐藏/显示它。
+
+    （以下为函数本身的实现说明，在有真实控制台窗口时仍然适用）
+
     与 apply_env_from_settings() 不同，这里不是"只能在启动早期调用一次"：
     ShowWindow() 可以在进程运行期间随时调用，每次调用都会把窗口设为当前
     设置要求的显示/隐藏状态，是完全可逆、可重复调用的操作——不会杀掉进程，
-    也不影响 Flask 服务本身，只是这个窗口本身在任务栏/桌面上看不看得见。
+    也不影响 Flask 服务本身，只是这个窗口本身在桌面/任务栏上看不看得见。
 
-    调用时机：
-      - app.py：在 main() 启动时调用一次即可覆盖"launcher 打开时窗口是否
-        隐藏"；另外在 /api/settings 保存设置时也会立即调用一次——这样切换
-        开关后，主进程自己的窗口无需重启即可立刻隐藏或恢复显示。
-      - qwen3_server.py / nemo_server.py：在模块导入阶段、紧跟
-        apply_env_from_settings() 之后调用一次。这两个微服务的 /restart
-        本来就会在保存设置后自动重新拉起一个全新进程（用于让
-        HF_HUB_OFFLINE / HF_ENDPOINT 生效），新进程启动时会重新读取到最新
-        的 hide_console_window 值并据此隐藏/显示窗口，无需额外处理。
+    这里用的是 SW_HIDE 而不是 SW_MINIMIZE：两者都会让窗口从桌面上消失，
+    但 SW_MINIMIZE 会在任务栏留下一个图标，SW_HIDE 会把任务栏图标也一并
+    移除——用户要的是"任务栏上完全看不到这个命令提示符"，所以选 SW_HIDE。
+    对应地，恢复显示用 SW_SHOW，窗口和任务栏图标会一起回来。
+
+    这套"隐藏窗口"的思路本身，在把"默认终端应用"设为 Windows Terminal 的
+    Windows 11 系统上（22H2 起的系统默认值）存在已知局限：如果控制台是被
+    CREATE_NEW_CONSOLE 创建、又被 Windows Terminal 接管包了一层独立顶层
+    窗口，GetConsoleWindow() 拿到的是接管前的底层句柄，隐藏它对任务栏上
+    真正显示的 Windows Terminal 窗口没有效果。这正是 launcher.py 改用
+    CREATE_NO_WINDOW（见上面的说明）而不是继续依赖本函数的原因。
+
+    调用时机（均为兼容手动调试场景保留，正常发布环境下是无操作）：
+      - app.py：在 main() 启动时调用一次；另外在 /api/settings 保存设置
+        时也会调用一次。
+      - qwen3_server.py / qwen3tts_server.py / nemo_server.py：在模块
+        导入阶段、紧跟 apply_env_from_settings() 之后调用一次。
 
     仅在 Windows 上有效（用到 kernel32 / user32 的 GetConsoleWindow /
     ShowWindow）；非 Windows 平台直接跳过并返回 False。
@@ -462,8 +496,10 @@ def apply_console_visibility() -> bool:
     Returns
     -------
     bool：本次是否成功找到控制台窗口并设置了显示状态。False 常见于：非
-    Windows 平台、或找不到控制台窗口（例如从某些 IDE 的集成终端启动、或
-    stdout 被完全重定向导致没有关联的控制台）——这两种情况都不算错误。
+    Windows 平台、子进程本身就是用 CREATE_NO_WINDOW 拉起的（launcher.py
+    正常发布环境下的默认情况）、或找不到控制台窗口（例如从某些 IDE 的
+    集成终端启动、或 stdout 被完全重定向导致没有关联的控制台）——以上
+    几种情况都不算错误。
     """
     if os.name != "nt":
         return False
