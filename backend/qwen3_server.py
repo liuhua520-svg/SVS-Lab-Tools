@@ -11,6 +11,24 @@ import threading
 import subprocess
 from typing import Any, Dict, List, Optional
 
+# 【2026-08 变更，修复"直接用 python 启动本脚本时，命令行只显示启动阶段
+# 那几行日志，之后处理请求产生的日志只在日志文件里能看到，命令行窗口不再
+# 更新"】原因和修法与 app.py 头部同一处改动完全一致：Python 判断
+# sys.stdout 是否连着真正的交互式终端来决定用行缓冲还是全缓冲，这个判断
+# 在 Windows 上不总是可靠，退化成全缓冲后，日志会攒在内部缓冲区里迟迟不
+# 刷新到命令行窗口（但 logging 模块如果配了 FileHandler，每次 emit()
+# 都会立刻 flush，不受影响，所以日志文件里反而更全）。
+# 用 reconfigure(line_buffering=True) 强制改成行缓冲，不再依赖自动判断。
+# --noconsole/由 launcher.py 以 CREATE_NO_WINDOW 拉起时 sys.stdout/
+# sys.stderr 可能是 None，判空后跳过，不影响正常发布环境下的运行。
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(line_buffering=True)
+        except Exception:
+            pass
+del _stream
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 

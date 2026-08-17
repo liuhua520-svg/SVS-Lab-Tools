@@ -1,4 +1,41 @@
 # -*- coding: utf-8 -*-
+# ── 输出缓冲：必须在任何 print()/logging 调用之前执行 ──────────────────────────
+# 【2026-08 变更，修复"直接 python app.py 时命令行只显示启动那几行，
+# 之后处理请求产生的日志只在日志文件里能看到，命令行窗口不再更新"】
+#
+# 原因：Python 判断 sys.stdout 是否连着一个真正的交互式终端（isatty()）
+# 来决定用哪种缓冲策略——连着真终端就用行缓冲（每个 \n 就刷新一次），
+# 否则退化成全缓冲（攒够几 KB 的内部缓冲区才真正写出去）。这个判断在
+# Windows 上并不总是可靠：取决于具体是从哪个壳层／哪种方式启动 cmd，
+# 有些路径下 Python 拿到的标准输出实际上是一层管道而不是直连控制台的
+# 句柄，isatty() 判断为假，于是退化成全缓冲——启动横幅那几行 print()
+# 因为一次性打印的内容凑够了缓冲区大小，被动触发一次刷新，看起来"能
+# 输出"，但之后陆续产生的、单条不够长的日志行会一直攒在内部缓冲区里
+# 不刷新，只有等缓冲区终于攒满、或者进程退出触发 atexit 清空缓冲区时
+# 才会一次性冒出来——命令行窗口因此看起来"卡在启动那几行不动"，但同一
+# 份内容其实已经完整写进了日志文件（logging.FileHandler 每次 emit()
+# 都会立刻 flush，不受这个问题影响，这也是为什么日志文件里看到的信息
+# 反而比命令行窗口更全）。
+#
+# 用 reconfigure(line_buffering=True) 强制 stdout/stderr 改成行缓冲，
+# 不再依赖 isatty() 的自动判断——不管是真实终端、管道还是文件重定向，
+# 每打一行就立刻刷新，命令行窗口和日志文件看到的内容始终保持同步。
+# Python 3.7+ 才有 TextIOWrapper.reconfigure()（本项目 mfa_env 用的
+# Python 版本远高于此，参见 runtime/mfa_env 打包说明），但仍加一层
+# hasattr 判断防御，避免极端环境下缺失该方法时直接崩溃退出。
+#
+# --noconsole 打包后由 launcher.py 拉起时 sys.stdout/sys.stderr 会是
+# None（见 launcher.py 里 _spawn() 相关注释）——这种场景下这段代码要
+# 判空跳过，不能对 None 调用 reconfigure()。
+import sys as _sys_early
+for _stream in (_sys_early.stdout, _sys_early.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(line_buffering=True)
+        except Exception:
+            pass
+del _stream, _sys_early
+# ─────────────────────────────────────────────────────────────────────────────
 # ── 警告过滤：必须在所有其他 import 之前执行 ─────────────────────────────────────
 # pyannote.audio.core.io 在 torchcodec DLL 缺失时用 warnings.warn() 发出 UserWarning。
 # 该警告消息以 "\n" 开头，因此 re.match(r".*torchcodec", msg) 匹配失败。
