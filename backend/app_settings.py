@@ -228,6 +228,26 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     # False → 保持二次切割（默认，行为与改造前一致）。
     "tts_disable_segment_len_split": False,
 
+    # ── 序列时间表调试文件输出（对话文本框批量处理 + TTS跟读共用总开关）──
+    # True  → 每次「对话文本框批量处理」成功生成工程文件后，额外在工作
+    #         目录下写一份 <project_title>.dtslt（JSON，UTF-8）：记录
+    #         每个对话框被加入合并时间轴的起始/结束时间（秒）、原始
+    #         台词文本、以及该对话框的 LAB 音标条目（起止时间 + 音标 +
+    #         devoiced_phoneme，音标已经是 phoneme_mode 转换后的最终
+    #         结果，与写入工程文件的音符音素完全一致）。
+    #         同时，「TTS跟读」每次 align_segments() 成功对齐一批分句
+    #         后，额外写一份 <stem>.ttslt（JSON，UTF-8）：记录每句在
+    #         合并音频中的起始/结束时间（秒）、原始文本、以及该句的
+    #         LAB 音标条目（TTS 流程不经过 phoneme_mode 转换，音标即
+    #         Qwen3-ForcedAligner 对齐输出的原始音标）。
+    # False → 不生成这两类调试文件（默认，与改造前行为一致，不产生
+    #         额外磁盘 I/O）。
+    # 两个功能共用这一个开关，不单独区分；不影响进度接口回填的
+    # sequence_timeline 内存字段（那个不受此开关控制，见
+    # tsubaki_processor.build_multitrack_project 说明）。保存后下一次
+    # 任务立即生效，无需重启任何进程。
+    "output_timeline_files": False,
+
     # ── subtitle_import.py 字幕跟读：跳过分割音频 ──────────────────────────
     # 仅影响"字幕跟读"（上传整段音频 + SRT/LRC，按字幕时间轴切分音频固定
     # 交给 Qwen3-ForcedAligner 逐段对齐）这一个功能，不影响其它任何对齐
@@ -307,6 +327,8 @@ def save_settings(new_settings: Dict[str, object]) -> Dict[str, object]:
             tts_size if tts_size in ("1.7B", "0.6B") else DEFAULT_SETTINGS["qwen3_tts_model_size"]
         )
         current["qwen3_tts_x_vector_only_default"] = bool(current.get("qwen3_tts_x_vector_only_default"))
+
+        current["output_timeline_files"] = bool(current.get("output_timeline_files"))
 
         # Qwen3-FA「按句子分段对齐」总开关，以及与其构成父子关系的
         # WhisperX 粗测预处理：bool 开关 + 模型档位字符串（非法/空值回退
@@ -702,3 +724,22 @@ def get_qwen3_tts_x_vector_only_default() -> bool:
         return bool(settings.get("qwen3_tts_x_vector_only_default"))
     except Exception:
         return bool(DEFAULT_SETTINGS["qwen3_tts_x_vector_only_default"])
+
+
+def get_output_timeline_files_enabled() -> bool:
+    """
+    供 tsubaki_processor.py（对话文本框批量处理 build_multitrack_project）
+    和 tts_processor.py（TTS跟读 align_segments）共用：实时读取"是否额外
+    输出序列时间表调试文件"总开关（.dtslt / .ttslt，均为 JSON）。
+
+    与 get_qwen3_batch_size() 等同类只读设置一样直接读盘、不做缓存——
+    这两个功能的调用频率远低于对齐热路径，直接读盘成本可忽略，且保证
+    "设置页面保存后下一次任务立即生效"，无需重启任何进程。
+
+    读取失败时安全回退到默认值 False（不生成调试文件）。
+    """
+    try:
+        settings = load_settings()
+        return bool(settings.get("output_timeline_files"))
+    except Exception:
+        return bool(DEFAULT_SETTINGS["output_timeline_files"])

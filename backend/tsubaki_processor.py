@@ -2787,6 +2787,8 @@ class TsubakiProcessor:
 
                 resolved_tracks.append({
                     "title": tr_title,
+                    "original_text": original_text,
+                    "wav_path": str(wav_path),
                     "segments": segments,
                     "f0": f0_arr,
                     "t": t_arr,
@@ -2853,6 +2855,24 @@ class TsubakiProcessor:
 
             out_path.write_text(project_text, encoding="utf-8")
 
+            # ── 【可选】序列时间表调试文件（.dtslt，JSON）：由设置页面
+            # "输出序列时间表调试文件"总开关控制，默认关闭。开启时记录
+            # 每个对话框被加入合并时间轴的具体起止时间、原始台词文本，
+            # 以及该对话框的 LAB 音标条目（已是 phoneme_mode 转换后的
+            # 最终音标，与写入工程文件的音符音素完全一致）——不影响
+            # 上面工程文件本身的生成，写入失败也不应导致整个批量处理
+            # 失败，仅记录警告日志。────────────────────────────────────
+            try:
+                import app_settings
+                if app_settings.get_output_timeline_files_enabled():
+                    self._write_dialogue_batch_timeline(
+                        project_title=project_title,
+                        resolved_tracks=resolved_tracks,
+                        total_duration_sec=total_duration_sec,
+                    )
+            except Exception as _tl_err:
+                logger.warning("[顺序合并] 序列时间表调试文件写入失败（不影响工程文件本身）: %s", _tl_err)
+
             return {
                 "success":       True,
                 "output_path":   str(out_path),
@@ -2865,6 +2885,72 @@ class TsubakiProcessor:
         except Exception as e:
             logger.error(f"批量顺序拼接工程文件生成失败: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
+
+    def _write_dialogue_batch_timeline(
+        self,
+        project_title: str,
+        resolved_tracks: List[Dict],
+        total_duration_sec: float,
+    ) -> Path:
+        """
+        写出「对话文本框批量处理」的序列时间表调试文件（.dtslt，JSON，
+        UTF-8），供用户/开发者在命令行日志之外，用一份结构化文件核对
+        每个对话框被加入合并时间轴的具体时间、原始文本、以及最终写入
+        工程文件的 LAB 音标（含起止时间与 devoiced_phoneme）。
+
+        仅在 app_settings.get_output_timeline_files_enabled() 为 True 时
+        由调用方（build_multitrack_project）触发；本方法自身不做开关
+        判断，方便单测/手动调用时绕过设置直接生成。
+
+        文件名与工程文件同名（同一个 project_title），扩展名为
+        ".dtslt"，与工程文件写在同一个 work_dir 下，覆盖写入（与工程
+        文件本身"重名即覆盖"的行为一致）。
+
+        Returns
+        -------
+        Path：写出的 .dtslt 文件路径。
+        """
+        from datetime import datetime
+
+        boxes_payload = []
+        for i, item in enumerate(resolved_tracks):
+            offset_sec = float(item.get("offset_sec") or 0.0)
+            duration_sec = float(item.get("duration_sec") or 0.0)
+            phonemes_payload = []
+            for seg in item.get("segments") or []:
+                phonemes_payload.append({
+                    "start_sec": round(self._lab_time_to_seconds(seg.start_time), 6),
+                    "end_sec": round(self._lab_time_to_seconds(seg.end_time), 6),
+                    "phoneme": seg.label,
+                    "devoiced_phoneme": seg.devoiced_phoneme,
+                })
+            boxes_payload.append({
+                "index": i,
+                "title": item.get("title"),
+                "text": item.get("original_text", ""),
+                "wav_path": item.get("wav_path"),
+                "start_sec": round(offset_sec, 6),
+                "duration_sec": round(duration_sec, 6),
+                "end_sec": round(offset_sec + duration_sec, 6),
+                "phonemes": phonemes_payload,
+            })
+
+        payload = {
+            "kind": "dialogue_batch_timeline",
+            "project_title": project_title,
+            "generated_at": datetime.now().isoformat(),
+            "total_duration_sec": round(float(total_duration_sec), 6),
+            "box_count": len(resolved_tracks),
+            "boxes": boxes_payload,
+        }
+
+        out_path = self.work_dir / f"{project_title}.dtslt"
+        out_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info("[顺序合并] 序列时间表调试文件已写出: %s", out_path)
+        return out_path
 
     def _midi_lyrics_to_words(self, midi_lyrics) -> List[str]:
         """

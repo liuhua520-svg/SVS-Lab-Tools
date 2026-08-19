@@ -1009,6 +1009,70 @@ def _get_wav_duration_100ns(path: str) -> int:
     return int(round((frames / sr) * 10_000_000))
 
 
+def _write_tts_timeline(
+    work_dir: str,
+    stem: str,
+    sentence_timeline: List[Dict],
+    total_duration_sec: float,
+) -> Path:
+    """
+    写出「TTS跟读」align_segments() 的序列时间表调试文件（.ttslt，JSON，
+    UTF-8），记录每句在合并音频里的具体起止时间、原始文本、以及该句
+    最终写入合并 LAB 的音标条目（起止时间已按该句在合并音频中的偏移量
+    平移；TTS 流程不经过 phoneme_mode 转换，音标即对齐后端的原始输出，
+    对齐失败兜底时为均匀分配的字符级时间戳）。相邻两句之间若存在间隙
+    （句间静音，通常等于 sentence_gap_sec，默认 0.35 秒；若中间有分句
+    音频缺失被跳过，间隙会相应变大），会在 "sentences" 数组里对应位置
+    插入一个 {"silence": <秒数>} 条目——静音时长直接由相邻两句的实际
+    起止时间差算出，不依赖调用方另外传入的 gap 配置值，保证与真实音频
+    间隔一致。
+
+    仅在调用方（align_segments）确认 app_settings 的"输出序列时间表
+    调试文件"总开关已开启、且提供了 work_dir/stem 时才会被调用；本函数
+    自身不做开关判断，方便单测/手动调用时绕过设置直接生成。
+
+    文件名为 "<stem>.ttslt"，与该次合成/对齐产物（<stem>.wav /
+    <stem>.lab）写在同一个 work_dir 下，覆盖写入。
+
+    Returns
+    -------
+    Path：写出的 .ttslt 文件路径。
+    """
+    from datetime import datetime
+
+    # ── 在相邻两句之间插入静音条目 ──────────────────────────────────────
+    # sentence_timeline 本身只记录"有声"的句子，句间静音（或因分句音频
+    # 缺失被跳过导致的更大间隙）不在其中——这里按顺序两两比较，用后一句
+    # 的 start_sec 减去前一句的 end_sec 得到真实间隙，> 0 才插入一条
+    # {"silence": ...}；理论上不应出现负数间隙（相邻句子重叠），但仍做
+    # 一次防御性判断，避免异常数据写出负的静音时长。
+    entries_with_silence: List[Dict] = []
+    for idx, entry in enumerate(sentence_timeline):
+        if idx > 0:
+            prev_end = sentence_timeline[idx - 1]["end_sec"]
+            gap = entry["start_sec"] - prev_end
+            if gap > 1e-6:
+                entries_with_silence.append({"silence": round(gap, 6)})
+        entries_with_silence.append(entry)
+
+    payload = {
+        "kind": "tts_alignment_timeline",
+        "stem": stem,
+        "generated_at": datetime.now().isoformat(),
+        "total_duration_sec": round(float(total_duration_sec), 6),
+        "sentence_count": len(sentence_timeline),
+        "sentences": entries_with_silence,
+    }
+
+    out_path = Path(work_dir) / f"{stem}.ttslt"
+    out_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    logger.info(f"[TTS合并] 序列时间表调试文件已写出: {out_path}")
+    return out_path
+
+
 def get_wav_duration_100ns(path: str) -> int:
     """公开版本的 _get_wav_duration_100ns，供 app.py 在复用预览音频、
     重建最终结果时计算 audio_duration，不需要越权调用下划线私有函数。"""
@@ -1234,6 +1298,13 @@ def align_segments(
     cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：每句对齐前检查一次，
                                                            #   返回 True 时立即中止并返回
                                                            #   {"success": False, "stage": "cancelled"}
+    work_dir: Optional[str] = None,   # ← 【可选】与 stem 搭配使用：提供时，且设置页面
+                                       #   "输出序列时间表调试文件"总开关已开启，会在这个
+                                       #   目录下额外写一份 "<stem>.ttslt"（JSON）序列时间表
+                                       #   调试文件。缺失（None）时跳过写入，不影响本函数
+                                       #   原有返回值——调用方不提供这两个参数时行为与改造
+                                       #   前完全一致。
+    stem: Optional[str] = None,
 ) -> Dict:
     """
     TTS 跟读的对齐半流程：对 synthesize_segments_only() 已经产出的分句
@@ -1254,6 +1325,16 @@ def align_segments(
     用于识别时间戳；真正保留进最终 WAV 产物的仍是 synthesize_segments_only()
     早先生成、未做任何处理的原始 seg_wav，且用于计算句间偏移量的
     seg_duration_100ns 也一律从原始 seg_wav 读取，不受移调影响。
+
+    work_dir / stem：可选，提供时且设置页面"输出序列时间表调试文件"总
+    开关已开启，额外在 work_dir 下写一份 "<stem>.ttslt"（JSON）：记录
+    每句在合并音频中的起始/结束时间（秒）、原始文本、以及该句最终写入
+    合并 LAB 的音标条目（TTS 流程不经过 phoneme_mode 转换，音标即
+    Qwen3-ForcedAligner 对齐输出——或对齐失败兜底时均匀分配——的原始
+    音标，起止时间均已按该句在合并音频中的偏移量平移）；相邻两句之间
+    若存在间隙（句间静音），"sentences" 数组里会在对应位置额外插入一条
+    {"silence": <秒数>}，时长按相邻两句的实际起止时间差计算（详见
+    _write_tts_timeline 说明）。
 
     Returns
     -------
@@ -1277,6 +1358,13 @@ def align_segments(
     warnings: List[str] = []
     cumulative_100ns = 0
     gap_100ns = int(round(sentence_gap_sec * 10_000_000))
+
+    # 序列时间表调试文件（.ttslt）用：每句一条记录，独立于上面拼接用的
+    # lab_entries（后者最终会被 _fill_silences_lab 重新生成 SIL 条目，
+    # 不方便按句拆分回去）——这里单独收集，仅在设置开关打开时才会被
+    # 写入文件，开关关闭时这份列表本身的构建成本可忽略（不涉及额外
+    # I/O 或对齐调用，只是复用已经算好的 local_entries / 偏移量）。
+    sentence_timeline: List[Dict] = []
 
     for i, sentence in enumerate(sentences):
         if cancel_check and cancel_check():
@@ -1327,7 +1415,26 @@ def align_segments(
             warnings.append(f"第 {i + 1} 句对齐失败，已使用均匀时间戳兜底：{align_result.get('error')}")
             local_entries = _uniform_fallback_entries(sentence, seg_duration_100ns)
 
-        lab_entries.extend(_shift_entries(local_entries, cumulative_100ns))
+        shifted_entries = _shift_entries(local_entries, cumulative_100ns)
+        lab_entries.extend(shifted_entries)
+
+        sentence_start_100ns = cumulative_100ns
+        sentence_timeline.append({
+            "index": i,
+            "text": sentence,
+            "start_sec": round(sentence_start_100ns / 10_000_000.0, 6),
+            "end_sec": round((sentence_start_100ns + seg_duration_100ns) / 10_000_000.0, 6),
+            "duration_sec": round(seg_duration_100ns / 10_000_000.0, 6),
+            "phonemes": [
+                {
+                    "start_sec": round(s / 10_000_000.0, 6),
+                    "end_sec": round(e / 10_000_000.0, 6),
+                    "phoneme": p,
+                }
+                for (s, e, p) in shifted_entries
+            ],
+        })
+
         cumulative_100ns += seg_duration_100ns
         if i < total - 1:
             cumulative_100ns += gap_100ns
@@ -1338,6 +1445,18 @@ def align_segments(
     lab_entries.sort(key=lambda t: t[0])
     raw_lab_text = _entries_to_lab_text(lab_entries)
     final_lab_text = _fill_silences_lab(raw_lab_text) if raw_lab_text else ""
+
+    if work_dir and stem:
+        try:
+            if app_settings.get_output_timeline_files_enabled():
+                _write_tts_timeline(
+                    work_dir=work_dir,
+                    stem=stem,
+                    sentence_timeline=sentence_timeline,
+                    total_duration_sec=cumulative_100ns / 10_000_000.0,
+                )
+        except Exception as _tl_err:
+            logger.warning(f"[TTS] 序列时间表调试文件写入失败（不影响合成/对齐结果本身）: {_tl_err}")
 
     return {
         "success": True,
@@ -1429,6 +1548,7 @@ def synthesize_and_align(
             align_pitch_shift_semitones=align_pitch_shift_semitones,
             progress_cb=progress_cb,
             cancel_check=cancel_check,
+            work_dir=work_dir, stem=stem,
         )
     finally:
         shutil.rmtree(str(segments_dir), ignore_errors=True)

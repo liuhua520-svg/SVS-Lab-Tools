@@ -54,6 +54,8 @@ import uuid
 import json
 import base64
 import logging
+import platform
+import subprocess
 import webbrowser
 from urllib.parse import quote
 from threading import Thread
@@ -2276,6 +2278,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         ja_disable_katakana=box_ja_disable_katakana,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                         cancel_check=lambda: is_job_cancel_requested(job_id),
+                        work_dir=str(WORK_DIR), stem=stem,
                     )
                     shutil.rmtree(job_segments_dir, ignore_errors=True)
                     set_job(job_id, stage="align", stage_status="done", box_index=box.get("index"))
@@ -3321,6 +3324,7 @@ def run_tts_pipeline_job(
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 progress_cb=_progress_cb,
                 cancel_check=cancel_check,
+                work_dir=str(WORK_DIR), stem=stem,
             )
             shutil.rmtree(job_segments_dir, ignore_errors=True)
             set_job(job_id, stage="align", stage_status="done")
@@ -3825,6 +3829,38 @@ def list_work_dir_files():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/work-dir/open", methods=["POST"])
+def open_work_dir():
+    """在系统文件管理器中打开 WORK_DIR（backend/work）
+
+    跨平台实现：
+    - Windows: os.startfile()，双击打开文件夹的标准方式，无需额外拉起子进程。
+    - macOS: `open <dir>`。
+    - Linux: `xdg-open <dir>`（依赖桌面环境提供的 xdg-utils，多数发行版默认自带）。
+
+    仅负责"打开"这一个动作，不做任何文件读写；WORK_DIR 不存在时先按需创建，
+    避免用户在全新安装、还没跑过任何任务时点击直接报错。
+    """
+    try:
+        WORK_DIR.mkdir(parents=True, exist_ok=True)
+        work_dir_str = str(WORK_DIR)
+
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(work_dir_str)  # type: ignore[attr-defined]
+        elif system == "Darwin":
+            subprocess.Popen(["open", work_dir_str])
+        else:
+            subprocess.Popen(["xdg-open", work_dir_str])
+
+        logger.info("已打开工作目录: %s", work_dir_str)
+        return jsonify({"success": True, "work_dir": work_dir_str}), 200
+
+    except Exception as e:
+        logger.error("打开工作目录失败: %s", e, exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/work-dir/download/<path:filename>", methods=["GET"])
 def download_work_file(filename: str):
     """下载工作目录中的文件"""
@@ -3906,6 +3942,7 @@ def clear_work_dir():
         # 顶层散落文件（含 projects/ 等子目录中的工程文件，用 ** 递归匹配）
         file_patterns = [
             "*.wav", "*.lab", "*.mid", "*.vsqx", "*.txt", "*.TextGrid",
+            "*.ttslt", "*.dtslt",
             "*_orig.*",
             "**/*.ustx", "**/*.svp",
         ]

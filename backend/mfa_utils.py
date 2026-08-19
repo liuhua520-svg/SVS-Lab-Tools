@@ -102,7 +102,7 @@ class MFAChecker:
         # 但这只是巧合，换一种启动方式（比如未来某天从别的解释器 import
         # 这个模块、或者需要在不同子进程里显式引用 mfa_env 路径时）就会
         # 失效，所以还是补上显式的查找路径，不再单纯依赖巧合。
-        runtime_prefix = MFAChecker.project_root() / "runtime" / "mfa_env"
+        runtime_prefix = MFAChecker.project_root() / "runtime" / ".mfa_env"
         if runtime_prefix.exists():
             return runtime_prefix
 
@@ -144,7 +144,7 @@ class MFAChecker:
         # 走到这里之前的两条路径都找不到目录时，之前会直接返回 None，
         # 导致上面 build_env() 完全没有机会设置 KALDI_ROOT / PYTHONPATH，
         # 子进程运行 montreal_forced_aligner 时自然找不到 _kalpy。
-        runtime_prefix = MFAChecker.project_root() / "runtime" / "kaldi_env"
+        runtime_prefix = MFAChecker.project_root() / "runtime" / ".kaldi_env"
         if runtime_prefix.exists():
             return runtime_prefix
 
