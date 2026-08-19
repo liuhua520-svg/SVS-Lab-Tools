@@ -372,11 +372,30 @@
         <el-divider />
 
         <div class="section-heading">
+          <span>🧾 {{ t('settings.timelineFilesSectionTitle') }}</span>
+        </div>
+        <p class="page-subtitle">{{ t('settings.timelineFilesSectionSubtitle') }}</p>
+
+        <el-alert type="success" :closable="false" show-icon class="no-restart-hint">
+          <template #title>{{ t('settings.tuningNoRestartHint') }}</template>
+        </el-alert>
+
+        <el-form-item :label="t('settings.outputTimelineFiles')">
+          <el-switch v-model="form.output_timeline_files" />
+          <p class="help-text">{{ t('settings.outputTimelineFilesHint') }}</p>
+        </el-form-item>
+
+        <el-divider />
+
+        <div class="section-heading">
           <span>🧹 {{ t('settings.cacheSectionTitle') }}</span>
         </div>
         <p class="page-subtitle">{{ t('settings.cacheSectionSubtitle') }}</p>
 
         <el-form-item>
+          <el-button :loading="openingWorkDir" @click="openWorkDir">
+            📂 {{ t('settings.openWorkDirButton') }}
+          </el-button>
           <el-button type="danger" plain :loading="clearingCache" @click="clearWorkDirCache">
             🗑️ {{ t('settings.clearCacheButton') }}
           </el-button>
@@ -471,6 +490,13 @@ interface AppSettings {
   // 字幕，每凑够 N 条才合并成一段音频一起送 Qwen3-FA 对齐一次，减少
   // 切分/对齐调用次数。静音间隙始终会打断合并，不受此设置影响。
   subtitle_import_skip_split_every_n: number
+  // ── 序列时间表调试文件输出（默认关闭，"实时生效，无需重启"）────────
+  // 开启后，「对话文本框批量处理」每次成功生成工程文件、以及「TTS跟读」
+  // 每次成功完成分句对齐，都会在工作目录额外写一份 JSON 调试文件
+  // （.dtslt / .ttslt）：记录每个对话框/每句被加入合并时间轴的具体
+  // 起止时间、原始文本、以及最终音标（起止时间 + 音标）。两个功能共用
+  // 这一个开关。
+  output_timeline_files: boolean
 }
 
 type RestartStatus = 'restarted' | 'not_running' | 'failed'
@@ -566,6 +592,7 @@ const form = ref<AppSettings>({
   ...TTS_SEGMENT_LEN_DEFAULTS,
   ...TTS_SPLIT_OPTION_DEFAULTS,
   ...SUBTITLE_IMPORT_SPLIT_DEFAULTS,
+  output_timeline_files: false,
 })
 
 // 「按句子分段对齐」总开关一旦被用户在表单里关闭，立即强制同步关闭
@@ -701,6 +728,7 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     tts_disable_newline_split: !!settings?.tts_disable_newline_split,
     tts_disable_segment_len_split: !!settings?.tts_disable_segment_len_split,
     subtitle_import_skip_split_every_n: skipSplitN,
+    output_timeline_files: !!settings?.output_timeline_files,
   }
 }
 
@@ -743,6 +771,21 @@ const save = async () => {
     ElMessage.error(t('settings.saveFailed', { error: e?.message || String(e) }))
   } finally {
     saving.value = false
+  }
+}
+
+const openingWorkDir = ref(false)
+
+const openWorkDir = async () => {
+  openingWorkDir.value = true
+  try {
+    const res = await fetch('/api/work-dir/open', { method: 'POST' })
+    const data = await res.json()
+    if (!res.ok || !data.success) throw new Error(data.error || res.statusText)
+  } catch (e: any) {
+    ElMessage.error(t('settings.openWorkDirFailed', { error: e?.message || String(e) }))
+  } finally {
+    openingWorkDir.value = false
   }
 }
 

@@ -5,15 +5,6 @@
         <div class="card-header">
           <span class="card-title">📁 {{ t('processor.cardTitle') }}</span>
           <div class="header-actions">
-            <el-tooltip :content="t('processor.githubTooltip')" placement="bottom">
-              <el-button 
-                link 
-                @click="openGitHub"
-                type="primary"
-              >
-                🔗 {{ t('processor.githubLink') }}
-              </el-button>
-            </el-tooltip>
             <el-tooltip :content="t('processor.checkStatus')" placement="bottom">
               <el-button link @click="refreshStatus" :loading="checkingStatus">
                 🔄 {{ t('processor.checkStatus') }}
@@ -4119,10 +4110,6 @@ const checkSystemStatus = async () => {
 const refreshStatus = async () => {
   await checkSystemStatus()
   ElMessage.success(t('processor.backendRefreshSuccess'))
-}
-
-const openGitHub = () => {
-  window.open('https://github.com/liuhua520-svg/SVS-Lab-Tools', '_blank')
 }
 
 const handleExceed = () => {
