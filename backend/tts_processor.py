@@ -1199,6 +1199,11 @@ def synthesize_segments_only(
     audio_chunks: List["np.ndarray"] = []
     warnings: List[str] = []
     kept_sentences: List[str] = []
+    # 预览/合成阶段序列时间表：与 align_segments 写入 .ttslt 的字段对齐
+    # （预览尚无音素级对齐，phonemes 恒为 []；起止时间由分句 wav 时长
+    # + 句间静音累加得出，与最终合并 WAV 一致）。
+    sentence_timeline: List[Dict] = []
+    cursor_sec = 0.0
     gap_samples = np.zeros(max(0, int(round(sentence_gap_sec * SAMPLE_RATE))), dtype="float32")
 
     try:
@@ -1229,7 +1234,21 @@ def synthesize_segments_only(
             sf.write(str(seg_wav), seg_samples, SAMPLE_RATE, subtype="PCM_16")
 
             if audio_chunks:
+                # 句间静音：先推进时间轴，再接下一段有声内容
+                cursor_sec += float(sentence_gap_sec)
                 audio_chunks.append(gap_samples)
+            dur_sec = float(len(seg_samples)) / float(SAMPLE_RATE)
+            start_sec = cursor_sec
+            end_sec = start_sec + dur_sec
+            sentence_timeline.append({
+                "index": len(kept_sentences),
+                "text": sentence,
+                "start_sec": round(start_sec, 6),
+                "end_sec": round(end_sec, 6),
+                "duration_sec": round(dur_sec, 6),
+                "phonemes": [],  # 预览阶段未做对齐，音素留空
+            })
+            cursor_sec = end_sec
             audio_chunks.append(seg_samples)
             kept_sentences.append(sentence)
 
@@ -1244,6 +1263,22 @@ def synthesize_segments_only(
         wav_path = str(work_dir_path / f"{stem}.wav")
         sf.write(wav_path, merged, SAMPLE_RATE, subtype="PCM_16")
 
+        ttslt_path = None
+        # 合成完成后即可写 .ttslt（与「开始处理」对齐后写出的格式一致，
+        # 只是 phonemes 为空）。开关与对齐路径共用 output_timeline_files；
+        # 预览路径在 app.py run_tts_preview_job 里会再强制写一份，保证
+        # 用户点「生成预览」完成时一定能拿到文件。
+        try:
+            if app_settings.get_output_timeline_files_enabled():
+                ttslt_path = str(_write_tts_timeline(
+                    work_dir=str(work_dir_path),
+                    stem=stem,
+                    sentence_timeline=sentence_timeline,
+                    total_duration_sec=cursor_sec,
+                ))
+        except Exception as _tl_err:
+            logger.warning(f"[TTS合成] 序列时间表调试文件写入失败（不影响预览音频）: {_tl_err}")
+
         return {
             "success": True,
             "wav_path": wav_path,
@@ -1252,6 +1287,9 @@ def synthesize_segments_only(
             "sentence_count": len(kept_sentences),
             "audio_duration": _get_wav_duration_100ns(wav_path),
             "warnings": warnings,
+            "sentence_timeline": sentence_timeline,
+            "total_duration_sec": cursor_sec,
+            "ttslt_path": ttslt_path,
         }
     except Exception as e:
         shutil.rmtree(str(segments_dir), ignore_errors=True)

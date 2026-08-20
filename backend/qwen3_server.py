@@ -477,7 +477,13 @@ def load_forced_aligner(device_override: str = "auto"):
             _fa_model = Qwen3FA.from_pretrained(
                 FORCED_ALIGNER_ID, dtype=dtype, device_map=device_map,
             )
-            _fa_model_device = device_map
+            # 【缓存 key 修复】必须写回原始 device_override（"auto"/"cpu"/"cuda"），
+            # 不能写解析后的 device_map（"cuda:0" 等）。否则下次请求传来的
+            # device_override 仍是 "auto"，与这里存的 "cuda:0" 永远不相等，
+            # 导致缓存判断 (_fa_model_device == device_override) 每次都判定为
+            # "配置变了"，从而每次请求都触发模型重新加载——这正是与 load_model()
+            # 保持一致的写法（对照上面第 387 行 _model_device = device_override）。
+            _fa_model_device = device_override
             logger.info("✅ Qwen3-ForcedAligner 模型加载成功！服务已就绪。")
             return _fa_model
         except Exception as e:

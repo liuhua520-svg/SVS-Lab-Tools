@@ -3141,6 +3141,25 @@ def run_tts_preview_job(
             wav_path.unlink(missing_ok=True)
             raise
 
+        # 预览生成完成即写出 .ttslt（与合并 WAV 同目录、同 stem）。
+        # 不依赖设置页「输出序列时间表调试文件」开关——用户点「生成预览」
+        # 就是为了试听并核对分句时间轴，此时直接落盘最符合预期；对齐阶段
+        # 的 .ttslt 仍受该开关控制（见 tts_processor.align_segments）。
+        ttslt_path = result.get("ttslt_path")
+        if not ttslt_path and result.get("sentence_timeline"):
+            try:
+                ttslt_path = str(tts_processor._write_tts_timeline(
+                    work_dir=str(wav_path.parent),
+                    stem=stem,
+                    sentence_timeline=result["sentence_timeline"],
+                    total_duration_sec=float(result.get("total_duration_sec") or 0.0),
+                ))
+            except Exception as _tl_err:
+                logger.warning(f"[TTS预览] 写出 .ttslt 失败（不影响试听）: {_tl_err}")
+                ttslt_path = None
+        if ttslt_path:
+            logger.info(f"[TTS预览] 序列时间表已写出: {ttslt_path}")
+
         preview_id = _tts_preview_store({
             "segments_dir": result["segments_dir"],
             "sentences": result["sentences"],
@@ -3153,6 +3172,7 @@ def run_tts_preview_job(
             "text": text, "engine": engine, "voice": voice,
             "rate": rate, "volume": volume, "pitch": pitch, "language": language,
             "qwen3_tts_options_json": json.dumps(qwen3_tts_options or {}, sort_keys=True),
+            "ttslt_path": ttslt_path,
         })
 
         set_job(job_id, status="done", finished_at=datetime.now().isoformat(), result={
@@ -3162,6 +3182,7 @@ def run_tts_preview_job(
             "sentence_count": result.get("sentence_count", 0),
             "audio_duration": result.get("audio_duration", 0),
             "warnings": result.get("warnings", []),
+            "ttslt_path": ttslt_path,
         })
 
     except Exception as e:

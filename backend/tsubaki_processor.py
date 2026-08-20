@@ -228,7 +228,7 @@ class TsubakiProcessor:
     }
 
     # 真正的静音标签：跳过（不生成音符），但用 '-' 填充其占用的时间段
-    _TRUE_SILENCE = {"pau", "sil", "sp", "spn", "br", "silence", "noise", "ap", "blank"}
+    _TRUE_SILENCE = {"pau", "sil", "sp", "spn", "br", "ap"}
 
     def __init__(self, work_dir: str):
         self.work_dir = Path(work_dir)
