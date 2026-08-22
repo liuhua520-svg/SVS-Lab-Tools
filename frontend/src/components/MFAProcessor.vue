@@ -310,6 +310,21 @@
             <el-alert :closable="false" type="info" :title="t('processor.qwen3TtsNoRateHint')" show-icon />
           </el-form-item>
 
+          <!-- 句间静音间隔：合成时逐句之间插入的静音时长，与引擎类型无关（讲述人 /
+               EdgeTTS / Qwen3-TTS 都适用）。这个值会直接烧录进拼接出的 WAV 里，
+               因此和文本/引擎/音色/语速/音调/音量/语种一样，改动后会让已生成的
+               手动分段预览失效（详见下面 ttsSegmentPreviewReady 的判断条件）。 -->
+          <el-form-item :label="t('processor.ttsSentenceGapSec')">
+            <el-input-number
+              v-model="ttsConfig.sentenceGapSec"
+              :min="0" :max="10" :step="0.05" :precision="2"
+              controls-position="right" :disabled="processing"
+            />
+            <div class="help-text">
+              <small>{{ t('processor.ttsSentenceGapSecHint') }}</small>
+            </div>
+          </el-form-item>
+
           <!-- 手动分段预览：不再随输入自动防抖触发，只在用户点击按钮时按新分
                段规则（优先按换行分段，单行过长再按句号/逗号二次切割）逐句合成
                生成预览音频（不做 Qwen3-FA 对齐，也不再有句子数量上限，会合成
@@ -1964,13 +1979,16 @@ type TtsEngine = { id: string; label: string; label_zh: string; available: boole
 type Qwen3TtsMode = 'custom_voice' | 'voice_design' | 'voice_clone'
 
 const inputMode = ref<'audio' | 'tts' | 'subtitle'>('audio')
-const ttsConfig = ref<{ engine: string; narratorId: string; voice: string; rateNum: number; pitchNum: number; volumeNum: number }>({
+const ttsConfig = ref<{ engine: string; narratorId: string; voice: string; rateNum: number; pitchNum: number; volumeNum: number; sentenceGapSec: number }>({
   engine: 'edge_tts',
   narratorId: '',
   voice: '',
   rateNum: 0,
   pitchNum: 0,
   volumeNum: 0,
+  // 句间静音间隔（秒），与引擎类型无关。默认 0.35 秒，与后端
+  // tts_processor.DEFAULT_SENTENCE_GAP_SEC 保持一致。
+  sentenceGapSec: 0.35,
 })
 
 // Qwen3-TTS 专用状态：主面板（不经"语音预设"套用时）直接编辑这些字段。
@@ -3459,6 +3477,7 @@ const buildTtsReuseCompareParams = async (): Promise<Record<string, string>> => 
   pitch: `${ttsConfig.value.pitchNum >= 0 ? '+' : ''}${ttsConfig.value.pitchNum}Hz`,
   language: formData.value.language,
   qwen3_tts_options_json: JSON.stringify((await buildQwen3TtsOptionsForPreview()) || {}),
+  sentence_gap_sec: String(ttsConfig.value.sentenceGapSec),
 })
 
 const runSegmentPreview = async () => {
@@ -3491,6 +3510,7 @@ const runSegmentPreview = async () => {
         pitch: `${ttsConfig.value.pitchNum >= 0 ? '+' : ''}${ttsConfig.value.pitchNum}Hz`,
         volume: `${ttsConfig.value.volumeNum >= 0 ? '+' : ''}${ttsConfig.value.volumeNum}%`,
         qwen3_tts_options,
+        sentence_gap_sec: ttsConfig.value.sentenceGapSec,
       }),
     })
     const data = await res.json()
@@ -4305,6 +4325,7 @@ const processAudio = async () => {
       formDataObj.append('rate', `${ttsConfig.value.rateNum >= 0 ? '+' : ''}${ttsConfig.value.rateNum}%`)
       formDataObj.append('pitch', `${ttsConfig.value.pitchNum >= 0 ? '+' : ''}${ttsConfig.value.pitchNum}Hz`)
       formDataObj.append('volume', `${ttsConfig.value.volumeNum >= 0 ? '+' : ''}${ttsConfig.value.volumeNum}%`)
+      formDataObj.append('sentence_gap_sec', ttsConfig.value.sentenceGapSec.toString())
       formDataObj.append('aligner_device', advancedConfig.value.aligner_device)
       formDataObj.append('align_pitch_shift_semitones', advancedConfig.value.align_pitch_shift_semitones.toString())
       formDataObj.append('english_word_align', englishWordAlignEffective.value.toString())

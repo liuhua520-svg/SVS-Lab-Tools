@@ -255,6 +255,31 @@
                 </el-form-item>
               </el-col>
 
+              <el-col :xs="24" :sm="12">
+                <el-form-item :label="t('dialogue.boxGapSec')">
+                  <el-input-number
+                    v-model="advanced.box_gap_sec"
+                    :min="0" :max="10" :step="0.05" :precision="2"
+                    controls-position="right" :disabled="processing"
+                  />
+                  <div class="help-text">
+                    <small>{{ t('dialogue.boxGapSecHint') }}</small>
+                  </div>
+                </el-form-item>
+              </el-col>
+              <el-col v-if="inputMode === 'tts'" :xs="24" :sm="12">
+                <el-form-item :label="t('dialogue.ttsSentenceGapSec')">
+                  <el-input-number
+                    v-model="ttsSentenceGapSec"
+                    :min="0" :max="10" :step="0.05" :precision="2"
+                    controls-position="right" :disabled="processing"
+                  />
+                  <div class="help-text">
+                    <small>{{ t('dialogue.ttsSentenceGapSecHint') }}</small>
+                  </div>
+                </el-form-item>
+              </el-col>
+
               <el-col :xs="24">
                 <el-divider>📈 {{ t('processor.pitchControl') }}</el-divider>
               </el-col>
@@ -1985,6 +2010,11 @@ interface AdvancedConfig {
   f0_ceil: number
   fill_short_rests: boolean
   fill_short_rests_max_length: '8' | '16' | '32' | '64' | '128'
+  // 相邻两个对话框在合并时间轴上的静音间隔（秒）。两种输入模式
+  // （TTS跟读 / 音频跟读）都生效，与 BPM 一样整批统一、不支持按框
+  // 覆盖。默认 0.35 秒，与下面的 ttsSentenceGapSec（TTS跟读句间静音）
+  // 默认值保持一致，两者是相互独立的两个间隔概念，详见各自字段说明。
+  box_gap_sec: number
 }
 
 // ── 每个对话框的"单独设置"：不包含 BPM（BPM 决定整批对话框合并后的
@@ -2555,7 +2585,16 @@ const advanced = ref<AdvancedConfig>({
   f0_ceil: 800,
   fill_short_rests: false,
   fill_short_rests_max_length: '32',
+  box_gap_sec: 0.35,
 })
+
+// TTS跟读（inputMode === 'tts'）逐句合成的句间静音间隔（秒），仅在该
+// 输入模式下提交/生效；"音频跟读"模式下该字段被忽略（音频是用户
+// 上传的，不存在"逐句合成"这一步）。与上面 advanced.box_gap_sec
+// （对话框与对话框之间的间隔）是两个独立概念，不要混淆：这个控制的是
+// 同一个对话框内部、按标点/换行切分出的句子之间的间隔。默认 0.35 秒，
+// 与后端 tts_processor.DEFAULT_SENTENCE_GAP_SEC 保持一致。
+const ttsSentenceGapSec = ref(0.35)
 
 // 与 MFAProcessor.vue 保持一致：显示条件与"英语单词级对齐"开关挂钩。
 // 这里只控制"英语单词→音素映射"开关本身的可见性，与下方"选择词典"
@@ -3046,16 +3085,20 @@ const waitForBoxPreviewJobFinished = (boxId: number, jobId: string): Promise<any
 // （watch 本身需要在 boxes 声明之后才能建立，定义见下方 boxes 声明处）
 const _boxSegmentPreviewSignatures = new Map<number, string>()
 // 不含 text 的"其它字段"签名——与后端 _tts_preview_take() 校验字段一一
-// 对应（只是去掉了 text，text 单独比对）。
-const _boxSegmentPreviewOtherSignature = (box: DialogueBox, language: string, qwen3OptionsJson: string) =>
+// 对应（只是去掉了 text，text 单独比对）。ttsSentenceGapSec 是页面顶部
+// 全局共享的句间静音间隔（不像语速/音调/音量那样按框独立设置），一变化
+// 就影响全部框的预览有效性，因此这里作为额外参数传入，与 language 的
+// 传参方式一致。
+const _boxSegmentPreviewOtherSignature = (box: DialogueBox, language: string, qwen3OptionsJson: string, sentenceGapSec: number) =>
   JSON.stringify([
-    box.ttsEngine, box.ttsVoice, box.ttsRate, box.ttsPitch, box.ttsVolume, language, qwen3OptionsJson,
+    box.ttsEngine, box.ttsVoice, box.ttsRate, box.ttsPitch, box.ttsVolume, language, qwen3OptionsJson, sentenceGapSec,
   ])
-const _boxSegmentPreviewSignature = (box: DialogueBox, language: string) =>
+const _boxSegmentPreviewSignature = (box: DialogueBox, language: string, sentenceGapSec: number) =>
   JSON.stringify([
     box.text, box.ttsEngine, box.ttsVoice, box.ttsRate, box.ttsPitch, box.ttsVolume, language,
     box.ttsQwen3Mode, box.ttsQwen3Size, box.ttsQwen3Instruct, box.ttsQwen3RefText,
     box.ttsQwen3XVectorOnly, box.ttsQwen3RefAudioFile?.name || '', box.ttsQwen3RefAudioPath,
+    sentenceGapSec,
   ])
 
 const runBoxSegmentPreview = async (box: DialogueBox) => {
@@ -3086,6 +3129,7 @@ const runBoxSegmentPreview = async (box: DialogueBox) => {
         voice: box.ttsVoice,
         rate, pitch, volume,
         qwen3_tts_options,
+        sentence_gap_sec: ttsSentenceGapSec.value,
       }),
     })
     const data = await res.json()
@@ -3138,7 +3182,7 @@ const runBoxSegmentPreview = async (box: DialogueBox) => {
     box.ttsSegmentPreviewSnapshot = {
       text,
       otherSig: _boxSegmentPreviewOtherSignature(
-        box, effectiveLanguage, JSON.stringify(qwen3_tts_options || {}),
+        box, effectiveLanguage, JSON.stringify(qwen3_tts_options || {}), ttsSentenceGapSec.value,
       ),
     }
   } catch (e: any) {
@@ -3533,7 +3577,7 @@ watch(() => boxSettings.value.draft.jaDisableKatakana, (enabled) => {
 // 变化判定的轻量代理，与旧版全量签名的做法一致——这里只是"是否变化"的
 // 判定，不是实际提交内容，足够检测到用户换了一份参考音频文件。
 watch(
-  [boxes, sharedLanguage],
+  [boxes, sharedLanguage, ttsSentenceGapSec],
   ([currentBoxes]) => {
     for (const box of currentBoxes) {
       const qwen3OptionsSig = JSON.stringify([
@@ -3541,8 +3585,8 @@ watch(
         box.ttsQwen3XVectorOnly, box.ttsQwen3RefAudioFile?.name || '', box.ttsQwen3RefAudioPath,
       ])
       const effectiveLanguage = boxEffectiveLanguage(box)
-      const otherSig = _boxSegmentPreviewOtherSignature(box, effectiveLanguage, qwen3OptionsSig)
-      const fullSig = _boxSegmentPreviewSignature(box, effectiveLanguage)
+      const otherSig = _boxSegmentPreviewOtherSignature(box, effectiveLanguage, qwen3OptionsSig, ttsSentenceGapSec.value)
+      const fullSig = _boxSegmentPreviewSignature(box, effectiveLanguage, ttsSentenceGapSec.value)
       const prevFullSig = _boxSegmentPreviewSignatures.get(box.id)
 
       if (prevFullSig !== undefined && box.ttsSegmentPreviewId) {
@@ -4224,6 +4268,13 @@ const buildFormData = async (): Promise<FormData> => {
   ))
   fd.append('bpm', String(advanced.value.bpm))
   fd.append('base_pitch', String(advanced.value.base_pitch))
+  // 相邻两个对话框在合并时间轴上的静音间隔（秒），两种输入模式都提交。
+  fd.append('box_gap_sec', String(advanced.value.box_gap_sec))
+  // TTS跟读逐句合成的句间静音间隔（秒），仅 inputMode === 'tts' 时有
+  // 意义；"音频跟读"模式下后端会忽略这个字段，这里仍无条件提交当前值，
+  // 不影响该模式的行为（与其它 TTS 专属字段的提交习惯一致，简化前端
+  // 分支判断）。
+  fd.append('tts_sentence_gap_sec', String(ttsSentenceGapSec.value))
   fd.append('f0_method', advanced.value.f0_method)
   fd.append('f0_smooth', String(advanced.value.f0_smooth))
   fd.append('f0_smooth_window', String(advanced.value.f0_smooth_window))
@@ -4472,7 +4523,7 @@ const startProcessing = async () => {
         box.ttsQwen3Mode, box.ttsQwen3Size, box.ttsQwen3Instruct, box.ttsQwen3RefText,
         box.ttsQwen3XVectorOnly, box.ttsQwen3RefAudioFile?.name || '', box.ttsQwen3RefAudioPath,
       ])
-      const currentOtherSig = _boxSegmentPreviewOtherSignature(box, boxEffectiveLanguage(box), qwen3OptionsSig)
+      const currentOtherSig = _boxSegmentPreviewOtherSignature(box, boxEffectiveLanguage(box), qwen3OptionsSig, ttsSentenceGapSec.value)
 
       if (snapshot.otherSig !== currentOtherSig) {
         // 其它字段已变化：静默作废，不弹窗。
