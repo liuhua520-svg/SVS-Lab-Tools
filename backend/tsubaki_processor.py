@@ -103,6 +103,15 @@ class AudioProcessingConfig:
     # config.bpm；数值越大（如 128）阈值越短，能填充的休止符越少。
     fill_short_rests_max_length: str = "16"
 
+    # ── 对话文本框批量处理专用：相邻两个对话框在合并时间轴上的静音间隔
+    # （秒）。仅 build_multitrack_project() 读取，单文件流程不使用这个
+    # 字段。默认 0.35 秒，与 tts_processor.DEFAULT_SENTENCE_GAP_SEC（TTS
+    # 跟读逐句间隔的默认值）保持一致，两个功能的"句间/框间静音"概念在
+    # 用户侧观感上是同一件事。旧调用方（未升级、不知道这个字段）不受
+    # 影响——dataclass 默认值保证行为与该功能上线前一致，不会突然从
+    # "背靠背无缝衔接"变成有间隙。
+    box_gap_sec: float = 0.35
+
     def to_dict(self) -> Dict:
         return {
             "bpm": self.bpm,
@@ -121,6 +130,7 @@ class AudioProcessingConfig:
             "enable_ap_check": self.enable_ap_check,
             "fill_short_rests": self.fill_short_rests,
             "fill_short_rests_max_length": self.fill_short_rests_max_length,
+            "box_gap_sec": self.box_gap_sec,
         }
 
 # ---------------------------------------------------------------------------
@@ -2816,8 +2826,15 @@ class TsubakiProcessor:
             # （SVP: groups[i].blickOffset；USTX: voice_parts[i].position；
             # VSQX: vsPart[i].<t>）。这样每个对话框在编辑器里仍是一段独立
             # 可拖动/编辑的序列，而不是被合并成一条连续音符列表 ─────────
+            # 相邻两个对话框之间额外插入 config.box_gap_sec 秒静音间隔
+            # （默认 0.35 秒，与 TTS 跟读的句间静音默认值一致）；只在
+            # 第一个对话框*之后*的每一个对话框前面插入一次，第一个对话框
+            # 仍从 0 秒开始，不会在整段音频开头凭空多出一段静音。
+            box_gap_sec = max(0.0, float(getattr(config, "box_gap_sec", 0.35) or 0.0))
             cursor_sec = 0.0
-            for item in resolved_tracks:
+            for idx, item in enumerate(resolved_tracks):
+                if idx > 0:
+                    cursor_sec += box_gap_sec
                 item["offset_sec"] = cursor_sec
                 cursor_sec += float(item.get("duration_sec") or 0.0)
             total_duration_sec = cursor_sec
@@ -2906,6 +2923,15 @@ class TsubakiProcessor:
         ".dtslt"，与工程文件写在同一个 work_dir 下，覆盖写入（与工程
         文件本身"重名即覆盖"的行为一致）。
 
+        相邻两个对话框之间若存在间隙（框间静音，通常等于 config.
+        box_gap_sec，默认 0.35 秒），会在 "boxes" 数组里对应位置插入一个
+        {"silence": <秒数>} 条目——与 tts_processor._write_tts_timeline()
+        里 "sentences" 数组的 {"silence": ...} 写法完全一致（.ttslt /
+        .dtslt 共用同一套调试文件约定）。静音时长直接由相邻两个对话框的
+        实际起止时间差算出，不依赖调用方另外传入的间隔配置值，保证与
+        真实工程文件时间轴一致（即便未来 box_gap_sec 以外的因素也会
+        影响间隙，这里读到的仍然是最终真实值）。
+
         Returns
         -------
         Path：写出的 .dtslt 文件路径。
@@ -2913,9 +2939,23 @@ class TsubakiProcessor:
         from datetime import datetime
 
         boxes_payload = []
+        prev_end_sec: Optional[float] = None
         for i, item in enumerate(resolved_tracks):
             offset_sec = float(item.get("offset_sec") or 0.0)
             duration_sec = float(item.get("duration_sec") or 0.0)
+            end_sec = offset_sec + duration_sec
+
+            # ── 与上一个对话框之间的间隙：用这一框的 start_sec 减去上一框
+            # 的 end_sec，> 0 才插入一条 {"silence": ...}；理论上不应出现
+            # 负数间隙（相邻对话框重叠），仍做一次防御性判断，避免异常
+            # 数据写出负的静音时长。第一个对话框（prev_end_sec 为 None）
+            # 前面没有"上一框"，不产生静音条目。──────────────────────
+            if prev_end_sec is not None:
+                gap = offset_sec - prev_end_sec
+                if gap > 1e-6:
+                    boxes_payload.append({"silence": round(gap, 6)})
+            prev_end_sec = end_sec
+
             phonemes_payload = []
             for seg in item.get("segments") or []:
                 phonemes_payload.append({
@@ -2931,7 +2971,7 @@ class TsubakiProcessor:
                 "wav_path": item.get("wav_path"),
                 "start_sec": round(offset_sec, 6),
                 "duration_sec": round(duration_sec, 6),
-                "end_sec": round(offset_sec + duration_sec, 6),
+                "end_sec": round(end_sec, 6),
                 "phonemes": phonemes_payload,
             })
 

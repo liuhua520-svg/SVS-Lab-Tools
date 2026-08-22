@@ -63,7 +63,7 @@ from time import sleep
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
-from flask import Flask, request, jsonify, send_from_directory, abort, Response
+from flask import Flask, Request, request, jsonify, send_from_directory, abort, Response
 from flask_cors import CORS
 import requests
 
@@ -100,6 +100,27 @@ def _parse_align_pitch_shift(raw) -> float:
     if v != v:  # NaN
         return 0.0
     return max(-24.0, min(24.0, v))
+
+
+def _parse_sentence_gap_sec(raw) -> float:
+    """
+    解析"句间静音间隔"表单/JSON 字段（秒，浮点数）。用于 TTS跟读（单文件
+    页面 /api/tts/process、/api/tts/synthesize_preview，以及对话文本框
+    批量处理的 TTS 模式）逐句合成之间插入的静音时长，透传给
+    tts_processor.synthesize_segments_only / align_segments /
+    synthesize_and_align 的 sentence_gap_sec 参数。
+
+    缺省/非法输入时回退到 tts_processor.DEFAULT_SENTENCE_GAP_SEC（0.35
+    秒），与该功能上线前的固定行为一致。夹到 [0, 10] 秒，防止极端输入
+    产出异常冗长的静音拖垮合并音频时长。
+    """
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return tts_processor.DEFAULT_SENTENCE_GAP_SEC
+    if v != v:  # NaN
+        return tts_processor.DEFAULT_SENTENCE_GAP_SEC
+    return max(0.0, min(10.0, v))
 
 
 def _decode_subtitle_text(raw: bytes) -> str:
@@ -321,7 +342,30 @@ WORK_DIR = (BASE_DIR / "work").resolve()
 WINDOWS_SAFE_PATH_LIMIT = 248
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
+# 对话文本框批量处理（/api/dialogue/process）单次请求可携带上千个 multipart
+# 字段（box_count 上限 1000 × 每框 ~15-20 个 override_*/tts_* 字段 + 文件），
+# 远超 Werkzeug 2.2.3+ 引入、且自 Werkzeug 3.1 起在 Request 类上默认启用的
+# max_form_parts（默认 1000）。该限制与 MAX_CONTENT_LENGTH（总请求体大小）
+# 无关，是独立的字段"个数"上限，超出时同样抛 RequestEntityTooLarge（413），
+# 且发生在 request.form 解析阶段，早于任何业务代码执行——traceback 里最先
+# 访问 request.form 的那一行（如 box_count）看起来像是"罪魁祸首"，实际只是
+# 最先触发解析的位置。同时 Werkzeug 3.1 起 max_form_memory_size（单个非文件
+# 字段的大小上限）默认从"无限制"收紧为 500KB，可能影响 word_phoneme_map/
+# qwen3_tts_options 等较大的 JSON 字符串字段。
+#
+# 注意：这两个限制自 Flask 3.1 起才能通过 app.config["MAX_FORM_PARTS"] /
+# app.config["MAX_FORM_MEMORY_SIZE"] 配置；当前环境是 Flask 2.3.3 + Werkzeug
+# 3.1.8（pip list 确认），版本不匹配导致 Flask 完全不读取这两个 config 键，
+# 设置了也不会生效。Flask 2.3.3 尚未实现 Flask issue #5625 那次改动。
+# 因此改为直接子类化 Werkzeug/Flask 的 Request 类，在类属性层面设置，这两个
+# 属性从 Werkzeug 2.2.3 起就存在于 Request 类上，与 Flask 版本无关。
+class _DialogueBatchRequest(Request):
+    max_form_parts = 10000
+    max_form_memory_size = 10 * 1024 * 1024
+
+
 app = Flask(__name__, static_folder=str(FRONTEND_DIST), static_url_path="/static")
+app.request_class = _DialogueBatchRequest
 app.config["MAX_CONTENT_LENGTH"] = 512 * 1024 * 1024
 CORS(app, supports_credentials=True)
 
@@ -2205,6 +2249,14 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
 
         pre_failed: list = []
 
+        # TTS跟读句间静音间隔（秒）：仅 input_mode == "tts" 时有意义，且
+        # 不是 pipeline.process_dialogue_batch() 认识的参数（那边只接受
+        # 框间间隔 box_gap_sec）——必须在这里先从 kwargs 里弹出，避免
+        # 随后 pipeline.process_dialogue_batch(**kwargs) 时被当成未知
+        # 关键字参数导致 TypeError。input_mode == "audio" 时这个键可能
+        # 压根不在 kwargs 里（旧前端/该请求未提交），pop 的默认值兜底。
+        tts_sentence_gap_sec = kwargs.pop("tts_sentence_gap_sec", tts_processor.DEFAULT_SENTENCE_GAP_SEC)
+
         if input_mode == "tts":
             language = kwargs.get("language", "cmn")
             aligner_device = kwargs.get("aligner_device")
@@ -2276,6 +2328,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         aligner_device=aligner_device,
                         english_word_align=box_english_word_align,
                         ja_disable_katakana=box_ja_disable_katakana,
+                        sentence_gap_sec=tts_sentence_gap_sec,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                         cancel_check=lambda: is_job_cancel_requested(job_id),
                         work_dir=str(WORK_DIR), stem=stem,
@@ -2325,6 +2378,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         aligner_device=aligner_device,
                         english_word_align=box_english_word_align,
                         ja_disable_katakana=box_ja_disable_katakana,
+                        sentence_gap_sec=tts_sentence_gap_sec,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                         qwen3_tts_options=tts_info.get("qwen3_tts_options"),
                         stage_cb=_box_stage_cb,
@@ -2587,6 +2641,32 @@ def dialogue_process():
         export_pitch_line = request.form.get("export_pitch_line", "true").lower() == "true"
         vsqx_pitch_smooth_window = int(request.form.get("vsqx_pitch_smooth_window", 5))
 
+        # 相邻两个对话框在合并时间轴上的静音间隔（秒），整批统一生效
+        # （与 BPM 一样不支持按框覆盖）。默认 0.35 秒，与 TTS 跟读的句间
+        # 静音默认值（tts_processor.DEFAULT_SENTENCE_GAP_SEC）一致。
+        # 兼容旧前端（未提交该字段）：缺省时按 0.35 处理，不影响未升级
+        # 客户端的既有行为预期（此前虽然实际是 0 间隔，但用户此前也从未
+        # 显式依赖"背靠背无缝衔接"这一细节，0.35 是与 TTS 跟读一致的
+        # 更合理默认值）。
+        try:
+            box_gap_sec = float(request.form.get("box_gap_sec", 0.35))
+        except (TypeError, ValueError):
+            box_gap_sec = 0.35
+        box_gap_sec = max(0.0, min(box_gap_sec, 10.0))
+
+        # TTS跟读（input_mode="tts"）逐句合成的句间静音间隔（秒），整批
+        # 统一生效。与上面的 box_gap_sec 是两个独立的概念：box_gap_sec
+        # 控制"对话框与对话框之间"的间隔，这里控制"同一个对话框内部，
+        # 句子与句子之间"的间隔（透传给 tts_processor.synthesize_and_align /
+        # align_segments 的 sentence_gap_sec 参数）。仅 input_mode="tts"
+        # 时有意义，"音频跟读"模式下该字段会被忽略。默认 0.35 秒，与
+        # tts_processor.DEFAULT_SENTENCE_GAP_SEC 保持一致。
+        try:
+            tts_sentence_gap_sec = float(request.form.get("tts_sentence_gap_sec", 0.35))
+        except (TypeError, ValueError):
+            tts_sentence_gap_sec = 0.35
+        tts_sentence_gap_sec = max(0.0, min(tts_sentence_gap_sec, 10.0))
+
         aligner_backend = request.form.get("aligner_backend", "mfa")
         if aligner_backend not in ("mfa", "whisperx", "qwen3_asr", "qwen3_aligner", "nemo_aligner"):
             aligner_backend = "mfa"
@@ -2765,6 +2845,7 @@ def dialogue_process():
                         "rate": tts_rate_i, "volume": tts_volume_i, "pitch": tts_pitch_i,
                         "language": box_effective_language,
                         "qwen3_tts_options_json": json.dumps(box_qwen3_tts_options or {}, sort_keys=True),
+                        "sentence_gap_sec": tts_sentence_gap_sec,
                     }) if box_preview_id else None
                     if box_preview_entry:
                         tts_info["preview_segments_dir"] = box_preview_entry["segments_dir"]
@@ -2892,6 +2973,8 @@ def dialogue_process():
                 dict_source=dict_source,
                 fill_short_rests=fill_short_rests,
                 fill_short_rests_max_length=fill_short_rests_max_length,
+                box_gap_sec=box_gap_sec,
+                tts_sentence_gap_sec=tts_sentence_gap_sec,
             ),
         ).start()
 
@@ -3096,6 +3179,7 @@ def run_tts_preview_job(
     volume: str,
     pitch: str,
     qwen3_tts_options: Optional[Dict],
+    sentence_gap_sec: float = tts_processor.DEFAULT_SENTENCE_GAP_SEC,
 ):
     """
     手动分段预览的后台任务体：与 run_tts_pipeline_job 共用同一套
@@ -3106,6 +3190,13 @@ def run_tts_preview_job(
     线程里同步跑完才返回响应，连接慢或合成耗时较长时前端会一直卡在
     "正在生成分段预览…" 且没有任何进度或超时反馈；改成后台线程 + 轮询后，
     前端可以持续拿到 done 句数 / 总句数，且不再受单次 HTTP 请求超时限制。
+
+    sentence_gap_sec：句间静音间隔（秒），默认 0.35（与
+    tts_processor.DEFAULT_SENTENCE_GAP_SEC 一致）。这个值会直接烧录进
+    预览拼接出的 WAV 里（synthesize_segments_only 内部按这个间隔在分句
+    音频之间插入静音），因此也一并存入下面的预览缓存条目参与复用校验——
+    用户在"开始处理"前又调整了这个滑块时，缓存会被判定为过期，退回
+    重新合成，不会出现"听到的预览间隔"和"最终产物间隔"对不上的情况。
     """
     try:
         set_job(job_id, status="running", started_at=datetime.now().isoformat(),
@@ -3122,6 +3213,7 @@ def run_tts_preview_job(
             text=text, language=language, voice=voice, engine=engine,
             work_dir=str(preview_dir), stem=stem,
             rate=rate, volume=volume, pitch=pitch,
+            sentence_gap_sec=sentence_gap_sec,
             qwen3_tts_options=qwen3_tts_options,
             progress_cb=_progress_cb,
         )
@@ -3172,6 +3264,7 @@ def run_tts_preview_job(
             "text": text, "engine": engine, "voice": voice,
             "rate": rate, "volume": volume, "pitch": pitch, "language": language,
             "qwen3_tts_options_json": json.dumps(qwen3_tts_options or {}, sort_keys=True),
+            "sentence_gap_sec": sentence_gap_sec,
             "ttslt_path": ttslt_path,
         })
 
@@ -3235,6 +3328,7 @@ def tts_synthesize_preview():
         rate = payload.get("rate", "+0%")
         volume = payload.get("volume", "+0%")
         pitch = payload.get("pitch", "+0Hz")
+        sentence_gap_sec = _parse_sentence_gap_sec(payload.get("sentence_gap_sec", tts_processor.DEFAULT_SENTENCE_GAP_SEC))
 
         job_id = uuid.uuid4().hex
         set_job(job_id, status="queued", created_at=datetime.now().isoformat())
@@ -3248,6 +3342,7 @@ def tts_synthesize_preview():
                 job_id=job_id, text=text, language=language, voice=voice,
                 engine=engine, rate=rate, volume=volume, pitch=pitch,
                 qwen3_tts_options=qwen3_tts_options,
+                sentence_gap_sec=sentence_gap_sec,
             ),
         ).start()
 
@@ -3299,6 +3394,12 @@ def run_tts_pipeline_job(
     preview_wav_path: Optional[str] = None,
     qwen3_tts_options: Optional[Dict] = None,
     voice_source_tag: str = "",
+    sentence_gap_sec: float = tts_processor.DEFAULT_SENTENCE_GAP_SEC,   # ← 句间静音间隔（秒）。
+                                                           # 复用预览（preview_segments_dir 分支）时，
+                                                           # 这个值必须与生成该预览时使用的值一致——
+                                                           # 间隔已经烧录进 preview_wav_path 指向的
+                                                           # WAV 里，路由层负责在参数不一致时使
+                                                           # preview_id 失效，这里只管照单全收。
     cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：透传给 TTS 合成/对齐的
                                                            # 逐句循环，以及 F0/工程文件生成阶段
                                                            # 边界；由 app.py 传入
@@ -3342,6 +3443,7 @@ def run_tts_pipeline_job(
                 language=language, aligner_device=aligner_device,
                 english_word_align=english_word_align,
                 ja_disable_katakana=ja_disable_katakana,
+                sentence_gap_sec=sentence_gap_sec,
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 progress_cb=_progress_cb,
                 cancel_check=cancel_check,
@@ -3394,6 +3496,7 @@ def run_tts_pipeline_job(
                 rate=rate, volume=volume, pitch=pitch,
                 aligner_device=aligner_device, english_word_align=english_word_align,
                 ja_disable_katakana=ja_disable_katakana,
+                sentence_gap_sec=sentence_gap_sec,
                 align_pitch_shift_semitones=align_pitch_shift_semitones,
                 progress_cb=_progress_cb,
                 qwen3_tts_options=qwen3_tts_options,
@@ -3589,6 +3692,8 @@ def tts_process():
         rate = payload.get("rate", "+0%")
         volume = payload.get("volume", "+0%")
         pitch = payload.get("pitch", "+0Hz")
+        # 句间静音间隔（秒）：默认 0.35（tts_processor.DEFAULT_SENTENCE_GAP_SEC）。
+        sentence_gap_sec = _parse_sentence_gap_sec(payload.get("sentence_gap_sec", tts_processor.DEFAULT_SENTENCE_GAP_SEC))
 
         processing_mode = payload.get("processing_mode", "full")
         if processing_mode not in ("mfa-only", "full"):
@@ -3650,6 +3755,7 @@ def tts_process():
             "text": text, "engine": engine, "voice": voice,
             "rate": rate, "volume": volume, "pitch": pitch, "language": language,
             "qwen3_tts_options_json": json.dumps(qwen3_tts_options or {}, sort_keys=True),
+            "sentence_gap_sec": sentence_gap_sec,
         }) if preview_id else None
 
         job_id = uuid.uuid4().hex
@@ -3690,6 +3796,7 @@ def tts_process():
                 preview_sentences=(preview_entry or {}).get("sentences"),
                 preview_wav_path=(preview_entry or {}).get("wav_path"),
                 qwen3_tts_options=qwen3_tts_options,
+                sentence_gap_sec=sentence_gap_sec,
                 cancel_check=lambda: is_job_cancel_requested(job_id),
             ),
         ).start()

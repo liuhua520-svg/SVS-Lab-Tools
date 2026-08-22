@@ -826,6 +826,10 @@ class AudioProcessingPipeline:
                                                      #   缺失时兜底
         fill_short_rests: bool = False,        # ← 填充短休止符整批默认值（可被每框 override 覆盖）
         fill_short_rests_max_length: str = "16",  # ← 判定"短"的音符时值阈值（8/16/32/64/128）
+        box_gap_sec: float = 0.35,             # ← 相邻两个对话框在合并时间轴上的静音间隔（秒），
+                                                #   整批统一生效，不支持按框覆盖（与 BPM 一样决定
+                                                #   整批时间轴换算）；默认 0.35 秒，与 TTS 跟读的
+                                                #   句间静音默认值一致，详见 build_multitrack_project。
         progress_cb: Optional[Callable[[int, int, Dict], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,   # ← 协作式取消：每处理完
                                                               #   一个对话框检查一次
@@ -853,6 +857,10 @@ class AudioProcessingPipeline:
 
         顶部"高级设置"（对齐后端 / 语种 / BPM / F0 参数 / word_phoneme_map /
         dict_source 等）对全部对话框统一生效，与单文件处理页面语义一致。
+
+        box_gap_sec：相邻两个对话框在合并时间轴上的静音间隔（秒），与
+        BPM 一样整批统一生效、不支持按框覆盖（决定整批对话框合并后的
+        时间轴换算）。默认 0.35 秒。
 
         Parameters
         ----------
@@ -917,6 +925,7 @@ class AudioProcessingPipeline:
             crepe_model=crepe_model,
             fill_short_rests=fill_short_rests,
             fill_short_rests_max_length=fill_short_rests_max_length,
+            box_gap_sec=box_gap_sec,
         )
 
         def _stage(stage: str, status: str, box_index: Optional[int] = None) -> None:
