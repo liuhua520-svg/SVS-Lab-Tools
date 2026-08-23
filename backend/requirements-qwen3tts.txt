@@ -89,11 +89,11 @@ tqdm
 # torchaudio==2.3.1+cu121
 
 # CUDA 11.8（旧版显卡保留选项，如 GTX10系显卡 等 Pascal 架构）
-# torch==2.3.1+cu118
+torch==2.3.1+cu118
 # torchvision==0.18.1+cu118
 # torchaudio==2.3.1+cu118
 
 # CPU Only（无显卡，默认激活）
-torch==2.3.1+cpu
+# torch==2.3.1+cpu
 torchvision==0.18.1+cpu
 torchaudio==2.3.1+cpu

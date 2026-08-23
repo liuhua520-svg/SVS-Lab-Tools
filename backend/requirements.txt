@@ -9,7 +9,7 @@
 numpy==1.26.4
 setuptools==81.0.0
 
-# PyTorch - CPU default
+# PyTorch - CUDA 11.8 default
 # For CUDA, replace BOTH torch and torchaudio with matching CUDA builds.
 torch==2.3.1+cpu
 torchaudio==2.3.1+cpu
