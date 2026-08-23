@@ -896,6 +896,56 @@
                     <span class="option-hint-icon">❓</span>
                   </el-tooltip>
                 </div>
+
+                <!-- 该框相对于前一框的间隔覆盖：与整批统一的 advanced.box_gap_sec
+                     是同一个概念，只是仅对这一框和上一框之间的间隔生效。
+                     未勾选"单独设置"复选框时 boxGapSecOverride 恒为 null，
+                     跟随整批统一值，与该功能上线前的行为完全一致。 -->
+                <div class="box-gap-override">
+                  <el-checkbox
+                    v-model="boxGapOverrideEnabled[box.id]"
+                    :disabled="processing"
+                    @change="onBoxGapOverrideToggle(box)"
+                  >
+                    <span class="tts-mini-label">{{ t('dialogue.boxGapSecOverride') }}</span>
+                  </el-checkbox>
+                  <el-input-number
+                    v-if="box.boxGapSecOverride !== null"
+                    v-model="box.boxGapSecOverride"
+                    :min="0" :max="10" :step="0.05" :precision="2"
+                    size="small"
+                    controls-position="right"
+                    :disabled="processing"
+                    style="width: 110px; margin-left: 8px"
+                  />
+                  <el-tooltip :content="t('dialogue.boxGapSecOverrideHint')" placement="top">
+                    <span class="option-hint-icon">❓</span>
+                  </el-tooltip>
+                </div>
+
+                <!-- 该框内部逐句合成的句间静音间隔覆盖：仅 TTS跟读模式有
+                     意义，与整批统一的 ttsSentenceGapSec 是同一个概念。 -->
+                <div class="box-gap-override">
+                  <el-checkbox
+                    v-model="ttsGapOverrideEnabled[box.id]"
+                    :disabled="processing"
+                    @change="onTtsGapOverrideToggle(box)"
+                  >
+                    <span class="tts-mini-label">{{ t('dialogue.ttsSentenceGapSecOverride') }}</span>
+                  </el-checkbox>
+                  <el-input-number
+                    v-if="box.ttsSentenceGapSecOverride !== null"
+                    v-model="box.ttsSentenceGapSecOverride"
+                    :min="0" :max="10" :step="0.05" :precision="2"
+                    size="small"
+                    controls-position="right"
+                    :disabled="processing"
+                    style="width: 110px; margin-left: 8px"
+                  />
+                  <el-tooltip :content="t('dialogue.ttsSentenceGapSecOverrideHint')" placement="top">
+                    <span class="option-hint-icon">❓</span>
+                  </el-tooltip>
+                </div>
               </template>
 
               <template v-else>
@@ -938,6 +988,30 @@
                     style="width: 110px"
                   />
                   <el-tooltip :content="t('processor.alignPitchShiftHint')" placement="top">
+                    <span class="option-hint-icon">❓</span>
+                  </el-tooltip>
+                </div>
+
+                <!-- 该框相对于前一框的间隔覆盖：音频跟读模式下同样适用
+                     （两种输入模式共用同一个 boxGapSecOverride 字段）。 -->
+                <div class="box-gap-override">
+                  <el-checkbox
+                    v-model="boxGapOverrideEnabled[box.id]"
+                    :disabled="processing"
+                    @change="onBoxGapOverrideToggle(box)"
+                  >
+                    <span class="tts-mini-label">{{ t('dialogue.boxGapSecOverride') }}</span>
+                  </el-checkbox>
+                  <el-input-number
+                    v-if="box.boxGapSecOverride !== null"
+                    v-model="box.boxGapSecOverride"
+                    :min="0" :max="10" :step="0.05" :precision="2"
+                    size="small"
+                    controls-position="right"
+                    :disabled="processing"
+                    style="width: 110px; margin-left: 8px"
+                  />
+                  <el-tooltip :content="t('dialogue.boxGapSecOverrideHint')" placement="top">
                     <span class="option-hint-icon">❓</span>
                   </el-tooltip>
                 </div>
@@ -1906,7 +1980,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import AudioRecordPreview from './AudioRecordPreview.vue'
@@ -1940,6 +2014,16 @@ interface DialogueBox {
   // 临时移调音频副本，不影响最终 WAV / F0 / 工程文件音高。TTS跟读与
   // 音频跟读两种输入模式共用同一个字段。
   align_pitch_shift_semitones: number
+  // 该框相对于*前一框*的间隔覆盖值（秒）：null 表示未开启覆盖，跟随
+  // 页面顶部"⚙️ 高级设置"里的整批统一值（advanced.box_gap_sec）；开启
+  // 后填一个具体数值（含 0）就只影响这一框和上一框之间的间隔，不影响
+  // 其它相邻框对。两种输入模式（TTS跟读 / 音频跟读）共用同一个字段。
+  boxGapSecOverride: number | null
+  // 该框内部"逐句合成"的句间静音间隔覆盖值（秒）：null 表示未开启
+  // 覆盖，跟随页面顶部的整批统一值（ttsSentenceGapSec）。仅
+  // inputMode==='tts' 时有意义，"音频跟读"模式下这个字段会被忽略
+  // （提交时仍无条件带上，与其它 TTS 专属字段的提交习惯一致）。
+  ttsSentenceGapSecOverride: number | null
   // ── TTS跟读专属（inputMode='tts' 时生效，替代 audioFile） ──────────
   ttsNarratorId: string   // 语音预设 id，空字符串表示"自定义"（手动选引擎+音色）
   ttsEngine: string       // 选择的 TTS 引擎（讲述人 / EdgeTTS / 未来可扩展），每个对话框可独立选择
@@ -3442,6 +3526,8 @@ const createBox = (): DialogueBox => ({
   error: '',
   stage: '',
   align_pitch_shift_semitones: 0,
+  boxGapSecOverride: null,
+  ttsSentenceGapSecOverride: null,
   ttsNarratorId: '',
   ttsEngine: 'edge_tts',
   ttsVoice: '',
@@ -3471,6 +3557,25 @@ const createBox = (): DialogueBox => ({
 })
 
 const boxes = ref<DialogueBox[]>([createBox()])
+
+// ── 每框"间隔单独设置"复选框的勾选状态：用一个独立的、以 box.id 为键的
+// reactive 记录来承载，而不是直接用 `box.xxxOverride !== null` 当
+// v-model（那样只能用 computed getter/setter 或 :model-value + @change，
+// 后者在这个代码库里没有先例，为了和其它 el-checkbox 保持同样的
+// v-model 写法风格，改用这个轻量级的旁路状态）。勾选/取消勾选时，
+// onBoxGapOverrideToggle / onTtsGapOverrideToggle 负责把这个旁路状态同步
+// 写回真正提交用的 box.boxGapSecOverride / box.ttsSentenceGapSecOverride
+// （null 表示未覆盖，跟随整批统一值）。新建对话框时默认不勾选，与
+// box.boxGapSecOverride 的初始值 null 保持一致。
+const boxGapOverrideEnabled = reactive<Record<number, boolean>>({})
+const ttsGapOverrideEnabled = reactive<Record<number, boolean>>({})
+
+const onBoxGapOverrideToggle = (box: DialogueBox) => {
+  box.boxGapSecOverride = boxGapOverrideEnabled[box.id] ? advanced.value.box_gap_sec : null
+}
+const onTtsGapOverrideToggle = (box: DialogueBox) => {
+  box.ttsSentenceGapSecOverride = ttsGapOverrideEnabled[box.id] ? ttsSentenceGapSec.value : null
+}
 
 // ============== 单个对话框"单独设置"弹窗 ==============
 // 弹窗内编辑的是打开时绑定的目标对话框 box.override 的一份深拷贝副本
@@ -3627,8 +3732,16 @@ const addBox = () => {
 }
 
 const removeBox = (index: number) => {
+  const removed = boxes.value[index]
   boxes.value.splice(index, 1)
   if (boxes.value.length === 0) boxes.value.push(createBox())
+  // 清理旁路的间隔覆盖勾选状态，避免删了又新增导致 id 撞车时读到上一个
+  // 已删除对话框遗留的勾选值（box.id 是自增的，理论上不会重复，这里
+  // 仍做一次防御性清理，保持这两个 Record 不无限增长）。
+  if (removed) {
+    delete boxGapOverrideEnabled[removed.id]
+    delete ttsGapOverrideEnabled[removed.id]
+  }
 }
 
 const clearAllBoxes = async () => {
@@ -3637,6 +3750,8 @@ const clearAllBoxes = async () => {
   } catch {
     return
   }
+  for (const key of Object.keys(boxGapOverrideEnabled)) delete boxGapOverrideEnabled[Number(key)]
+  for (const key of Object.keys(ttsGapOverrideEnabled)) delete ttsGapOverrideEnabled[Number(key)]
   boxes.value = [createBox()]
   projectResult.value = null
   topError.value = ''
@@ -4129,6 +4244,22 @@ const buildFormData = async (): Promise<FormData> => {
     if (box.text.trim()) fd.append(`text_${i}`, box.text)
     // 对齐辅助移调：每个对话框独立提交，只在该框自身的对齐阶段生效。
     fd.append(`align_pitch_shift_${i}`, String(box.align_pitch_shift_semitones))
+
+    // 对话框间隔 / TTS 句间间隔的单独覆盖：与下面的"单独设置"总开关
+    // （override.enabled）是两套独立的开关——boxGapSecOverride /
+    // ttsSentenceGapSecOverride 为 null 表示未勾选对应的"单独设置该框"
+    // 复选框，此时不提交 enabled=true，后端据此完全回退到整批统一值；
+    // 非 null 时才提交 enabled=true 及具体数值，哪怕数值恰好等于整批
+    // 统一值也一样提交（用户显式选择了"这一框单独设置"这件事本身就
+    // 该被尊重，即使当下数值凑巧相同）。
+    fd.append(`override_box_gap_sec_enabled_${i}`, String(box.boxGapSecOverride !== null))
+    if (box.boxGapSecOverride !== null) {
+      fd.append(`override_box_gap_sec_${i}`, String(box.boxGapSecOverride))
+    }
+    fd.append(`override_tts_sentence_gap_sec_enabled_${i}`, String(box.ttsSentenceGapSecOverride !== null))
+    if (box.ttsSentenceGapSecOverride !== null) {
+      fd.append(`override_tts_sentence_gap_sec_${i}`, String(box.ttsSentenceGapSecOverride))
+    }
 
     // ── 该对话框的"单独设置"：仅在开启了总开关（override.enabled）时才
     // 提交 override_enabled_{i}=true 及具体字段；后端未收到该字段或其为
@@ -4914,6 +5045,14 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   margin-top: 8px;
+}
+
+.box-gap-override {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
 }
 
 .option-hint-icon {
