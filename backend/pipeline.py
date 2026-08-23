@@ -973,6 +973,15 @@ class AudioProcessingPipeline:
             box_phoneme_mode         = box_override.get("phoneme_mode", phoneme_mode)
             box_dict_source          = box_override.get("dict_source", dict_source)
             box_ja_devoiced_phoneme      = bool(box_override.get("ja_devoiced_phoneme", ja_devoiced_phoneme))
+            # 该对话框相对于*前一框*的间隔覆盖值（秒）：None 表示未开启
+            # 覆盖，回退整批统一的 box_gap_sec（见 build_multitrack_project
+            # 里的说明）；这里故意不像上面几个字段那样直接给默认值回退
+            # （例如 box_override.get("box_gap_sec", box_gap_sec)），而是
+            # 保留 None 一路传到 build_multitrack_project 的放置循环里才
+            # 判断——因为"未开启覆盖"和"覆盖成了 0 秒"必须能区分开，前者
+            # 才应该回退整批统一值，用 0.0 当默认值做不到这一点（0.0 是
+            # 合法的覆盖值本身）。
+            box_gap_sec_override = box_override.get("box_gap_sec_override") if box_override else None
             # 【新增】对齐后端具体用哪个模型/批处理大小，此前恒定用整批
             # 统一的外层参数，即使 box_aligner_backend 每框可以选不同后端，
             # 具体模型/批大小也无法跟着按框覆盖——这是导致"单独设置"弹窗
@@ -1136,6 +1145,7 @@ class AudioProcessingPipeline:
                     "dict_source": box_dict_source,
                     "phoneme_mode": box_phoneme_mode,
                     "ja_devoiced_phoneme": box_ja_devoiced_phoneme,
+                    "box_gap_sec_override": box_gap_sec_override,
                 })
 
                 box_result.update(

@@ -183,8 +183,47 @@ def _parse_box_override(form, index: int) -> Optional[Dict]:
         便于调用方直接 dict.update / get 使用。
     """
     enabled = form.get(f"override_enabled_{index}", "false").lower() == "true"
+
+    # 对话框间隔 / TTS 句间间隔的覆盖：这两个字段各自有独立的子开关
+    # （override_box_gap_sec_enabled_{i} / override_tts_sentence_gap_sec_enabled_{i}），
+    # 不受上面 override_enabled_{i} 总开关约束——用户可能只想单独调这一
+    # 框的间隔，不想（也不需要）打开那个更重的"单独设置"弹窗去顺带
+    # 决定对齐后端/语言/F0 等一大堆其它字段。因此这里必须在总开关判断
+    # 之前先解析这两个字段，即使 enabled 为 False 也要往下走，构造一个
+    # 只含这两个覆盖值、其余字段全部是"未覆盖"默认值的返回字典——调用方
+    # （process_dialogue_batch）对其它每个字段都是 box_override.get(key,
+    # 整批统一值) 的写法，即便 aligner_backend 这类字段在这个"精简"字典
+    # 里被填成了看似真实的默认值（如 "mfa"），只要 enabled 为 False，
+    # process_dialogue_batch 里各处判断"是否要用 box_override 的这个
+    # 字段"实际读取的都是 box_override 整个字典是否为空/None 之外，
+    # 关键在于：这些字段的值恰好等于函数签名里的默认值，与"没有覆盖"
+    # 时上游走的分支完全一致，不会产生任何实际差异。
+    box_gap_sec_override = None
+    if form.get(f"override_box_gap_sec_enabled_{index}", "false").lower() == "true":
+        try:
+            box_gap_sec_override = max(0.0, min(10.0, float(form.get(f"override_box_gap_sec_{index}", 0.35))))
+        except (TypeError, ValueError):
+            box_gap_sec_override = 0.35
+
+    tts_sentence_gap_sec_override = None
+    if form.get(f"override_tts_sentence_gap_sec_enabled_{index}", "false").lower() == "true":
+        try:
+            tts_sentence_gap_sec_override = max(
+                0.0, min(10.0, float(form.get(f"override_tts_sentence_gap_sec_{index}", 0.35)))
+            )
+        except (TypeError, ValueError):
+            tts_sentence_gap_sec_override = 0.35
+
     if not enabled:
-        return None
+        # 大的"单独设置"总开关未打开：其它字段一律返回 None（调用方按
+        # box_override.get(key, 整批统一值) 处理，效果等同于压根没有这个
+        # override 字典），但两个间隔覆盖字段若单独打开了，仍需要带出去。
+        if box_gap_sec_override is None and tts_sentence_gap_sec_override is None:
+            return None
+        return {
+            "box_gap_sec_override": box_gap_sec_override,
+            "tts_sentence_gap_sec_override": tts_sentence_gap_sec_override,
+        }
 
     aligner_backend = form.get(f"override_aligner_backend_{index}", "mfa")
     if aligner_backend not in ("mfa", "whisperx", "qwen3_asr", "qwen3_aligner", "nemo_aligner"):
@@ -287,6 +326,11 @@ def _parse_box_override(form, index: int) -> Optional[Dict]:
     if fill_short_rests_max_length not in ("8", "16", "32", "64", "128"):
         fill_short_rests_max_length = "16"
 
+    # box_gap_sec_override / tts_sentence_gap_sec_override 已经在函数顶部
+    # （enabled 总开关判断之前）解析过，这里直接复用同一份结果，不重复
+    # 解析——它们的取值不受 enabled 与否影响，走到这里说明 enabled 为
+    # True，两个变量在当前作用域里仍然有效。
+
     return {
         "aligner_backend": aligner_backend,
         "language": language,
@@ -314,6 +358,8 @@ def _parse_box_override(form, index: int) -> Optional[Dict]:
         "f0_ceil": f0_ceil,
         "fill_short_rests": fill_short_rests,
         "fill_short_rests_max_length": fill_short_rests_max_length,
+        "box_gap_sec_override": box_gap_sec_override,
+        "tts_sentence_gap_sec_override": tts_sentence_gap_sec_override,
     }
 
 
@@ -2288,6 +2334,16 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                     box_override.get("ja_disable_katakana", ja_disable_katakana)
                     if box_language == "jpn" else False
                 )
+                # 该对话框自己的"TTS 句间间隔"覆盖值（秒）：未开启覆盖
+                # （override 里没有这个键，或值为 None）时回退到整批统一的
+                # tts_sentence_gap_sec；开启后只影响这一个对话框内部的
+                # 逐句合成，不影响其它框。与上面 box_gap_sec_override（框间
+                # 间隔）是两个独立维度，互不影响。
+                box_sentence_gap_sec_override = box_override.get("tts_sentence_gap_sec_override")
+                box_sentence_gap_sec = (
+                    tts_sentence_gap_sec if box_sentence_gap_sec_override is None
+                    else max(0.0, min(10.0, float(box_sentence_gap_sec_override)))
+                )
                 set_job(
                     job_id, status="running",
                     progress={"done": 0, "total": len(boxes)},
@@ -2328,7 +2384,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         aligner_device=aligner_device,
                         english_word_align=box_english_word_align,
                         ja_disable_katakana=box_ja_disable_katakana,
-                        sentence_gap_sec=tts_sentence_gap_sec,
+                        sentence_gap_sec=box_sentence_gap_sec,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                         cancel_check=lambda: is_job_cancel_requested(job_id),
                         work_dir=str(WORK_DIR), stem=stem,
@@ -2378,7 +2434,7 @@ def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwar
                         aligner_device=aligner_device,
                         english_word_align=box_english_word_align,
                         ja_disable_katakana=box_ja_disable_katakana,
-                        sentence_gap_sec=tts_sentence_gap_sec,
+                        sentence_gap_sec=box_sentence_gap_sec,
                         align_pitch_shift_semitones=box_align_pitch_shift_semitones,
                         qwen3_tts_options=tts_info.get("qwen3_tts_options"),
                         stage_cb=_box_stage_cb,

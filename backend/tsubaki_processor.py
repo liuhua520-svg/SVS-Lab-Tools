@@ -2646,6 +2646,14 @@ class TsubakiProcessor:
                 if tr_phoneme_mode not in ("none", "merge", "hiragana", "katakana"):
                     tr_phoneme_mode = "none"
                 tr_ja_devoiced_phoneme = bool(tr.get("ja_devoiced_phoneme", ja_devoiced_phoneme))
+                # 该对话框自己的"对话框间隔"覆盖值：与上面几个字段不同，
+                # 这里存的是"该框相对于前一框的独立间隔（秒）"，None（默认，
+                # 未开启覆盖）表示回退到下面 box_gap_sec 循环里统一使用的
+                # config.box_gap_sec；显式提供数值（哪怕是 0）才会覆盖。
+                # 之所以不能直接塞进 tr_config（AudioProcessingConfig）：
+                # box_gap_sec 描述的是"这一框和上一框之间"的关系，不是这
+                # 一框自己的音频/F0 处理参数，语义上不属于单音轨配置。
+                tr_box_gap_sec_override = tr.get("box_gap_sec_override")
 
                 if not wav_path or not Path(str(wav_path)).exists():
                     logger.warning("[多音轨] 跳过音轨 %r：WAV 文件不存在 (%s)", tr_title, wav_path)
@@ -2814,6 +2822,10 @@ class TsubakiProcessor:
                     "dict_source": tr_dict_source,
                     "base_pitch": tr_config.base_pitch,
                     "refine_pitch": tr_config.refine_pitch,
+                    # 见上面 tr_box_gap_sec_override 的注释：None 表示这一框
+                    # 沿用整批统一的 config.box_gap_sec，不为 None 时表示这
+                    # 一框相对于前一框的间隔被单独覆盖成了这个秒数。
+                    "box_gap_sec_override": tr_box_gap_sec_override,
                 })
 
             if not resolved_tracks:
@@ -2826,15 +2838,22 @@ class TsubakiProcessor:
             # （SVP: groups[i].blickOffset；USTX: voice_parts[i].position；
             # VSQX: vsPart[i].<t>）。这样每个对话框在编辑器里仍是一段独立
             # 可拖动/编辑的序列，而不是被合并成一条连续音符列表 ─────────
-            # 相邻两个对话框之间额外插入 config.box_gap_sec 秒静音间隔
-            # （默认 0.35 秒，与 TTS 跟读的句间静音默认值一致）；只在
-            # 第一个对话框*之后*的每一个对话框前面插入一次，第一个对话框
-            # 仍从 0 秒开始，不会在整段音频开头凭空多出一段静音。
-            box_gap_sec = max(0.0, float(getattr(config, "box_gap_sec", 0.35) or 0.0))
+            # 相邻两个对话框之间额外插入静音间隔（秒）；只在第一个对话框
+            # *之后*的每一个对话框前面插入一次，第一个对话框仍从 0 秒
+            # 开始，不会在整段音频开头凭空多出一段静音。默认使用整批
+            # 统一的 config.box_gap_sec（默认 0.35 秒，与 TTS 跟读的句间
+            # 静音默认值一致）；若某个对话框开启了"单独设置"且显式覆盖了
+            # 这个值（item["box_gap_sec_override"] 不为 None），则改用该
+            # 框自己的覆盖值——覆盖的语义是"这一框相对于*前一框*的间隔"，
+            # 与该框自身是否开启覆盖无关的其它框各自仍按自己的规则决定
+            # （回退整批统一值，或使用它们各自的覆盖值）。
+            default_box_gap_sec = max(0.0, float(getattr(config, "box_gap_sec", 0.35) or 0.0))
             cursor_sec = 0.0
             for idx, item in enumerate(resolved_tracks):
                 if idx > 0:
-                    cursor_sec += box_gap_sec
+                    override = item.get("box_gap_sec_override")
+                    gap = default_box_gap_sec if override is None else max(0.0, float(override))
+                    cursor_sec += gap
                 item["offset_sec"] = cursor_sec
                 cursor_sec += float(item.get("duration_sec") or 0.0)
             total_duration_sec = cursor_sec
