@@ -104,7 +104,7 @@ chmod +x setup.sh run.sh
 
 启动后访问：
 ```
-http://127.0.0.1:5000
+http://127.0.0.1:5850
 ```
 ## 🔧 处理模式
 ### 1. 仅标注（快速）
@@ -192,9 +192,9 @@ mfa model download acoustic yue  # 粤语
 
 ### 📁 目录结构
 ```
-backend/                后端：4 个 Flask 进程（app.py 主服务 :5000，
-                         qwen3_server.py :5001，nemo_server.py :5002，
-                         qwen3tts_server.py :5003），各自独立虚拟环境，
+backend/                后端：4 个 Flask 进程（app.py 主服务 :5850，
+                         qwen3_server.py :5851，nemo_server.py :5852，
+                         qwen3tts_server.py :5853），各自独立虚拟环境，
                          通过本地 HTTP 通信，避免依赖冲突
 frontend/                前端界面（Vue 3 + Element Plus + TypeScript）
 launcher.py               打包发布形态下的进程编排 / 系统托盘 / 原生窗口
