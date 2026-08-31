@@ -32,9 +32,9 @@
           <template #title>{{ t('settings.restartHint') }}</template>
         </el-alert>
 
-        <el-form-item :label="t('settings.skipStartQwen3')">
-          <el-switch v-model="form.skip_start_qwen3_server" />
-          <p class="help-text">{{ t('settings.skipStartQwen3Hint') }}</p>
+        <el-form-item :label="t('settings.skipStartWhisperx')">
+          <el-switch v-model="form.skip_start_whisperx_server" />
+          <p class="help-text">{{ t('settings.skipStartWhisperxHint') }}</p>
         </el-form-item>
 
         <el-form-item :label="t('settings.skipStartNemo')">
@@ -431,7 +431,12 @@ interface AppSettings {
   // 独立开关：勾选后，下次完整启动本应用（重新打开 exe 启动器）时不再
   // 拉起对应的微服务进程；只在下次启动时生效，不影响当前正在运行的
   // 进程，也不会像上面几项一样触发保存后的自动重启。
-  skip_start_qwen3_server: boolean
+  //
+  // 【2026-08 起】Qwen3-ASR / Qwen3-ForcedAligner 已迁入主进程（app.py）
+  // 内本地加载，不再是可单独跳过启动的独立微服务，原
+  // skip_start_qwen3_server 开关已重命名为 skip_start_whisperx_server
+  // （WhisperX 反过来变成了新的独立微服务）。
+  skip_start_whisperx_server: boolean
   skip_start_nemo_server: boolean
   skip_start_qwen3tts_server: boolean
   // ── Qwen3-TTS（TTS跟读独立引擎，qwen3tts_server.py，端口 5003）────────
@@ -442,7 +447,10 @@ interface AppSettings {
   qwen3_tts_x_vector_only_default: boolean
   // ── alt_aligners.py 对齐调优参数（均以秒为单位）────────────────────────
   // 这批参数只被主进程内的 alt_aligners.py 消费，保存后无需重启任何进程，
-  // 下一次对齐任务即可生效（与上面三项需要重启 Qwen3 / NeMo 微服务不同）。
+  // 下一次对齐任务即可生效（与上面三项需要重启 WhisperX / NeMo / Qwen3-TTS
+  // 微服务不同——Qwen3-ASR/FA 已迁入主进程，保存后同样无需重启微服务，但
+  // 更新模型下载设置这类只在进程启动时读取一次的配置，仍需要重启整个
+  // 程序才能生效，见 app_settings.py 模块顶部说明）。
   qwen3_fa_onset_delay_sec: number
   qwen3_asr_onset_delay_sec: number
   qwen3_fa_min_syl_dur_sec: number
@@ -582,7 +590,7 @@ const form = ref<AppSettings>({
   use_mirror: false,
   mirror_url: 'https://hf-mirror.com/',
   hide_console_window: false,
-  skip_start_qwen3_server: false,
+  skip_start_whisperx_server: false,
   skip_start_nemo_server: false,
   skip_start_qwen3tts_server: false,
   ...TUNING_DEFAULTS,
@@ -629,13 +637,16 @@ const resetSubtitleImportSplitToDefaults = () => {
 
 const loading = ref(false)
 const saving = ref(false)
-// 最近一次保存后，Qwen3 / NeMo / Qwen3-TTS 三个微服务各自的重启结果（未保存过则为 null）
-const restartResult = ref<{ qwen3: RestartResult; nemo: RestartResult; qwen3tts: RestartResult } | null>(null)
+// 最近一次保存后，WhisperX / NeMo / Qwen3-TTS 三个微服务各自的重启结果（未保存过则为 null）
+// 【2026-08 起】Qwen3-ASR / Qwen3-ForcedAligner 已迁入主进程内本地加载，
+// 不再是可单独重启的微服务，因此这里的 key 从 "qwen3" 改为 "whisperx"，
+// 与 app.py /api/settings 路由返回的 restart 字段名保持一致。
+const restartResult = ref<{ whisperx: RestartResult; nemo: RestartResult; qwen3tts: RestartResult } | null>(null)
 
 const restartSummary = computed(() => {
   if (!restartResult.value) return []
   const rows: { service: string; type: 'success' | 'info' | 'warning'; text: string }[] = []
-  for (const [key, label] of [['qwen3', 'Qwen3-ASR'], ['nemo', 'NeMo Forced Aligner'], ['qwen3tts', 'Qwen3-TTS']] as const) {
+  for (const [key, label] of [['whisperx', 'WhisperX'], ['nemo', 'NeMo Forced Aligner'], ['qwen3tts', 'Qwen3-TTS']] as const) {
     const r = restartResult.value[key]
     if (!r) continue
     if (r.status === 'restarted') {
@@ -693,7 +704,7 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     use_mirror: !!settings?.use_mirror,
     mirror_url: settings?.mirror_url || 'https://hf-mirror.com/',
     hide_console_window: !!settings?.hide_console_window,
-    skip_start_qwen3_server: !!settings?.skip_start_qwen3_server,
+    skip_start_whisperx_server: !!settings?.skip_start_whisperx_server,
     skip_start_nemo_server: !!settings?.skip_start_nemo_server,
     skip_start_qwen3tts_server: !!settings?.skip_start_qwen3tts_server,
     qwen3_tts_model_size: ttsModelSize === '1.7B' || ttsModelSize === '0.6B' ? ttsModelSize : QWEN3_TTS_DEFAULTS.qwen3_tts_model_size,

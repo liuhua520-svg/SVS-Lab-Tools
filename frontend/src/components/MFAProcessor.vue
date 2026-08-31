@@ -34,6 +34,7 @@
               :limit="1"
               :disabled="processing"
               :on-exceed="handleExceed"
+              :on-remove="handleAudioRemove"
               @change="handleAudioSelect"
               accept=".wav,.mp3,.flac,.m4a,.aac,.ogg"
             >
@@ -71,6 +72,7 @@
                 :limit="1"
                 :disabled="processing"
                 :on-exceed="handleExceed"
+                :on-remove="handleSubtitleAudioRemove"
                 @change="handleSubtitleAudioSelect"
                 accept=".wav,.mp3,.flac,.m4a,.aac,.ogg"
               >
@@ -100,6 +102,7 @@
               :limit="1"
               :disabled="processing"
               :on-exceed="handleExceed"
+              :on-remove="handleSubtitleFileRemove"
               @change="handleSubtitleFileSelect"
               accept=".srt,.lrc,.txt"
             >
@@ -1024,6 +1027,7 @@
 			:limit="1"
 			:disabled="processing"
 			:on-exceed="handleLabMidiExceed"
+			:on-remove="handleLabMidiRemove"
 			@change="handleLabMidiChange"
 			accept=".lab,.mid,.midi"
 		  >
@@ -2917,6 +2921,11 @@ const handleSubtitleAudioSelect = (file: any) => {
   subtitleImport.value.audioFile = raw
 }
 
+// 字幕跟读模式音频上传框的原生 × 删除回调，同步清空 subtitleImport.audioFile。
+const handleSubtitleAudioRemove = () => {
+  subtitleImport.value.audioFile = null
+}
+
 // 录音完成回调：与 handleAudioRecorded 同样的逻辑，仅目标状态不同
 // （字幕跟读模式的 subtitleImport.audioFile，而非 formData.value.audioFile）。
 const handleSubtitleAudioRecorded = (file: File) => {
@@ -2928,6 +2937,11 @@ const handleSubtitleFileSelect = (file: any) => {
   const raw: File | null = file?.raw || null
   if (!raw) return
   subtitleImport.value.subtitleFile = raw
+}
+
+// 字幕文件上传框的原生 × 删除回调，同步清空 subtitleImport.subtitleFile。
+const handleSubtitleFileRemove = () => {
+  subtitleImport.value.subtitleFile = null
 }
 
 
@@ -3151,7 +3165,6 @@ const handleLabMidiChange = (file: any) => {
 
   if (ext === 'lab') {
     formData.value.labFile = raw
-    labMidiUploadKey.value += 1
     return
   }
 
@@ -3160,12 +3173,22 @@ const handleLabMidiChange = (file: any) => {
     extractMidiBpm(raw).then(({ bpm }) => {
       midiInfo.value = { bpm, loaded: true }
     })
-    labMidiUploadKey.value += 1
     return
   }
 
   ElMessage.error(t('processor.onlySupportNotation'))
+  // 格式不支持：el-upload 内部仍会把这个文件计入其文件列表（占满 limit=1），
+  // 这里必须重建组件把它清掉，否则用户之后选不了别的文件、也点不到重选。
   labMidiUploadKey.value += 1
+}
+
+// 点击 el-upload 原生文件列表项的 × 时触发（对应音频/字幕跟读上传框的
+// 原生删除行为）：同步清空 formData 里的 LAB/MIDI 文件和 MIDI 接管状态，
+// 否则视觉上文件条目消失了，但底下 "已导入 MIDI" 的提示和数据仍然存在。
+const handleLabMidiRemove = () => {
+  formData.value.labFile = null
+  formData.value.midiFile = null
+  midiInfo.value = { bpm: 120, loaded: false }
 }
 
 const fetchDictionaries = async () => {
@@ -4142,6 +4165,13 @@ const handleAudioSelect = (file: any) => {
 
   formData.value.audioFile = raw
   error.value = ''
+}
+
+// 点击音频上传框原生文件列表项的 × 时触发，清空对应 formData 字段，
+// 否则 el-upload 视觉上已经移除该文件，但下面 "✓ xxx.wav" 提示和校验
+// 状态仍停留在旧文件上。
+const handleAudioRemove = () => {
+  formData.value.audioFile = null
 }
 
 // 录音完成后的回调：AudioRecordPreview 已经把录音打包成标准 File 对象，

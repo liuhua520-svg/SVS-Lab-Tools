@@ -1680,8 +1680,16 @@
                   <el-col :xs="24" :sm="12">
                     <el-form-item :label="t('processor.basePitch')">
                       <div class="pitch-input-group">
-                        <el-input-number v-model="boxSettings.draft.advanced.base_pitch" :min="12" :max="108" :step="1" controls-position="right" />
+                        <el-input-number
+                          v-model="boxSettings.draft.advanced.base_pitch"
+                          :min="12"
+                          :max="108"
+                          :step="1"
+                          controls-position="right"
+                          :disabled="boxSettingsMidiLoaded"
+                        />
                         <span class="pitch-name">{{ midiNoteToName(boxSettings.draft.advanced.base_pitch) }}</span>
+                        <span v-if="boxSettingsMidiLoaded" class="midi-lock-tip">🔒 {{ t('processor.midiImportedMore') }}</span>
                       </div>
                     </el-form-item>
                   </el-col>
@@ -1696,7 +1704,11 @@
                         v-model="boxSettings.draft.advanced.auto_note_pitch"
                         :active-text="t('processor.autoNotePitchActive')"
                         :inactive-text="t('processor.autoNotePitchInactive')"
+                        :disabled="boxSettingsMidiLoaded"
                       />
+                      <span v-if="boxSettingsMidiLoaded" class="midi-lock-tip" style="display:block;margin-top:4px">
+                        🔒 {{ t('processor.midiImportedTipNoBpm') }}
+                      </span>
                     </el-form-item>
                   </el-col>
                   <el-col :xs="24" :sm="12">
@@ -3643,6 +3655,22 @@ const showBoxWordPhonemeMap = computed(() => {
   return boxSettings.value.draft.englishWordAlign && isSupportedFormat
 })
 
+// 弹窗内"基准音高 (MIDI Note)"/"自动音符音高"是否应锁定：与
+// MFAProcessor.vue 的 midiLoaded（:disabled="processing || midiLoaded"，
+// 见该组件同名字段）语义一致——"仅生成工程"模式下，这一个对话框自己
+// 选择了 MIDI 文件时，音高完全由 MIDI 音符决定（见后端
+// _midi_notes_overlap_segment / map_segment_to_midi_pitch：段落与 MIDI
+// 音符有重叠时，音高固定取 MIDI 原始音高，不受 base_pitch /
+// auto_note_pitch 影响），此时这两个控件继续可编辑只会误导用户——看起来
+// 能调，实际不生效。目标框必须是"仅生成工程"（LAB/MIDI 直接导入，非
+// 对齐模式）且已选择 midiFile（与 box.labFile 互斥，见 DialogueBox
+// 接口）时才锁定；LAB 优先级高于 MIDI（同一 box 里 labFile 存在时
+// midiFile 必为 null），故只需判断 midiFile。
+const boxSettingsMidiLoaded = computed(() => {
+  const box = boxSettings.value.targetBox
+  return processingMode.value === 'project-only' && !!box?.midiFile
+})
+
 // 语言切到日语时，弹窗草稿里的"英语单词级对齐"/"英语单词→音素映射"默认
 // 也没有意义——除非用户已经在草稿里开启了 jaDisableKatakana（关闭英语转
 // 片假名），此时该开关会重新显示、允许继续开启，因此不再无条件重置。
@@ -4924,6 +4952,12 @@ onMounted(() => {
   color: #409eff;
   font-weight: bold;
   font-size: 14px;
+}
+
+.midi-lock-tip {
+  color: #909399;
+  font-size: 11px;
+  margin-left: 8px;
 }
 
 .dict-source-hint {
