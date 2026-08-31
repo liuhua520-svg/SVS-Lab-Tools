@@ -128,20 +128,6 @@ Node.js 16+
 
 1GB 可用磁盘空间
 
-### 🔧 安装 MFA
-```
-pip install montreal-forced-aligner
-```
-
-# 下载 MFA 语言模型
-```
-mfa model download acoustic cmn  # 中文
-mfa model download acoustic eng  # 英语
-mfa model download acoustic jpn  # 日语
-mfa model download acoustic kor  # 韩语
-mfa model download acoustic yue  # 粤语
-```
-
 ## 📖 使用流程
 ### 仅标注（快速）
 
