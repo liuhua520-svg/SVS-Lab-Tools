@@ -4,7 +4,7 @@ launcher.py — SVS Lab Tools 多文件 EXE 启动器
 
 用途
 ────
-把 backend/app.py（mfa_env）、backend/qwen3_server.py（qwen3_env）、
+把 backend/app.py（mfa_env）、backend/whisperx_server.py（whisperx_env）、
 backend/qwen3tts_server.py（qwen3tts_env）、backend/nemo_server.py（nemo_env）
 四个跑在各自独立 Python 环境里的服务拉起来，本身常驻系统托盘，不显示
 自己的控制台窗口。
@@ -21,7 +21,7 @@ backend/qwen3tts_server.py（qwen3tts_env）、backend/nemo_server.py（nemo_env
     ├─ _internal/           ← 同上，PyInstaller onedir 的依赖文件
     ├─ backend/             ← 源码原样拷贝，不冻结
     │   ├─ app.py
-    │   ├─ qwen3_server.py
+    │   ├─ whisperx_server.py
     │   ├─ qwen3tts_server.py
     │   ├─ nemo_server.py
     │   └─ ...
@@ -29,7 +29,7 @@ backend/qwen3tts_server.py（qwen3tts_env）、backend/nemo_server.py（nemo_env
     │   └─ dist/            ← `npm run build` 产物
     └─ runtime/
        ├─ mfa_env/          ← 便携版 conda 环境（建议用 conda-pack 生成）
-       ├─ qwen3_env/
+       ├─ whisperx_env/
        ├─ qwen3tts_env/
        └─ nemo_env/
 
@@ -67,7 +67,7 @@ ShowWindow(SW_HIDE)）实现设置页面里的"隐藏命令提示符窗口"开�
 这类系统上形同虚设。
 
 现在改为：_spawn() 用 CREATE_NO_WINDOW 拉起全部四个子进程（app.py /
-qwen3_server.py / qwen3tts_server.py / nemo_server.py），从系统层面
+whisperx_server.py / qwen3tts_server.py / nemo_server.py），从系统层面
 直接不分配任何控制台窗口——不管当前系统默认终端是 conhost 还是 Windows
 Terminal，任务栏上都不会出现任何图标，一次性根治，不再依赖"事后隐藏"
 这种取决于宿主实现细节的做法。相应地，四个进程各自的 stdout/stderr 被
@@ -76,18 +76,25 @@ Terminal，任务栏上都不会出现任何图标，一次性根治，不再依
 hide_console_window 设置项和 apply_console_visibility() 因此变为历史
 遗留——只为兼容旧版本写过的设置文件而保留字段，不再实际影响任何窗口。
 
-关于“下次打开应用不启动 Qwen3-ASR / Qwen3-TTS / NeMo Forced Aligner”
+关于“下次打开应用不启动 WhisperX / Qwen3-TTS / NeMo Forced Aligner”
 ────────────────────────────────────────────────────────────────────
 设置页面（SettingsPage.vue）新增了三个独立开关，保存后写入
-backend/settings/app_settings.json 里的 skip_start_qwen3_server /
+backend/settings/app_settings.json 里的 skip_start_whisperx_server /
 skip_start_qwen3tts_server / skip_start_nemo_server 三个字段。这些
 选项只在"下一次完整启动应用"时生效——也就是本脚本每次 start_all() 时
 会先读一遍这个文件，命中就跳过对应服务的 _spawn()，不影响当前已经在
 跑的进程，保存设置本身也不会关闭或重启任何东西。
 
+【2026-08 起】Qwen3-ASR / Qwen3-ForcedAligner 已迁入 app.py 主进程内
+本地加载（不再是独立微服务），因此不再有对应的"跳过启动"开关——它俩
+和 mfa_env 里其余对齐后端一样，只要 app.py 启动就一定可用，没有可以
+单独跳过的必要。旧配置文件里残留的 skip_start_qwen3_server 字段会被
+app_settings.py 的 load_settings() 迁移读取（见该函数内说明），但本
+脚本这里不再读取它。
+
 关于“退出全部”为什么不能只 terminate 最初的 PID
 ────────────────────────────────────────────────
-qwen3_server.py / qwen3tts_server.py / nemo_server.py 的 /restart 路由
+whisperx_server.py / qwen3tts_server.py / nemo_server.py 的 /restart 路由
 是“先关端口，再用 subprocess.Popen 拉一个全新进程，旧进程 os._exit(0)”，
 重启之后的 PID 已经不是本脚本一开始记下来的那个了。所以退出时除了
 terminate 已知的 Popen 对象，还要按命令行特征（脚本文件名）再扫一遍
@@ -107,7 +114,7 @@ mfa_env 里的一整套重依赖（MFA/torch/pyworld 等），不适合塞进这
 与本文件的 _is_cmd_invocation() 完全一致）。本脚本检测到 cmd 模式后，
 只做一件事：把整条命令行原样转发给
 `runtime/mfa_env/python.exe backend/app.py cmd ...` 子进程，透传它的
-stdout/stderr/退出码，不起托盘、不开原生窗口、不拉 qwen3/nemo 两个
+stdout/stderr/退出码，不起托盘、不开原生窗口、不拉 whisperx/nemo 两个
 微服务。用法及完整参数见 backend/commandline.py 顶部说明，或运行
 `启动器.exe cmd <operation> --help`。
 """
@@ -157,23 +164,24 @@ LOG_PATH = APP_ROOT / "launcher.log"
 LOGS_DIR = APP_ROOT / "logs"  # 四个后端子进程各自的 stdout/stderr 日志文件存放目录
 
 HOST = "127.0.0.1"
-MAIN_PORT = 5000
+MAIN_PORT = 5850
 
 # 四个后端服务：脚本名 + 各自独立 Python 环境的目录名（对应 runtime/ 下）+
 # 可选的"跳过启动"设置项键名（对应 app_settings.py 里的 DEFAULT_SETTINGS）。
-# app.py 是主服务，没有跳过选项，永远启动；其余三个是可各自独立跳过的
-# 微服务（qwen3 / qwen3tts / nemo）。
+# app.py 是主服务，没有跳过选项，永远启动（Qwen3-ASR / Qwen3-ForcedAligner
+# 已迁入这个主进程内本地加载，见 app_settings.py 模块顶部说明）；其余三个
+# 是可各自独立跳过的微服务（whisperx / qwen3tts / nemo）。
 SERVICES: List[Dict[str, Optional[str]]] = [
-    {"name": "app",      "script": "app.py",           "env": "mfa_env",      "skip_key": None},
-    {"name": "qwen3",    "script": "qwen3_server.py",  "env": "qwen3_env",    "skip_key": "skip_start_qwen3_server"},
-    {"name": "qwen3tts", "script": "qwen3tts_server.py", "env": "qwen3tts_env", "skip_key": "skip_start_qwen3tts_server"},
-    {"name": "nemo",     "script": "nemo_server.py",   "env": "nemo_env",     "skip_key": "skip_start_nemo_server"},
+    {"name": "app",       "script": "app.py",             "env": ".mfa_env",      "skip_key": None},
+    {"name": "whisperx",  "script": "whisperx_server.py", "env": ".whisperx_env", "skip_key": "skip_start_whisperx_server"},
+    {"name": "qwen3tts",  "script": "qwen3tts_server.py", "env": ".qwen3tts_env", "skip_key": "skip_start_qwen3tts_server"},
+    {"name": "nemo",      "script": "nemo_server.py",     "env": ".nemo_env",     "skip_key": "skip_start_nemo_server"},
 ]
 
 # 命令行一次性调用模式（`启动器.exe cmd <operation> ...`）固定转发给
 # app.py（mfa_env）——commandline.py 的 CmdUI 就是挂在 app.py 这个进程
 # 里的（backend/commandline.py + backend/app.py 的 __main__ 分流逻辑），
-# 四个后端服务里只有它认识 "cmd" 这个子命令，qwen3_server.py /
+# 四个后端服务里只有它认识 "cmd" 这个子命令，whisperx_server.py /
 # qwen3tts_server.py / nemo_server.py 是纯常驻 HTTP 微服务，没有对应的
 # 命令行入口。
 CMD_TRIGGER = "cmd"
@@ -225,7 +233,7 @@ def _open_service_log(service_name: str):
     返回一个已打开的文件对象，供 _spawn() 作为子进程的 stdout/stderr 传入。
 
     用追加而不是覆盖：同一个服务多次重启（包括设置页触发的 /restart，见
-    qwen3_server.py / qwen3tts_server.py / nemo_server.py 的 /restart 路由）
+    whisperx_server.py / qwen3tts_server.py / nemo_server.py 的 /restart 路由）
     产生的日志都能在同一个文件里连续看到，不会互相覆盖，方便回溯问题。
     文件不设自动轮转/清理——如果日志文件长期运行后体积过大，手动删除
     对应文件即可，下次启动会自动重新创建。
@@ -378,7 +386,7 @@ def _spawn(service: Dict[str, str]) -> Optional[subprocess.Popen]:
     # locale.getpreferredencoding() 探测编码，GBK 编不了 emoji 这类字符，
     # 会直接抛 UnicodeEncodeError 且不会自动回退，导致 print() 那一行直接
     # 把整个进程炸掉（app.py 表现为主服务启动到一半就崩溃退出；
-    # qwen3_server.py 等用 logging 模块的则是 StreamHandler 默认绑定
+    # nemo_server.py 等用 logging 模块的则是 StreamHandler 默认绑定
     # sys.stderr，而 sys.stderr 的默认错误处理器是 backslashreplace 而非
     # strict，不会抛异常，但日志里看到的是转义后的 "\U0001f680" 字面量
     # 文本，不是真正的图案）。
@@ -448,12 +456,12 @@ def start_all() -> None:
             _procs.append(proc)
 
 
-def _wait_for_backend_ready(timeout: float = 30.0) -> bool:
+def _wait_for_backend_ready(timeout: float = 180.0) -> bool:
     """
     轮询 app.py 的 /api/health，等主服务真正能响应 HTTP 请求了再去创建
     原生窗口——避免窗口一开出来就是"连接被拒绝"的空白/报错页面。
 
-    超时后仍然返回 False 而不是抛异常：就算 30 秒内没等到（比如机器很慢），
+    超时后仍然返回 False 而不是抛异常：就算 180 秒内没等到（比如机器很慢），
     也继续把窗口开出来，前端页面本身会自己重试请求，不阻塞用户看到界面。
     """
     url = f"http://{HOST}:{MAIN_PORT}/api/health"
@@ -665,8 +673,8 @@ def main() -> None:
 
     start_all()
 
-    if not _wait_for_backend_ready(timeout=30.0):
-        logger.warning("等待 app.py 就绪超时（30s），仍然打开窗口，页面会自行重试连接。")
+    if not _wait_for_backend_ready(timeout=180.0):
+        logger.warning("等待 app.py 就绪超时（180s），仍然打开窗口，页面会自行重试连接。")
 
     # 【2026-08 变更，修复下载无反应】pywebview 默认关闭浏览器标准的文件
     # 下载能力（ALLOW_DOWNLOADS 默认 False）——前端 `<a download>` /
@@ -714,7 +722,7 @@ def main() -> None:
 if __name__ == "__main__":
     if _is_cmd_invocation():
         # 命令行一次性调用：转发给 backend/app.py（mfa_env）执行，不启动
-        # 托盘/原生窗口/qwen3/nemo 微服务，跑完就退出。用法例如:
+        # 托盘/原生窗口/whisperx/nemo 微服务，跑完就退出。用法例如:
         #   SVS Lab Tools.exe cmd mfa-only -a in.wav -t "参考文本" -o out.lab
         #   SVS Lab Tools.exe cmd full -a in.wav -t "参考文本" -f sv -o out.svp
         # 完整参数列表见 backend/commandline.py，或运行:

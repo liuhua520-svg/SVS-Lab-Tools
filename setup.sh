@@ -534,59 +534,59 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────
-# Step 7: Qwen3-ASR / Qwen3-ForcedAligner 独立环境（可选）
+# Step 7: WhisperX 独立环境（可选）
 # ─────────────────────────────────────────────────────────────────────────
-log_section "Step 7: Qwen3-ASR / Qwen3-ForcedAligner 独立环境 (可选)"
+log_section "Step 7: WhisperX 独立环境 (可选)"
 
-log_info "Qwen3-ASR / Qwen3-ForcedAligner 是可选的对齐/识别后端，作为一个本地"
-log_info "服务 (端口 5001) 供主后端通过 HTTP 调用。不安装不影响 MFA / WhisperX /"
-log_info "NeMo 后端使用。依赖见 backend/requirements-qwen3.txt (Python 3.10)。"
+log_info "WhisperX 是可选的强制对齐后端，作为一个本地服务 (端口 5854) 供主"
+log_info "后端通过 HTTP 调用。不安装不影响 MFA / Qwen3-ASR / Qwen3-FA / NeMo"
+log_info "后端使用。依赖见 backend/requirements-whisperx.txt (Python 3.10)。"
 echo ""
 
-QWEN3_VENV_DIR="$SCRIPT_DIR/.qwen3_env"
-QWEN3_REQ_FILE="$SCRIPT_DIR/backend/requirements-qwen3.txt"
+WHISPERX_VENV_DIR="$SCRIPT_DIR/.whisperx_env"
+WHISPERX_REQ_FILE="$SCRIPT_DIR/backend/requirements-whisperx.txt"
 
 # 【修复】同上：避免 confirm() 返回 1（用户选 n）时被 set -e 直接终止脚本。
-qwen3_install_choice=0
-confirm "是否现在创建独立环境并安装 Qwen3-ASR/ForcedAligner?" || qwen3_install_choice=$?
+whisperx_install_choice=0
+confirm "是否现在创建独立环境并安装 WhisperX?" || whisperx_install_choice=$?
 
-if [ $qwen3_install_choice -eq 0 ] || [ $qwen3_install_choice -eq 2 ]; then
-    if [ ! -f "$QWEN3_REQ_FILE" ]; then
-        log_error "找不到 $QWEN3_REQ_FILE，跳过 Qwen3-ASR 安装"
+if [ $whisperx_install_choice -eq 0 ] || [ $whisperx_install_choice -eq 2 ]; then
+    if [ ! -f "$WHISPERX_REQ_FILE" ]; then
+        log_error "找不到 $WHISPERX_REQ_FILE，跳过 WhisperX 安装"
     else
-        if [ -d "$QWEN3_VENV_DIR" ]; then
-            log_warn "Qwen3-ASR 环境已存在: $QWEN3_VENV_DIR"
-            read -p "是否删除并重新创建? [y/n]: " -r qwen3_response
-            if [[ "$qwen3_response" =~ ^[yY]$ ]]; then
-                log_step "删除旧 Qwen3-ASR 环境..."
-                rm -rf "$QWEN3_VENV_DIR"
+        if [ -d "$WHISPERX_VENV_DIR" ]; then
+            log_warn "WhisperX 环境已存在: $WHISPERX_VENV_DIR"
+            read -p "是否删除并重新创建? [y/n]: " -r whisperx_response
+            if [[ "$whisperx_response" =~ ^[yY]$ ]]; then
+                log_step "删除旧 WhisperX 环境..."
+                rm -rf "$WHISPERX_VENV_DIR"
                 log_ok "已删除"
             else
-                log_info "使用现有 Qwen3-ASR 环境"
-                skip_qwen3_venv_create=1
+                log_info "使用现有 WhisperX 环境"
+                skip_whisperx_venv_create=1
             fi
         fi
 
-        if [ -z "$skip_qwen3_venv_create" ]; then
-            log_step "创建 Qwen3-ASR 独立虚拟环境..."
-            python3 -m venv "$QWEN3_VENV_DIR"
-            log_ok "Qwen3-ASR 虚拟环境已创建: $QWEN3_VENV_DIR"
+        if [ -z "$skip_whisperx_venv_create" ]; then
+            log_step "创建 WhisperX 独立虚拟环境..."
+            python3 -m venv "$WHISPERX_VENV_DIR"
+            log_ok "WhisperX 虚拟环境已创建: $WHISPERX_VENV_DIR"
         fi
 
-        log_step "在独立环境中安装 Qwen3-ASR/ForcedAligner 依赖（安装过程会实时显示）..."
-        if "$QWEN3_VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel > /dev/null 2>&1 && \
-           "$QWEN3_VENV_DIR/bin/python" -m pip install -r "$QWEN3_REQ_FILE"; then
-            log_ok "Qwen3-ASR/ForcedAligner 依赖已安装"
-            log_info "首次启动 qwen3_server.py 时会自动下载模型权重"
+        log_step "在独立环境中安装 WhisperX 依赖（安装过程会实时显示）..."
+        if "$WHISPERX_VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel > /dev/null 2>&1 && \
+           "$WHISPERX_VENV_DIR/bin/python" -m pip install -r "$WHISPERX_REQ_FILE"; then
+            log_ok "WhisperX 依赖已安装"
+            log_info "首次启动 whisperx_server.py 时会自动下载模型权重"
         else
-            log_warn "Qwen3-ASR 依赖安装失败，可稍后手动执行："
-            log_warn "  $QWEN3_VENV_DIR/bin/python -m pip install -r \"$QWEN3_REQ_FILE\""
+            log_warn "WhisperX 依赖安装失败，可稍后手动执行："
+            log_warn "  $WHISPERX_VENV_DIR/bin/python -m pip install -r \"$WHISPERX_REQ_FILE\""
         fi
     fi
 else
     log_info "已跳过，可后续手动运行以下命令安装："
-    log_info "  python3 -m venv .qwen3_env"
-    log_info "  .qwen3_env/bin/python -m pip install -r backend/requirements-qwen3.txt"
+    log_info "  python3 -m venv .whisperx_env"
+    log_info "  .whisperx_env/bin/python -m pip install -r backend/requirements-whisperx.txt"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────

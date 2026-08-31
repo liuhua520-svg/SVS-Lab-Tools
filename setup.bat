@@ -127,22 +127,6 @@ echo [OK] MFA 环境已准备
 echo.
 
 REM -----------------------------------------------------------------
-REM Step 2.1: 预装 PyAV 11.0.0（WhisperX 3.2.0 / faster-whisper 1.0.0）
-REM -----------------------------------------------------------------
-REM PyPI 上 av==11.0.0 当前会落到源码包；Windows 编译需要 FFmpeg 的 avformat.lib。
-REM conda-forge 提供 Python 3.10 / win-64 的 av 11.0.0 二进制包，因此先用 conda 安装，
-REM 再执行 pip requirements，pip 会直接复用已安装的 av，不再尝试源码编译。
-echo [*] 安装 PyAV 11.0.0 二进制依赖（conda-forge）...
-call "%CONDA_BAT%" install -y -p "%ENV_PREFIX%" -c conda-forge av=11.0.0
-if errorlevel 1 (
-    echo [ERROR] PyAV 11.0.0 安装失败，请检查 conda-forge 网络或上方错误。
-    pause
-    exit /b 1
-)
-echo [OK] PyAV 11.0.0 已安装
-echo.
-
-REM -----------------------------------------------------------------
 REM Step 2.5: 用 conda 在【独立环境】里只装 kaldi 这个二进制依赖
 REM -----------------------------------------------------------------
 REM 【修复】此前这一步是 `conda install -p "%ENV_PREFIX%" ... kaldi`，把
@@ -531,6 +515,40 @@ if /i "!NEMO_CHOICE!"=="all" (
 )
 
 if /i "!NEMO_CHOICE!"=="y" (
+
+    REM 【2026-08 新增】让用户先选择硬件版本（CUDA 12.1 / CUDA 11.8 / CPU），
+    REM 避免像之前那样在 requirements-nemo.txt 里靠注释切换、注释和实际生效
+    REM 的行对不上。选择结果决定第 2 步安装 torch/torchaudio 时用哪个包名
+    REM 和哪个 --index-url。
+    echo.
+    echo 请选择 NeMo 使用的 PyTorch 版本：
+    echo   [1] CUDA 12.1（RTX 30/40/50 系等现代独立显卡）
+    echo   [2] CUDA 11.8（GTX10 系等旧款显卡）
+    echo   [3] CPU Only（无独立显卡）
+    set "NEMO_HW_CHOICE="
+    set /p "NEMO_HW_CHOICE=请输入数字 (1/2/3): "
+
+    if "!NEMO_HW_CHOICE!"=="1" (
+        set "NEMO_TORCH_PKGS=torch==2.6.0+cu121 torchaudio==2.6.0+cu121"
+        set "NEMO_TORCH_INDEX=https://download.pytorch.org/whl/cu121"
+        set "NEMO_HW_LABEL=CUDA 12.1"
+    ) else if "!NEMO_HW_CHOICE!"=="2" (
+        set "NEMO_TORCH_PKGS=torch==2.6.0+cu118 torchaudio==2.6.0+cu118"
+        set "NEMO_TORCH_INDEX=https://download.pytorch.org/whl/cu118"
+        set "NEMO_HW_LABEL=CUDA 11.8"
+    ) else if "!NEMO_HW_CHOICE!"=="3" (
+        set "NEMO_TORCH_PKGS=torch==2.6.0+cpu torchaudio==2.6.0+cpu"
+        set "NEMO_TORCH_INDEX=https://download.pytorch.org/whl/cpu"
+        set "NEMO_HW_LABEL=CPU Only"
+    ) else (
+        echo [警告] 未识别的输入 "!NEMO_HW_CHOICE!"，默认使用 CPU Only
+        set "NEMO_TORCH_PKGS=torch==2.6.0+cpu torchaudio==2.6.0+cpu"
+        set "NEMO_TORCH_INDEX=https://download.pytorch.org/whl/cpu"
+        set "NEMO_HW_LABEL=CPU Only（默认）"
+    )
+    echo [OK] 已选择: !NEMO_HW_LABEL!
+    echo.
+
     set "NEMO_NEED_CREATE=1"
     set "NEMO_CREATE_FAILED=0"
 
@@ -563,12 +581,29 @@ if /i "!NEMO_CHOICE!"=="y" (
         ) else (
             echo [*] 根据 requirements-nemo.txt 安装 NeMo 独立环境依赖（安装过程会实时显示）...
             call "%CONDA_BAT%" run --no-capture-output -p "%NEMO_ENV_PREFIX%" python -m pip install --upgrade pip setuptools wheel
-            call "%CONDA_BAT%" run --no-capture-output -p "%NEMO_ENV_PREFIX%" python -m pip install -r "%NEMO_REQ_FILE%"
-            if errorlevel 1 (
-                echo [ERROR] NeMo 依赖安装失败，可稍后手动执行：
-                echo     "%CONDA_BAT%" run --no-capture-output -p "%NEMO_ENV_PREFIX%" python -m pip install -r "%NEMO_REQ_FILE%"
-            ) else (
-                echo [OK] NeMo Forced Aligner 依赖已安装
+
+            REM 【2026-08 修复】分两步安装，避免 torch 那行的 --index-url
+            REM 污染 flask/nemo_toolkit 等包的下载源（--index-url 会整体替换默认
+            REM PyPI 源，一旦被 pip 解析到，前面所有包都会去 PyTorch 专属源里
+            REM 找，结果全部找不到、整个安装中止，flask 也不会被装上）。
+            echo [*] 第 1/2 步：安装 flask / nemo_toolkit / soundfile 等基础依赖...
+            call "%CONDA_BAT%" run --no-capture-output -p "%NEMO_ENV_PREFIX%" python -m pip install flask==2.3.3 "nemo_toolkit[asr]==2.7.3" soundfile==0.12.1 requests tqdm
+            set "NEMO_STEP1_FAILED=!errorlevel!"
+
+            echo [*] 第 2/2 步：安装 torch / torchaudio（!NEMO_HW_LABEL!）...
+            call "%CONDA_BAT%" run --no-capture-output -p "%NEMO_ENV_PREFIX%" python -m pip install !NEMO_TORCH_PKGS! --index-url !NEMO_TORCH_INDEX!
+            set "NEMO_STEP2_FAILED=!errorlevel!"
+
+            if not "!NEMO_STEP1_FAILED!"=="0" (
+                echo [ERROR] 第 1 步（flask/nemo_toolkit 等）安装失败，可稍后手动执行：
+                echo     "%CONDA_BAT%" run --no-capture-output -p "%NEMO_ENV_PREFIX%" python -m pip install flask==2.3.3 "nemo_toolkit[asr]==2.7.3" soundfile==0.12.1 requests tqdm
+            )
+            if not "!NEMO_STEP2_FAILED!"=="0" (
+                echo [ERROR] 第 2 步（torch/torchaudio，!NEMO_HW_LABEL!）安装失败，可稍后手动执行：
+                echo     "%CONDA_BAT%" run --no-capture-output -p "%NEMO_ENV_PREFIX%" python -m pip install !NEMO_TORCH_PKGS! --index-url !NEMO_TORCH_INDEX!
+            )
+            if "!NEMO_STEP1_FAILED!"=="0" if "!NEMO_STEP2_FAILED!"=="0" (
+                echo [OK] NeMo Forced Aligner 依赖已安装（!NEMO_HW_LABEL!）
                 echo [OK] 首次启动 nemo_server.py 时会按所选语言自动下载模型权重（数百 MB ~ 1GB）
             )
         )
@@ -580,81 +615,101 @@ if /i "!NEMO_CHOICE!"=="y" (
 )
 
 REM -----------------------------------------------------------------
-REM Step 7: Qwen3-ASR / Qwen3-ForcedAligner 独立环境（可选）
+REM Step 7: WhisperX 独立环境（可选）
 REM -----------------------------------------------------------------
 cls
 echo.
 echo ================================================================================
-echo Step 7/8: Qwen3-ASR / Qwen3-ForcedAligner 独立环境 (可选)
+echo Step 7/8: WhisperX 独立环境 (可选)
 echo ================================================================================
 echo.
-echo Qwen3-ASR / Qwen3-ForcedAligner 是可选的对齐/识别后端，作为一个本地
-echo 服务 (端口 5001) 供主后端通过 HTTP 调用。不安装不影响 MFA / WhisperX /
-echo NeMo 后端使用。依赖见 backend\requirements-qwen3.txt (Python 3.10)。
+echo WhisperX 是可选的强制对齐后端，作为一个本地服务 (端口 5854) 供主后端
+echo 通过 HTTP 调用。不安装不影响 MFA / Qwen3-ASR / Qwen3-FA / NeMo 后端
+echo 使用。依赖见 backend\requirements-whisperx.txt (Python 3.10)。
 echo.
 
-set "QWEN3_ENV_PREFIX=%CD%\.qwen3_env"
-set "QWEN3_REQ_FILE=%CD%\backend\requirements-qwen3.txt"
+set "WHISPERX_ENV_PREFIX=%CD%\.whisperx_env"
+set "WHISPERX_REQ_FILE=%CD%\backend\requirements-whisperx.txt"
 if /i "!INSTALL_ALL_OPTIONAL!"=="true" (
-    set "QWEN3_CHOICE=y"
-    echo [OK] ALL：自动安装 Qwen3-ASR/ForcedAligner，不再询问。
+    set "WHISPERX_CHOICE=y"
+    echo [OK] ALL：自动安装 WhisperX，不再询问。
 ) else (
-    set /p "QWEN3_CHOICE=是否现在创建独立环境并安装 Qwen3-ASR/ForcedAligner? (y/n): "
-    if /i "!QWEN3_CHOICE!"=="all" (
+    set /p "WHISPERX_CHOICE=是否现在创建独立环境并安装 WhisperX? (y/n): "
+    if /i "!WHISPERX_CHOICE!"=="all" (
         echo [OK] 已选择 ALL：后续 Qwen3-TTS 也自动安装。
         set "INSTALL_ALL_OPTIONAL=true"
-        set "QWEN3_CHOICE=y"
+        set "WHISPERX_CHOICE=y"
     )
 )
 )
 
-if /i "!QWEN3_CHOICE!"=="y" (
-    if not exist "%QWEN3_REQ_FILE%" (
-        echo [ERROR] 找不到 %QWEN3_REQ_FILE%，跳过 Qwen3-ASR 安装
+if /i "!WHISPERX_CHOICE!"=="y" (
+    if not exist "%WHISPERX_REQ_FILE%" (
+        echo [ERROR] 找不到 %WHISPERX_REQ_FILE%，跳过 WhisperX 安装
     ) else (
-        set "QWEN3_NEED_CREATE=1"
-        set "QWEN3_CREATE_FAILED=0"
+        set "WHISPERX_NEED_CREATE=1"
+        set "WHISPERX_CREATE_FAILED=0"
 
-        if exist "%QWEN3_ENV_PREFIX%" (
-            echo [!] Qwen3-ASR 环境已存在: %QWEN3_ENV_PREFIX%
-            set /p "QWEN3_RECREATE=是否删除并重新创建? (y/n): "
-            if /i "!QWEN3_RECREATE!"=="y" (
-                echo 正在删除旧 Qwen3-ASR 环境...
-                call "%CONDA_BAT%" env remove -y -p "%QWEN3_ENV_PREFIX%" >nul 2>&1
+        if exist "%WHISPERX_ENV_PREFIX%" (
+            echo [!] WhisperX 环境已存在: %WHISPERX_ENV_PREFIX%
+            set /p "WHISPERX_RECREATE=是否删除并重新创建? (y/n): "
+            if /i "!WHISPERX_RECREATE!"=="y" (
+                echo 正在删除旧 WhisperX 环境...
+                call "%CONDA_BAT%" env remove -y -p "%WHISPERX_ENV_PREFIX%" >nul 2>&1
             ) else (
-                echo [OK] 使用现有 Qwen3-ASR 环境
-                set "QWEN3_NEED_CREATE=0"
+                echo [OK] 使用现有 WhisperX 环境
+                set "WHISPERX_NEED_CREATE=0"
             )
         )
 
-        if "!QWEN3_NEED_CREATE!"=="1" (
-            echo 创建 Qwen3-ASR 独立环境中... 请耐心等待（可能需要几分钟）...
-            call "%CONDA_BAT%" create -y -p "%QWEN3_ENV_PREFIX%" -c conda-forge python=3.10 pip >nul 2>&1
+        if "!WHISPERX_NEED_CREATE!"=="1" (
+            echo 创建 WhisperX 独立环境中... 请耐心等待（可能需要几分钟）...
+            call "%CONDA_BAT%" create -y -p "%WHISPERX_ENV_PREFIX%" -c conda-forge python=3.10 pip >nul 2>&1
             if errorlevel 1 (
-                echo [ERROR] Qwen3-ASR 环境创建失败，可稍后手动执行：
-                echo     "%CONDA_BAT%" create -y -p "%QWEN3_ENV_PREFIX%" -c conda-forge python=3.10 pip
-                set "QWEN3_CREATE_FAILED=1"
+                echo [ERROR] WhisperX 环境创建失败，可稍后手动执行：
+                echo     "%CONDA_BAT%" create -y -p "%WHISPERX_ENV_PREFIX%" -c conda-forge python=3.10 pip
+                set "WHISPERX_CREATE_FAILED=1"
             )
         )
 
-        if "!QWEN3_CREATE_FAILED!"=="0" (
-            echo [OK] Qwen3-ASR 环境已准备
-            echo [*] 在独立环境中安装 Qwen3-ASR/ForcedAligner 依赖（安装过程会实时显示）...
-            call "%CONDA_BAT%" run --no-capture-output -p "%QWEN3_ENV_PREFIX%" python -m pip install --upgrade pip setuptools wheel
-            call "%CONDA_BAT%" run --no-capture-output -p "%QWEN3_ENV_PREFIX%" python -m pip install -r "%QWEN3_REQ_FILE%"
+        if "!WHISPERX_CREATE_FAILED!"=="0" (
+            REM 预装 PyAV 11.0.0（WhisperX 3.2.0 / faster-whisper 1.0.0 依赖）：
+            REM PyPI 上 av==11.0.0 当前会落到源码包；Windows 编译需要 FFmpeg 的
+            REM avformat.lib。conda-forge 提供 Python 3.10 / win-64 的 av 11.0.0
+            REM 二进制包，因此先用 conda 装，再执行 pip requirements，pip 会
+            REM 直接复用已安装的 av，不再尝试源码编译。这一步现在跟着 WhisperX
+            REM 一起搬到了 .whisperx_env 里（此前误装在 .mfa_env，但 PyAV 只有
+            REM whisperx/faster-whisper 需要，主环境不再需要它）。
+            echo [*] 安装 PyAV 11.0.0 二进制依赖（conda-forge）...
+            call "%CONDA_BAT%" install -y -p "%WHISPERX_ENV_PREFIX%" -c conda-forge av=11.0.0
             if errorlevel 1 (
-                echo [ERROR] Qwen3-ASR 依赖安装失败，可稍后手动执行：
-                echo     "%CONDA_BAT%" run -p "%QWEN3_ENV_PREFIX%" python -m pip install -r "%QWEN3_REQ_FILE%"
+                echo [ERROR] PyAV 11.0.0 安装失败，请检查 conda-forge 网络或上方错误，可稍后手动执行：
+                echo     "%CONDA_BAT%" install -y -p "%WHISPERX_ENV_PREFIX%" -c conda-forge av=11.0.0
+                set "WHISPERX_CREATE_FAILED=1"
             ) else (
-                echo [OK] Qwen3-ASR/ForcedAligner 依赖已安装
-                echo [OK] 首次启动 qwen3_server.py 时会自动下载模型权重
+                echo [OK] PyAV 11.0.0 已安装
+            )
+        )
+
+        if "!WHISPERX_CREATE_FAILED!"=="0" (
+            echo [OK] WhisperX 环境已准备
+            echo [*] 在独立环境中安装 WhisperX 依赖（安装过程会实时显示）...
+            call "%CONDA_BAT%" run --no-capture-output -p "%WHISPERX_ENV_PREFIX%" python -m pip install --upgrade pip setuptools wheel
+            call "%CONDA_BAT%" run --no-capture-output -p "%WHISPERX_ENV_PREFIX%" python -m pip install -r "%WHISPERX_REQ_FILE%"
+            if errorlevel 1 (
+                echo [ERROR] WhisperX 依赖安装失败，可稍后手动执行：
+                echo     "%CONDA_BAT%" run -p "%WHISPERX_ENV_PREFIX%" python -m pip install -r "%WHISPERX_REQ_FILE%"
+            ) else (
+                echo [OK] WhisperX 依赖已安装
+                echo [OK] 首次启动 whisperx_server.py 时会自动下载模型权重
             )
         )
     )
 ) else (
     echo [OK] 已跳过，可后续手动运行以下命令安装：
-    echo     "%CONDA_BAT%" create -y -p "%CD%\.qwen3_env" -c conda-forge python=3.10 pip
-    echo     "%CONDA_BAT%" run -p "%CD%\.qwen3_env" python -m pip install -r "%QWEN3_REQ_FILE%"
+    echo     "%CONDA_BAT%" create -y -p "%CD%\.whisperx_env" -c conda-forge python=3.10 pip
+    echo     "%CONDA_BAT%" install -y -p "%CD%\.whisperx_env" -c conda-forge av=11.0.0
+    echo     "%CONDA_BAT%" run -p "%CD%\.whisperx_env" python -m pip install -r "%WHISPERX_REQ_FILE%"
 )
 
 REM -----------------------------------------------------------------

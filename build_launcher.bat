@@ -15,11 +15,11 @@ if errorlevel 1 (
 
 echo [2/2] 打包 launcher.py 为多文件(onedir) exe
 pyinstaller ^
-  --name "SVS-Lab-Tools" ^
+  --name "SVS-Lab-Talkloid-Tools" ^
   --onedir ^
   --noconsole ^
   --clean ^
-  --icon="./assets/icon/icon.ico" ^
+  --icon="SVS-Lab-Talkloid-Tools.ico" ^
   --hidden-import=clr_loader ^
   --hidden-import=pythonnet ^
   launcher.py
@@ -34,7 +34,7 @@ echo 完成。产物在 dist\SVS-Lab-Tools\ 目录下：
 echo   - SVS-Lab-Tools.exe
 echo   - _internal\
 echo.
-echo 接下来将询问是否复制运行所需的虚拟环境。
+echo 接下来将询问是否复制运行所需的 backend/frontend 以及虚拟环境。
 echo.
 echo 排错提示：
 echo   - 目标机器需要 WebView2 运行时（Win10 1803+ / Win11 通常已自带；
@@ -44,11 +44,33 @@ echo     "Failed to resolve Python.Runtime"/pythonnet 相关错误，
 echo     通常是 pythonnet 版本和 clr_loader 没配对好，尝试：
 echo       pip install "pythonnet>=3.0.3" "clr_loader>=0.2.6" 后重新打包。
 echo.
+choice /C YN /N /M "是否复制 backend/frontend 到 dist\SVS-Lab-Tools\runtime？ [Y/N]"
+
+if errorlevel 2 (
+    echo.
+    echo 已选择 N，跳过 backend/frontend 复制，请手动复制。
+    echo.
+    pause
+    exit /b 0
+)
+
+echo.
+echo 已选择 Y，开始复制 backend/frontend。
+echo.
+
+echo.
+echo [1/2] 复制 backend → dist\SVS-Lab-Tools\backend
+robocopy ".\backend" ".\dist\SVS-Lab-Tools\backend" /E /MT:16 /R:2 /W:2
+
+echo.
+echo [2/2] 复制 .mfa_env → dist\SVS-Lab-Tools\frobtend
+robocopy ".\frontend" ".\dist\SVS-Lab-Tools\frontend" /E /MT:16 /R:2 /W:2
+
 choice /C YN /N /M "是否继续复制虚拟环境到 dist\SVS-Lab-Tools\runtime？ [Y/N]"
 
 if errorlevel 2 (
     echo.
-    echo 已选择 N，跳过虚拟环境复制。
+    echo 已选择 N，跳过虚拟环境复制，请手动复制。
     echo.
     pause
     exit /b 0
@@ -61,6 +83,7 @@ echo.
 if not exist ".\dist\SVS-Lab-Tools\runtime" (
     mkdir ".\dist\SVS-Lab-Tools\runtime"
 )
+
 if not exist ".\.mfa_env" (
     echo 未检测到.mfa_env。
     pause
@@ -68,27 +91,27 @@ if not exist ".\.mfa_env" (
 )
 
 echo.
-echo [1/5] 复制 .mfa_env → runtime\.mfa_env
+echo [1/5] 复制 .mfa_env → dist\SVS-Lab-Tools\runtime\.mfa_env
 robocopy ".\.mfa_env" ".\dist\SVS-Lab-Tools\runtime\.mfa_env" /E /MT:16 /R:2 /W:2
 
 echo.
-echo [2/5] 复制 .mfa_env → runtime\.kaldi_env
+echo [2/5] 复制 .mfa_env → dist\SVS-Lab-Tools\runtime\.kaldi_env
 robocopy ".\.kaldi_env" ".\dist\SVS-Lab-Tools\runtime\.kaldi_env" /E /MT:16 /R:2 /W:2
 
 echo.
-echo [3/5] 复制 .qwen3_env → runtime\.qwen3_env
-robocopy ".\.qwen3_env" ".\dist\SVS-Lab-Tools\runtime\.qwen3_env" /E /MT:16 /R:2 /W:2
+echo [3/5] 复制 .qwen3_env → dist\SVS-Lab-Tools\runtime\.whisperx_env
+robocopy ".\.qwen3_env" ".\dist\SVS-Lab-Tools\runtime\.whisperx_env" /E /MT:16 /R:2 /W:2
 
 echo.
-echo [4/5] 复制 .qwen3_env → runtime\.qwen3tts_env
+echo [4/5] 复制 .qwen3_env → dist\SVS-Lab-Tools\runtime\.qwen3tts_env
 robocopy ".\.qwen3_env" ".\dist\SVS-Lab-Tools\runtime\.qwen3tts_env" /E /MT:16 /R:2 /W:2
 
 echo.
-echo [5/5] 复制 .nemo_env → runtime\.nemo_env
+echo [5/5] 复制 .nemo_env → dist\SVS-Lab-Tools\runtime\.nemo_env
 robocopy ".\.nemo_env" ".\dist\SVS-Lab-Tools\runtime\.nemo_env" /E /MT:16 /R:2 /W:2
 
 echo.
 echo ============================================
-echo 所有环境复制完成。
+echo 所有复制完成。
 echo ============================================
 pause

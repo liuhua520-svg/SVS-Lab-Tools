@@ -8,13 +8,14 @@ export LC_ALL=C.UTF-8
 cd "$(dirname "$(readlink -f "$0")")"
 
 echo "================================================"
-echo "    SVS Lab Aligner + Qwen3-ASR + NeMo-FA 服务启动器"
+echo "    SVS Lab Tools + Qwen3-ASR + NeMo-FA + Qwen3-TTS 服务启动器"
 echo "================================================"
 
 # Linux 环境下虚拟环境的 Python 路径在 bin 目录下
 MFA_PY="$(pwd)/.mfa_env/bin/python"
-QWEN_PY="$(pwd)/.qwen3_env/bin/python"
+WHISPERX_PY="$(pwd)/.whisperx_env/bin/python"
 NEMO_PY="$(pwd)/.nemo_env/bin/python"
+TTS_PY="$(pwd)/.qwen3tts_env/bin/python"
 
 # 记录后台服务的 PID，主服务退出时统一清理，避免留下孤儿进程
 BG_PIDS=()
@@ -36,28 +37,39 @@ fi
 
 STEP=1
 TOTAL_STEPS=1
-[ -f "$QWEN_PY" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
+[ -f "$WHISPERX_PY" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 [ -f "$NEMO_PY" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
+[ -f "$TTS_PY" ] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 
-# 检查并启动 Qwen3 后端
-if [ -f "$QWEN_PY" ]; then
-    echo "[$STEP/$TOTAL_STEPS] 启动 Qwen3-ASR 推理服务（端口 5001）..."
+# 检查并启动 WhisperX 推理服务
+if [ -f "$WHISPERX_PY" ]; then
+    echo "[$STEP/$TOTAL_STEPS] 启动 WhisperX 推理服务（端口 5854）..."
     # 使用 & 让服务在后台运行，并将日志重定向到文件，避免干扰主控制台
-    "$QWEN_PY" "$(pwd)/qwen3_server.py" > qwen3_server.log 2>&1 &
+    "$WHISPERX_PY" "$(pwd)/backend/whisperx_server.py" > whisperx_server.log 2>&1 &
     BG_PIDS+=($!)
     STEP=$((STEP + 1))
 else
-    echo "[警告] .qwen3_env/bin/python 未找到，将跳过 Qwen3-ASR（该后端不可用）"
+    echo "[警告] .whisperx_env/bin/python 未找到，将跳过 WhisperX"
 fi
 
 # 检查并启动 NeMo Forced Aligner 后端
 if [ -f "$NEMO_PY" ]; then
-    echo "[$STEP/$TOTAL_STEPS] 启动 NeMo Forced Aligner 服务（端口 5002）..."
-    "$NEMO_PY" "$(pwd)/nemo_server.py" > nemo_server.log 2>&1 &
+    echo "[$STEP/$TOTAL_STEPS] 启动 NeMo Forced Aligner 服务（端口 5852）..."
+    "$NEMO_PY" "$(pwd)/backend/nemo_server.py" > nemo_server.log 2>&1 &
     BG_PIDS+=($!)
     STEP=$((STEP + 1))
 else
-    echo "[警告] .nemo_env/bin/python 未找到，将跳过 NeMo Forced Aligner（该后端不可用）"
+    echo "[警告] .nemo_env/bin/python 未找到，将跳过 NeMo Forced Aligner"
+fi
+
+# 检查并启动 Qwen3-TTS 推理服务
+if [ -f "$TTS_PY" ]; then
+    echo "[$STEP/$TOTAL_STEPS] 启动 Qwen3-TTS 推理服务（端口 5853）..."
+    "$TTS_PY" "$(pwd)/backend/qwen3tts_server.py" > qwen3tts_server.log 2>&1 &
+    BG_PIDS+=($!)
+    STEP=$((STEP + 1))
+else
+    echo "[警告] .qwen3tts_env/bin/python 未找到，将跳过 Qwen3-TTS"
 fi
 
 if [ ${#BG_PIDS[@]} -gt 0 ]; then
@@ -65,7 +77,7 @@ if [ ${#BG_PIDS[@]} -gt 0 ]; then
     sleep 5
 fi
 
-echo "[$STEP/$TOTAL_STEPS] 启动主后端服务（端口 5000）..."
+echo "[$STEP/$TOTAL_STEPS] 启动主后端服务（端口 5850）..."
 # 前台运行主服务；Ctrl+C 或主服务退出都会触发上面注册的 cleanup
 "$MFA_PY" backend/app.py
 
