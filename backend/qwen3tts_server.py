@@ -4,13 +4,13 @@
 # https://github.com/QwenLM/Qwen3-TTS
 # https://huggingface.co/spaces/Qwen/Qwen3-TTS
 #
-# 与 qwen3_server.py（Qwen3-ASR / Qwen3-ForcedAligner，端口 5001）、
-# nemo_server.py（NeMo Forced Aligner，端口 5002）同样的理由：qwen-tts 这
-# 个官方包对 transformers / torch 的版本要求，与 qwen_asr（qwen3_server.py
-# 所在环境）不完全一致（qwen-tts 依赖更新的 transformers 版本以支持其
-# 12Hz tokenizer 架构），装进同一个 venv 容易互相"打架"、把对方需要的
-# 版本降级。因此照搬同样的做法：Qwen3-TTS 单独装一个 conda/venv 环境，
-# 跑成一个本地 HTTP 微服务，主进程（tts_processor.py 里的
+# 与 whisperx_server.py（WhisperX，端口 5854）、nemo_server.py（NeMo
+# Forced Aligner，端口 5852）同样的理由：qwen-tts 这个官方包对
+# transformers / torch 的版本要求，与主 .mfa_env 里 qwen_asr 锁定的
+# transformers 版本不完全一致（qwen-tts 依赖更新的 transformers 版本以
+# 支持其 12Hz tokenizer 架构），装进同一个 venv 容易互相"打架"、把对方
+# 需要的版本降级。因此照搬同样的做法：Qwen3-TTS 单独装一个 conda/venv
+# 环境，跑成一个本地 HTTP 微服务，主进程（tts_processor.py 里的
 # Qwen3TTSClient）只通过 HTTP 调用它，不在主 .mfa_env 里 import qwen_tts。
 #
 # 用法：
@@ -19,8 +19,8 @@
 #   pip install -r requirements-qwen3tts.txt
 #   python qwen3tts_server.py
 #
-# 默认监听 127.0.0.1:5003（5001 已被 qwen3_server.py 占用，
-# 5002 已被 nemo_server.py 占用）。
+# 默认监听 127.0.0.1:5853（5851 是历史遗留端口参考，
+# 5852 已被 nemo_server.py 占用，5854 已被 whisperx_server.py 占用）。
 #
 # 支持 Qwen3-TTS 官方三种模式（与 GitHub README「Python Package Usage」
 # 完全对应，见 https://github.com/QwenLM/Qwen3-TTS#python-package-usage）：
@@ -70,7 +70,7 @@ app = Flask(__name__)
 # 项目目录现在直接是 backend 目录
 BACKEND_DIR = Path(__file__).resolve().parent
 
-# 缓存固定到当前应用内，与 qwen3_server.py / nemo_server.py 各自独立，
+# 缓存固定到当前应用内，与 whisperx_server.py / nemo_server.py 各自独立，
 # 避免三个进程同时写同一个 hub 缓存目录产生竞态。
 CACHE_DIR = BACKEND_DIR / "models" / "qwen3tts_hf_cache"
 HUB_CACHE_DIR = CACHE_DIR / "hub"
@@ -90,9 +90,9 @@ except Exception as _settings_err:
     os.environ["HF_HUB_OFFLINE"] = "0"
 
 # 命令提示符窗口显示/隐藏：同样读取设置页面保存的配置，仅在 Windows 上
-# 生效，其余平台直接跳过（详见 qwen3_server.py 里的同名说明）。
+# 生效，其余平台直接跳过（详见 whisperx_server.py 里的同名说明）。
 # 【2026-08 起】launcher.py 正常启动本进程时用 CREATE_NO_WINDOW，本身
-# 就没有控制台窗口，这里调用是无操作，详见 qwen3_server.py 里的同名说明。
+# 就没有控制台窗口，这里调用是无操作，详见 whisperx_server.py 里的同名说明。
 try:
     from app_settings import apply_console_visibility as _apply_console_visibility
     _apply_console_visibility()
@@ -165,7 +165,7 @@ def _qwen_language(language: Optional[str]) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# 设备 / dtype 选择（与 qwen3_server.py 完全一致的策略，独立维护一份，
+# 设备 / dtype 选择（与 whisperx_server.py 完全一致的策略，独立维护一份，
 # 三个进程互相独立，无法直接 import 对方模块）
 # ═════════════════════════════════════════════════════════════════════════
 
@@ -208,7 +208,7 @@ def _pick_device_and_dtype(device_override: str = "auto"):
 
 def _is_cuda_oom_or_env_error(exc: Exception) -> bool:
     """判断异常是否属于"显存不足"或"CUDA 环境本身有问题"，与
-    qwen3_server.py / nemo_server.py / alt_aligners.py 里同名函数用途一致
+    whisperx_server.py / nemo_server.py / alt_aligners.py 里同名函数用途一致
     （各进程相互独立，无法直接 import，各自维护一份）。"""
     msg = str(exc).lower()
     _KEYWORDS = (
@@ -241,7 +241,7 @@ def _is_cuda_oom_or_env_error(exc: Exception) -> bool:
 _models: Dict[Tuple[str, str, str], Any] = {}
 _models_lock = threading.Lock()
 
-# 当前 HTTP server 实例（用法与 qwen3_server.py 一致，供 /restart 使用）
+# 当前 HTTP server 实例（用法与 whisperx_server.py 一致，供 /restart 使用）
 _httpd = None
 
 
@@ -253,7 +253,7 @@ def load_model(mode: str, size: str = "1.7B", device_override: str = "auto"):
     """
     惰性加载并缓存指定模式/规模/设备的 Qwen3-TTS 模型。
 
-    显存不足自动降级：与 qwen3_server.py load_model() 同样的两级降级
+    显存不足自动降级：与 whisperx_server.py load_model() 同样的两级降级
     策略——GPU 加载失败且命中 OOM/CUDA 环境异常时，自动整体切换到 CPU
     重新加载（Qwen3-TTS 没有 qwen_asr 那样的 max_inference_batch_size
     概念，这里没有"腰斩 batch_size"这一级，直接降到 CPU）。
@@ -406,14 +406,14 @@ def speakers():
 @app.post("/restart")
 def restart():
     """
-    优雅自重启，与 qwen3_server.py 的 /restart 实现完全一致（"先干净关闭、
+    优雅自重启，与 whisperx_server.py 的 /restart 实现完全一致（"先干净关闭、
     再拉起全新独立进程"两步法，避免 execv 在 Windows 上的重复重启坑，见
-    qwen3_server.py 里的详细说明）。
+    whisperx_server.py 里的详细说明）。
 
     【2026-08 变更】同样显式传入 stdout=sys.stdout, stderr=sys.stderr，
     让重启后的新进程继续写同一个 logs/qwen3tts.log 文件，而不是像之前
     那样在 close_fds=True 且不传 stdout/stderr 的情况下丢失所有标准句柄
-    （详见 qwen3_server.py /restart 文档字符串里的完整说明）。
+    （详见 whisperx_server.py /restart 文档字符串里的完整说明）。
     """
     def _delayed_restart():
         time.sleep(0.5)
@@ -424,7 +424,7 @@ def restart():
             if _httpd is not None:
                 _httpd.shutdown()
                 _httpd.server_close()
-                logger.info("✓ 已释放端口 5003，准备拉起新进程")
+                logger.info("✓ 已释放端口 5853，准备拉起新进程")
         except Exception as e:
             logger.warning(f"关闭旧 HTTP server 时出现异常（继续重启流程）: {e}")
 
@@ -590,6 +590,6 @@ if __name__ == "__main__":
     # shutdown() + server_close() 干净地释放端口，见 restart() 里的说明。
     from werkzeug.serving import make_server
 
-    _httpd = make_server("127.0.0.1", 5003, app)
-    logger.info("🚀 Qwen3-TTS service listening on http://127.0.0.1:5003")
+    _httpd = make_server("127.0.0.1", 5853, app)
+    logger.info("🚀 Qwen3-TTS service listening on http://127.0.0.1:5853")
     _httpd.serve_forever()

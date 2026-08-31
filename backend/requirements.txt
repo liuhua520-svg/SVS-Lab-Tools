@@ -2,8 +2,10 @@
 
 # SVS Lab Tools / SVS Lab Aligner - fixed main environment
 # Target: Python 3.10 / Windows x64
-# IMPORTANT: Qwen3-ASR and NeMo are intentionally NOT installed here.
+# IMPORTANT: WhisperX and NeMo are intentionally NOT installed here.
 # They run as separate HTTP server environments to avoid dependency conflicts.
+# Qwen3-ASR / Qwen3-ForcedAligner (qwen-asr package) ARE installed here and run
+# in-process (see the "Qwen3-ASR / Qwen3-ForcedAligner" section below for why).
 
 # Core
 numpy==1.26.4
@@ -59,29 +61,39 @@ dragonmapper==0.3.0
 hanziconv==0.3.2
 python-mecab-ko==1.3.7
 
-# WhisperX 3.2.0 is retained because this project intentionally keeps NumPy 1.26.x.
-# WhisperX 3.2.0 requires faster-whisper==1.0.0, ctranslate2==4.4.0 and an unconstrained transformers.
-# faster-whisper==1.0.0 requires tokenizers<0.16, so pin an older Transformers stack here.
-# PyAV 11.0.0 is NOT installed by pip: setup.bat installs conda-forge av=11.0.0 first
-# to avoid a Windows source build that requires FFmpeg import libraries.
-whisperx==3.2.0
-ctranslate2==4.4.0
-transformers==4.39.3
-tokenizers==0.15.2
-huggingface-hub==0.36.2
+# ====================== WhisperX ======================
+# NOTE: whisperx is intentionally NOT installed here (removed — this is the
+# other half of the 2026-08 architecture swap described below). WhisperX now
+# runs exclusively inside the separate whisperx_server.py process
+# (.whisperx_env, see requirements-whisperx.txt) and is called over HTTP on
+# 127.0.0.1:5854 — alt_aligners.py's WhisperXAligner class is a thin HTTP
+# client (POST /transcribe, POST /align), matching the pattern
+# Qwen3ASRAligner/Qwen3ForcedAligner use below. This env never needs
+# whisperx/faster-whisper/ctranslate2 installed.
+#
+# Why it moved out: whisperx==3.2.0 requires faster-whisper==1.0.0 +
+# ctranslate2==4.4.0, which in turn requires tokenizers<0.16 and therefore
+# transformers==4.39.3 — a hard-pin that directly conflicted with qwen-asr's
+# own hard-pin of transformers==4.57.6 (see the Qwen3-ASR section below).
+# Both packages have historically never relaxed these pins, so no amount of
+# pip backtracking could satisfy both inside one environment at once.
 
-# NOTE: qwen-asr is intentionally NOT installed here (removed — previously
-# caused `pip install -r requirements.txt` to fail with ResolutionImpossible:
-# qwen-asr==0.0.6 hard-pins transformers==4.57.6, which directly conflicts
-# with transformers==4.39.3 required above for whisperx/faster-whisper, and
-# every published qwen-asr version (0.0.1-0.0.6) pins the same transformers
-# version, so no amount of pip backtracking can satisfy both at once).
-# Qwen3-FA (forced alignment) and Qwen3-ASR now BOTH run exclusively inside
-# the separate qwen3_server.py process (.qwen3_env, see requirements-qwen3.txt)
-# and are called over HTTP on 127.0.0.1:5001 — alt_aligners.py's
-# Qwen3ForcedAligner class is a thin HTTP client (POST /align), matching the
-# pattern Qwen3ASRAligner (POST /asr) already used. This env never needs
-# qwen-asr installed.
+# ====================== Qwen3-ASR / Qwen3-ForcedAligner ======================
+# 【2026-08 架构调整】此前 qwen-asr 因为版本冲突（见上面 WhisperX 一节）被
+# 排除在这个环境之外，只能运行在独立的 qwen3_server.py 进程
+# （.qwen3_env）里，通过 HTTP 调用。现在 WhisperX 已经迁出这个环境，
+# qwen-asr 的 transformers==4.57.6 精确锁定不再与任何其它包冲突，可以
+# 直接安装进这个主环境，Qwen3-ASR 和 Qwen3-ForcedAligner 都改为在
+# app.py 进程内本地加载（qwen3_server.py 已下线，见 alt_aligners.py 里
+# Qwen3ASRAligner / Qwen3ForcedAligner 类顶部的迁移说明）。
+qwen-asr==0.0.6
+# qwen-asr 自身在 PyPI 上精确锁定了 transformers==4.57.6 /
+# accelerate==1.12.0（见其 requires_dist），下面两行的宽松下限不会与
+# 之冲突，pip 解析时最终会以 qwen-asr 的精确锁定版本为准；这里保留
+# 宽松下限只是为了在 qwen-asr 未来放宽自己的锁定范围时仍有一个基本
+# 版本保障，不需要跟着精确改动。
+transformers==4.57.6
+accelerate==1.12.0
 
 # Traditional -> Simplified Chinese conversion
 opencc-python-reimplemented>=0.1.7

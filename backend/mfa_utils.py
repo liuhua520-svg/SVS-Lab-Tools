@@ -94,7 +94,7 @@ class MFAChecker:
 
         # 【2026-08 补充】现行 launcher.py 的打包布局是
         # <APP_ROOT>/runtime/mfa_env（不带前导点、统一放在 runtime/ 下，
-        # 与 qwen3_env / qwen3tts_env / nemo_env / kaldi_env 平级），而不是
+        # 与 whisperx_env / qwen3tts_env / nemo_env / kaldi_env 平级），而不是
         # 上面那种旧版 .mfa_env 布局；launcher.py 本身也没有设置
         # MFA_ENV_DIR 环境变量。之前这里漏掉这条查找路径，全靠下面
         # sys.prefix 兜底"凑巧"算对——因为 backend/app.py 本来就是被

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 import unicodedata
 import warnings
@@ -100,7 +101,7 @@ def _is_cuda_oom_or_env_error(exc: Exception) -> bool:
     并重试，通常能让任务继续跑完，而不是让用户面对一条难懂的 CUDA
     报错、手动去改设置重新提交。
 
-    与 WhisperXAligner._transcribe_with_oom_retry() 只判断"out of
+    与 whisperx_server.py 里 _transcribe_with_oom_retry() 只判断"out of
     memory"字样不同，这里额外覆盖几类同样应该触发"整体切到 CPU"的
     环境类报错关键词（CUDA driver/toolkit 缺失或不匹配、无法初始化
     CUDA context 等），因为 Qwen3-ForcedAligner / NeMo Forced Aligner
@@ -851,7 +852,7 @@ def _get_whisperx_batch_size() -> int:
     get_aligner()），用户在设置页面调完这个值之后，已经创建好的实例
     不会重新构造——只有每次转录都重新读一次设置，修改才能在下一次
     任务上立即生效，不需要重启进程，与其余对齐调优参数的约定一致。
-    详见 WhisperXAligner._transcribe_with_oom_retry() 顶部说明。
+    详见 whisperx_server.py 里 _transcribe_with_oom_retry() 顶部说明。
 
     读取失败或配置值非法时安全回退到 16。
     """
@@ -871,8 +872,8 @@ def _get_qwen3_batch_size() -> int:
 
     与 _get_whisperx_batch_size() 同样的"实时读取、无需重启"约定，见
     app_settings.get_qwen3_batch_size() 顶部说明。三个后端的具体用法：
-      - Qwen3-ASR：通过 HTTP 请求体的 "batch_size" 字段透传给
-        qwen3_server.py，服务端据此设置 max_inference_batch_size。
+      - Qwen3-ASR：直接传给 _qwen3_load_asr_model() 的 batch_size 参数，
+        本进程内本地设置 max_inference_batch_size。
       - Qwen3-ForcedAligner：作为 _align_single_chunk() 显存不足时自动
         降级重试的起始批大小参考值（见该方法内 OOM 重试逻辑）。
       - NeMo Forced Aligner：通过 HTTP 请求体的 "batch_size" 字段透传给
@@ -1893,8 +1894,30 @@ class AltAlignerBase:
 
 class WhisperXAligner(AltAlignerBase):
     """
-    WhisperX 对齐后端（自动语音识别 + wav2vec2 强制音素对齐）
+    WhisperX 独立服务客户端（强制对齐后端）
     https://github.com/m-bain/whisperx
+
+    【2026-08 架构调整】此前这个类直接 `import whisperx` 在当前进程
+    （.mfa_env）内本地加载模型，是本项目里唯一一个没有走独立服务 HTTP
+    调用模式的对齐后端——Qwen3ASRAligner / NeMoForcedAligner 那时反而
+    已经是纯 HTTP 客户端。这个不一致导致 backend/requirements.txt 必须
+    同时满足 whisperx==3.2.0（精确锁定 transformers==4.39.3）与
+    qwen-asr==0.0.6（精确锁定 transformers==4.57.6）两套互斥的版本要求，
+    `pip install -r requirements.txt` 必然报 ResolutionImpossible。
+
+    现改为与 Qwen3ASRAligner（旧版）/ NeMoForcedAligner 完全对称的 HTTP
+    客户端模式：模型改为常驻在 whisperx_server.py 独立进程
+    （.whisperx_env，见 requirements-whisperx.txt）里，通过新增的
+    POST /transcribe、POST /align 两个路由调用，当前进程（.mfa_env）
+    不再需要安装 whisperx / 对应版本的 transformers。
+
+    句子隔离对齐的编排逻辑（逐句裁剪→独立对齐→全局绝对时间戳拼接）、
+    参考文本绑定、标点停顿注入、CTC 拉伸修复、能量法静音边界精修、
+    音素时长守护（PDG）、LAB 文本组装等后处理全部原样保留在本类里——
+    只有"调用模型拿 ASR/对齐原始结果"这一个原语（原来是本地
+    whisperx.load_model()/whisperx.align() 调用）改成了 HTTP 请求，
+    返回值形状（entries 列表 / raw_segments）保持一致，上层调用方
+    （_plan_chunks_via_whisperx_rough_pass 等）无需改动。
 
     优势：
       - 不需要参考文本（自动转录模式）
@@ -1905,7 +1928,8 @@ class WhisperXAligner(AltAlignerBase):
       - 结构化文本（编号/列表/Markdown 标题）会破坏"单调时间映射假设"，
         导致 wav2vec2 对齐失败。本类在调用对齐前自动调用
         normalize_text_for_whisperx() 进行口语化清洗。
-      - 安装：pip install whisperx
+      - 需要 whisperx_server.py（.whisperx_env）已启动并监听
+        127.0.0.1:5854，否则 check_available() 返回不可用。
     """
 
     # 当前支持的 Whisper 模型列表（由前端选择器引用）
@@ -1919,6 +1943,8 @@ class WhisperXAligner(AltAlignerBase):
         "tiny",
     ]
 
+    DEFAULT_ENDPOINT = "http://127.0.0.1:5854"
+
     def __init__(
         self,
         whisper_model: str = "large-v3",
@@ -1927,131 +1953,65 @@ class WhisperXAligner(AltAlignerBase):
         batch_size: int = 16,
         hf_token: Optional[str] = None,
         min_phoneme_dur: float = 0.025,   # PDG 最小音素时长（秒），25ms
+        endpoint: str = DEFAULT_ENDPOINT,
     ):
         super().__init__()
         self.whisper_model = whisper_model
-        self._device = self._resolve_device(device)
-        # CPU 不支持 float16；GPU 还需检查实际硬件能力
-        self.compute_type = self._resolve_compute_type(compute_type, self._device)
+        # 【独立服务模式】设备/精度的最终决策现在由 whisperx_server.py 一侧
+        # 的 _safe_device()/_resolve_compute_type() 完成（避免主进程
+        # .mfa_env 里为了这两个纯粹的探测函数就要 import torch/ctranslate2）；
+        # 这里只透传用户的原始偏好，不在客户端预先解析。
+        self._device = device
+        self.compute_type = compute_type
         self.batch_size = batch_size
         self.hf_token = hf_token or os.environ.get("HF_TOKEN")
         self.min_phoneme_dur = min_phoneme_dur
-
-        self._asr_model = None
-        self._align_models: Dict[str, object] = {}   # {lang_code: (model_a, metadata)}
+        self.endpoint = endpoint.rstrip("/")
+        self._session = None
 
     # ── 类方法 ──────────────────────────────────────────────────────────────
     @staticmethod
-    def _resolve_device(device: str) -> str:
-        # _safe_device() 包含 smoke-test，避免 CPU-only torch 误选 CUDA
-        # （torch.cuda.is_available() 在驱动存在时可能返回 True，但实际无法使用）
-        return _safe_device(device)
-
-    @staticmethod
-    def _resolve_compute_type(compute_type: str, device: str) -> str:
-        """
-        根据设备和 GPU 能力自动选择最优 compute_type，避免运行时 ValueError。
-
-        优先级（CUDA）：用户指定 → GPU 能力检测 → int8 保底
-        - float16 需要 Tensor Core（NVIDIA compute capability ≥ 7.0，即 Turing+）
-        - 旧卡（Pascal / Maxwell 等）只能用 int8 或 float32
-        """
-        if device == "cpu":
-            # CPU 后端：int8 最快，float32 最兼容
-            return "int8" if compute_type in ("float16", "int8_float16") else compute_type
-
-        if compute_type not in ("float16", "int8_float16"):
-            # 用户显式指定了 int8 / float32 等，直接信任
-            return compute_type
-
-        # 尝试通过 ctranslate2（faster-whisper 依赖）查询 GPU 支持的精度列表
-        try:
-            import ctranslate2
-            supported = ctranslate2.get_supported_compute_types("cuda")
-            if compute_type not in supported:
-                fallback = "int8" if "int8" in supported else "float32"
-                logger.warning(
-                    f"[WhisperX] 当前 GPU 不支持 {compute_type} "
-                    f"(支持: {supported})，自动切换为 {fallback}"
-                )
-                return fallback
-            return compute_type
-        except Exception:
-            # ctranslate2 未安装或查询失败 → 保守回退到 int8
-            logger.warning(
-                f"[WhisperX] 无法查询 GPU compute_type 支持情况，"
-                f"保守切换: {compute_type} → int8"
-            )
-            return "int8"
-
-    @staticmethod
     def check_available() -> Tuple[bool, str]:
         try:
-            import whisperx  # noqa: F401
-            return True, "OK"
+            import requests  # noqa: F401
         except ImportError as e:
-            return False, f"未安装: pip install whisperx ({e})"
+            return False, f"未安装 requests: pip install requests ({e})"
+
+        try:
+            r = requests.get("http://127.0.0.1:5854/", timeout=2)
+            return True, "WhisperX 独立服务已可访问"
         except Exception as e:
-            return False, str(e)
+            return False, f"WhisperX 独立服务不可访问: {e}"
 
-    # ── 懒加载 ──────────────────────────────────────────────────────────────
-    def _load_asr(self):
-        if self._asr_model is not None:
-            return
+    def _ensure_session(self):
+        if self._session is None:
+            self._session = requests.Session()
 
-        import whisperx
-
-        # 按优先级构建 compute_type 尝试链：
-        #   float16 → int8 → float32（越来越保守，最后一个必定成功）
-        _FALLBACK: Dict[str, list] = {
-            "float16":       ["int8", "float32"],
-            "int8_float16":  ["int8", "float32"],
-            "int8":          ["float32"],
+    def _call_transcribe(self, audio_path: str, wx_lang: str) -> Dict:
+        self._ensure_session()
+        payload = {
+            "audio": audio_path,
+            "language": wx_lang,
+            "whisper_model": self.whisper_model,
+            "device": _safe_device(getattr(self, "_device", "auto")),
+            "compute_type": self.compute_type,
+            "batch_size": _get_whisperx_batch_size(),
         }
-        candidates = [self.compute_type] + _FALLBACK.get(self.compute_type, [])
+        resp = self._session.post(f"{self.endpoint}/transcribe", json=payload, timeout=1800)
+        resp.raise_for_status()
+        return resp.json()
 
-        last_exc: Optional[Exception] = None
-        for ct in candidates:
-            try:
-                logger.info(
-                    f"[WhisperX] 加载 ASR 模型: {self.whisper_model} "
-                    f"({self._device}, compute_type={ct})"
-                )
-                self._asr_model = whisperx.load_model(
-                    self.whisper_model,
-                    self._device,
-                    compute_type=ct,
-                    download_root=str(_WHISPER_CACHE),
-                )
-                if ct != self.compute_type:
-                    logger.warning(
-                        f"[WhisperX] compute_type 自动降级: "
-                        f"{self.compute_type} → {ct}（GPU 不支持高精度浮点）"
-                    )
-                    self.compute_type = ct
-                logger.info(f"[WhisperX] ✓ ASR 模型已加载 (compute_type={ct})")
-                return
-            except ValueError as e:
-                err_lower = str(e).lower()
-                if "compute type" in err_lower or "float16" in err_lower:
-                    logger.warning(f"[WhisperX] compute_type={ct} 失败: {e}，尝试下一档...")
-                    last_exc = e
-                else:
-                    raise  # 非精度相关错误，直接抛出
-
-        # 所有候选均失败
-        raise last_exc or RuntimeError("[WhisperX] 所有 compute_type 均失败，请检查 GPU 驱动")
-
-    def _load_align(self, lang_code: str):
-        if lang_code not in self._align_models:
-            import whisperx
-            logger.info(f"[WhisperX] 加载对齐模型: {lang_code}")
-            model_a, metadata = whisperx.load_align_model(
-                language_code=lang_code, device=self._device
-            )
-            self._align_models[lang_code] = (model_a, metadata)
-            logger.info(f"[WhisperX] ✓ 对齐模型 ({lang_code}) 已加载")
-        return self._align_models[lang_code]
+    def _call_align(self, audio_path: str, raw_segments: List[Dict], wx_lang: str) -> Dict:
+        self._ensure_session()
+        payload = {
+            "audio": audio_path,
+            "raw_segments": raw_segments,
+            "language": wx_lang,
+            "device": _safe_device(getattr(self, "_device", "auto")),
+        }
+        resp = self._session.post(f"{self.endpoint}/align", json=payload, timeout=1800)
+        resp.raise_for_status()
+        return resp.json()
 
     # ── 粗测（仅 ASR 转录，不做 wav2vec2 强制对齐）─────────────────────────
     def _transcribe_rough_segments(self, audio_path: str, language: str) -> Dict:
@@ -2080,109 +2040,21 @@ class WhisperXAligner(AltAlignerBase):
         "start"/"end"/"text" 三个键（whisperx transcribe() 原始输出格式；
         "text" 是 Whisper 自己的识别文本，仅用于计算字数配额，不会被
         当作最终对齐文本使用）。
-        失败（whisperx 未安装 / 音频加载失败 / ASR 无输出）时返回
+        失败（服务不可访问 / 音频加载失败 / ASR 无输出）时返回
         {"success": False, "error": "..."}，调用方应无缝回退到旧的按
         字符比例估算方案，不让整个对齐任务失败。
         """
         try:
-            import whisperx
-        except ImportError as e:
-            return {"success": False, "error": f"whisperx 未安装: {e}"}
-
-        try:
             wx_lang = _to_whisperx_lang(language)
-
-            # 音频加载：与 align() 里的加载逻辑独立实现（而不是共用同一个
-            # 私有方法），刻意不改动已经过验证的 align() 本身，把这条新增
-            # 路径的风险完全隔离在这个新方法内部——即使这里出现任何问题，
-            # 也不会影响 WhisperX 作为独立对齐后端时的既有行为。
-            try:
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", message=".*torchcodec.*")
-                    audio = whisperx.load_audio(audio_path)
-            except Exception as _ffmpeg_err:
-                try:
-                    import soundfile as _sf
-                    import numpy as _np
-                    _data, _orig_sr = _sf.read(audio_path, always_2d=False)
-                    if _data.ndim > 1:
-                        _data = _data.mean(axis=1)
-                    _data = _data.astype(_np.float32)
-                    if _orig_sr != 16_000:
-                        import librosa as _librosa
-                        _data = _librosa.resample(_data, orig_sr=_orig_sr, target_sr=16_000)
-                    audio = _data
-                except Exception as _sf_err:
-                    return {
-                        "success": False,
-                        "error": f"音频加载失败 (ffmpeg: {_ffmpeg_err}; soundfile: {_sf_err})",
-                    }
-
-            self._load_asr()
-            asr_out = self._transcribe_with_oom_retry(audio, wx_lang)
-            raw_segments = asr_out.get("segments", [])
-            if not raw_segments:
-                return {"success": False, "error": "WhisperX ASR 无输出，请检查音频质量"}
-            return {"success": True, "raw_segments": raw_segments}
+            result = self._call_transcribe(audio_path, wx_lang)
+            if not result.get("success"):
+                return {"success": False, "error": result.get("error", "WhisperX 独立服务返回失败")}
+            return result
+        except requests.exceptions.RequestException as e:
+            return {"success": False, "error": f"WhisperX 独立服务不可访问: {e}"}
         except Exception as e:
             logger.warning(f"[WhisperX][粗测] ASR 转录失败: {e}")
             return {"success": False, "error": str(e)}
-
-    def _transcribe_with_oom_retry(self, audio, wx_lang: str) -> Dict:
-        """
-        对 self._asr_model.transcribe() 的一层 batch_size 自适应重试封装：
-        遇到 CUDA 显存不足时自动腰斩 batch_size 重试，直到 batch_size=1
-        仍然失败才真正把异常抛给调用方。
-
-        背景：WhisperXAligner 是跨任务复用的单例（见 get_aligner() 的
-        缓存），"这次转录用多大的 batch_size"如果只依赖 __init__ 时保存
-        的 self.batch_size，用户在设置页面调完 whisperx_batch_size 之后，
-        已经创建好的单例不会重新构造，改了也不会生效。这里每次调用都
-        实时读取最新的 whisperx_batch_size 设置（与其余对齐调优参数
-        "保存后下一次任务立即生效、无需重启"的约定一致）。
-
-        低显存卡（比如 6GB 的 P106-100 这类老卡，尤其是显存本身已经被
-        其他进程占用一部分时）在默认 batch_size=16 下很容易在 ASR 转录
-        阶段直接 CUDA OOM；自动腰斩重试可以让同一次任务在大多数情况下
-        不需要用户手动调小设置、重新提交就能跑完，只是会慢一些——真正
-        每次都在 batch_size=1 也放不下时，才说明是模型本身（而不是
-        batch_size）对这块显卡来说太大了，此时会抛出一条明确指出"降低
-        whisperx_batch_size 或换更小模型"的错误，而不是把原始难懂的
-        CUDA 报错直接抛给用户。
-        """
-        batch_size = _get_whisperx_batch_size()
-        last_exc: Optional[Exception] = None
-        while batch_size >= 1:
-            try:
-                return self._asr_model.transcribe(
-                    audio, batch_size=batch_size, language=wx_lang
-                )
-            except RuntimeError as e:
-                if "out of memory" not in str(e).lower():
-                    raise
-                last_exc = e
-                logger.warning(
-                    f"[WhisperX] ASR 转录 CUDA 显存不足（batch_size={batch_size}），"
-                    "尝试释放显存缓存并腰斩 batch_size 重试…"
-                )
-                try:
-                    import torch as _torch_oom
-                    if _torch_oom.cuda.is_available():
-                        _torch_oom.cuda.empty_cache()
-                except Exception:
-                    pass
-                if batch_size == 1:
-                    break
-                batch_size = max(1, batch_size // 2)
-
-        raise RuntimeError(
-            f"CUDA 显存不足，即使把 batch_size 降到 1 仍然失败——当前 GPU "
-            f"剩余显存可能已经不够运行 {self.whisper_model} 模型本身（与"
-            "这一条音频具体多长关系不大）。建议在设置里把 "
-            "whisperx_batch_size 调得更小，或把使用的 Whisper 模型档位"
-            "换成更小的（medium / small / base），也可以检查一下是否有"
-            f"其他进程占用了显存。原始错误: {last_exc}"
-        )
 
     # ── 核心对齐（句子隔离版）────────────────────────────────────────────────
     def align(self, audio_path: str, text: Optional[str], language: str,
@@ -2191,76 +2063,38 @@ class WhisperXAligner(AltAlignerBase):
         """
         句子隔离强制对齐（Sentence-Isolated Alignment）。
 
-        改进点（对比旧版）：
-          1. 逐句裁剪音频 → 在极短时序空间内单独对齐，消除长文本累计漂移。
+        编排流程（音频加载 / ASR 转录 / wav2vec2 对齐三步现在通过 HTTP
+        调用 whisperx_server.py 完成，其余步骤原样在本进程内执行）：
+          1. ASR 转录（/transcribe）拿到句级粗略时间戳。
           2. 参考文本与 ASR 句数匹配时，将参考文本绑定到对应句子（修正繁简/识别错误）。
-          3. 每句独立完成 LAB 转换，避免字符数不一致导致的全局偏移。
-          4. 音素时长守护（PDG）消除极短音标（< 25ms）。
-          5. 【已修复】不再是"全程 fill_silences=False，输出零 SP/SIL 的纯净
-             连续音标序列"——wav2vec2 在句子内部几乎不会留出时间间隙，旧版
-             仅靠 fill_silences 做不到任何停顿。现在改为 _inject_sentence_pauses()
-             在标点位置主动插入真正的 sil 条目（见该函数顶部说明），fill_silences
-             本身仍为 False（句内不需要按"时间间隙"再做一遍全局扫描，标点
-             位置已经显式处理）。
-          6. 【已修复】上一步插入的 sil 只有固定的 40/80ms，远短于实际录音
-             里的换气/停顿（wav2vec2 经常把真实静音错误地算进标点前最后
-             一个字的时长里，实测可达 200~400ms+）。现在加一步
-             _refine_sil_boundaries_by_energy()，用该句真实裁剪音频的短时
-             能量扫描，把 sil 边界扩展到真正安静的区域，让停顿长度跟随
-             这一句实际演唱内容，而不是停在一个固定值上（详见该函数顶部
-             说明）。
+          3. 逐句裁剪 + wav2vec2 强制对齐（/align），在极短时序空间内单独对齐，消除长文本累计漂移。
+          4. 每句独立完成 LAB 转换，避免字符数不一致导致的全局偏移。
+          5. 音素时长守护（PDG）消除极短音标（< 25ms）。
+          6. 句内标点停顿注入（_inject_sentence_pauses）+ CTC 拉伸修复
+             （_fix_ctc_stretch）+ 能量法静音边界精修
+             （_refine_sil_boundaries_by_energy），让停顿长度跟随这一句
+             实际演唱内容，而不是停在一个固定值上。
         """
         t0 = time.time()
         try:
-            import whisperx
-
             wx_lang  = _to_whisperx_lang(language)
             int_lang = _normalize_lang(language)
             _SR      = 16_000   # WhisperX load_audio 固定输出 16kHz
 
-            # ── 1. 加载音频 ──────────────────────────────────────────────────
-            # whisperx.load_audio() 依赖 ffmpeg 子进程；若环境中 ffmpeg 不可用
-            # 则回退到 soundfile（直接读 WAV/FLAC）+ librosa 重采样，避免崩溃。
-            try:
-                import warnings
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore",
-                        message=".*torchcodec.*",   # 屏蔽 pyannote torchcodec 警告
-                    )
-                    audio = whisperx.load_audio(audio_path)   # float32 numpy, 16kHz
-            except Exception as _ffmpeg_err:
-                logger.warning(
-                    f"[WhisperX] whisperx.load_audio 失败（{_ffmpeg_err}），"
-                    "尝试用 soundfile + librosa 回退加载…"
-                )
-                try:
-                    import soundfile as _sf
-                    import numpy as _np
-                    _data, _orig_sr = _sf.read(audio_path, always_2d=False)
-                    if _data.ndim > 1:
-                        _data = _data.mean(axis=1)   # 混音为单声道
-                    _data = _data.astype(_np.float32)
-                    if _orig_sr != _SR:
-                        import librosa as _librosa
-                        _data = _librosa.resample(_data, orig_sr=_orig_sr, target_sr=_SR)
-                    audio = _data
-                    logger.info(
-                        f"[WhisperX] soundfile 回退加载成功: "
-                        f"{len(audio)/float(_SR):.2f}s @ {_SR}Hz"
-                    )
-                except Exception as _sf_err:
-                    return self._err(
-                        f"音频加载失败 (ffmpeg: {_ffmpeg_err}; soundfile: {_sf_err})。"
-                        "请在系统 PATH 中安装 FFmpeg，或确保 soundfile 已安装。",
-                        t0,
-                    )
-
-            # ── 2. ASR 转录（仅用于获取句子级时序边界）──────────────────────
-            self._load_asr()
+            # ── 1. ASR 转录（仅用于获取句子级时序边界）──────────────────────
             logger.info("[WhisperX] 开始 ASR 转录...")
-            asr_out      = self._transcribe_with_oom_retry(audio, wx_lang)
-            raw_segments = asr_out.get("segments", [])
+            try:
+                asr_result = self._call_transcribe(audio_path, wx_lang)
+            except requests.exceptions.RequestException as e:
+                return self._err(
+                    f"WhisperX 独立服务不可访问（{e}）。请确认 whisperx_server.py "
+                    "（.whisperx_env）已启动并监听 127.0.0.1:5854。",
+                    t0,
+                )
+            if not asr_result.get("success"):
+                return self._err(asr_result.get("error", "WhisperX ASR 无输出，请检查音频质量"), t0)
+
+            raw_segments = asr_result.get("raw_segments", [])
             if not raw_segments:
                 return self._err("WhisperX ASR 无输出，请检查音频质量", t0)
 
@@ -2268,7 +2102,7 @@ class WhisperXAligner(AltAlignerBase):
             logger.info(f"[WhisperX] ASR 文本: {asr_text_full[:120]}")
             logger.info(f"[WhisperX] ASR 共检出 {len(raw_segments)} 句")
 
-            # ── 3. 参考文本预处理：断句并与 ASR 句段绑定 ────────────────────
+            # ── 2. 参考文本预处理：断句并与 ASR 句段绑定 ────────────────────
             #    句数完全一致时，按句直接绑定；
             #    句数不一致（绝大多数情况）时，按"每段 ASR 自己的识别字数"
             #    为配额，把参考文本（保留标点）顺序切给各段——配额用 ASR
@@ -2302,91 +2136,89 @@ class WhisperXAligner(AltAlignerBase):
                             f"ASR 段数 {len(raw_segments)}，保留 ASR 识别文本逐句对齐"
                         )
 
-            # ── 4. 加载对齐模型 ──────────────────────────────────────────────
-            model_a, metadata = self._load_align(wx_lang)
-            logger.info(f"[WhisperX] 开始逐句隔离强制对齐（共 {len(raw_segments)} 句）...")
+            # 送入对齐服务前，清洗每句文本（剥离标点符号，保留空白和单词内部
+            # 撇号——原因见下方 _clean_align_text 说明）；空文本的句子跳过。
+            aligned_raw_segments = []
+            for seg in raw_segments:
+                seg_text = (seg.get("text") or "").strip()
+                if not seg_text:
+                    continue
+                cleaned = _clean_align_text(seg_text)
+                if not cleaned:
+                    continue
+                aligned_raw_segments.append({
+                    "start": seg.get("start", 0.0),
+                    "end": seg.get("end", 0.0),
+                    "text": cleaned,
+                    # 原始（未清洗）文本随请求一并带上，服务端不使用，
+                    # 仅用于服务端日志排查时对照；本进程稍后仍以
+                    # raw_segments 里的原始 seg_text 驱动 LAB 转换。
+                })
 
-            # ── 5. 句子隔离强制对齐核心循环 ──────────────────────────────────
+            if not aligned_raw_segments:
+                return self._err("所有句子清洗后为空，无法对齐，请检查参考文本或识别结果", t0)
+
+            # ── 3. 逐句裁剪 + wav2vec2 强制对齐 ──────────────────────────────
             #    对每句：① 物理裁剪音频 → ② 在局部短时序空间内对齐
             #          → ③ 局部时间戳 + 句子偏移 = 全局绝对时间戳
             #    完全消除跨句累计漂移和 CTC 路径崩溃导致的音标粘连。
-            # seg_pair_list: [(entries_for_this_seg, text_for_this_seg), ...]
+            #    该步骤现在整体在服务端完成（含物理裁剪与全局时间戳换算），
+            #    本进程只负责取回结果后的语言相关后处理。
+            logger.info(f"[WhisperX] 开始逐句隔离强制对齐（共 {len(aligned_raw_segments)} 句）...")
+            try:
+                align_result = self._call_align(audio_path, aligned_raw_segments, wx_lang)
+            except requests.exceptions.RequestException as e:
+                return self._err(
+                    f"WhisperX 独立服务不可访问（{e}）。请确认 whisperx_server.py "
+                    "（.whisperx_env）已启动并监听 127.0.0.1:5854。",
+                    t0,
+                )
+            if not align_result.get("success"):
+                return self._err(align_result.get("error", "WhisperX 对齐失败"), t0)
+
+            # ── 4. 逐句后处理（服务端只返回原始 char/word 条目，语言相关的
+            #    单位选择、字母合并、停顿注入、CTC 拉伸修复、能量法静音
+            #    精修全部在本进程完成，与原 in-process 实现完全一致）──────
             seg_pair_list: List[Tuple[List[Tuple[float, float, str]], str]] = []
 
-            for idx, seg in enumerate(raw_segments):
-                start_sec = float(seg.get("start", 0.0))
-                end_sec   = float(seg.get("end",   0.0))
-                seg_text  = seg.get("text", "").strip()
+            # 服务端按原始（清洗前）音频重新裁剪句段用于能量法精修，这里
+            # 本进程需要各句自己的裁剪音频；为避免服务端把裁剪后的整段
+            # 音频样本经 HTTP 传回（体积大且不必要），本进程自行按
+            # start/end 再裁剪一次原始整曲音频用于能量分析。本进程
+            # （.mfa_env）不再安装 whisperx，但 soundfile/librosa 本来就是
+            # 主环境的常规依赖（F0 提取等模块也在用），直接复用即可，
+            # 不需要 whisperx.load_audio() 的 ffmpeg 子进程路径。
+            try:
+                full_audio = self._load_audio_16k(audio_path)
+            except Exception as _load_err:
+                logger.warning(f"[WhisperX] 本地重新加载音频用于能量法静音精修失败（{_load_err}），该步骤将被跳过")
+                full_audio = None
 
-                if not seg_text or end_sec <= start_sec:
-                    continue
+            for seg_result in align_result.get("segments", []):
+                idx = seg_result.get("idx")
+                start_sec = float(seg_result.get("start_sec", 0.0))
+                end_sec = float(seg_result.get("end_sec", 0.0))
+                raw_entries = seg_result.get("entries", [])
 
-                # 物理裁剪：提取该句的音频片段
-                st_samp = max(0, int(start_sec * _SR))
-                en_samp = min(len(audio), int(end_sec   * _SR))
-                cropped = audio[st_samp:en_samp]
+                # 找回这句原始（未清洗）文本，供后续标点停顿注入/LAB转换使用
+                seg_text = ""
+                if idx is not None and 0 <= idx < len(raw_segments):
+                    seg_text = (raw_segments[idx].get("text") or "").strip()
 
-                if len(cropped) < 160:      # < 10ms，跳过
-                    logger.warning(
-                        f"[WhisperX] 第 {idx+1} 句裁剪后过短（{len(cropped)} samples），跳过"
-                    )
-                    continue
-
-                # 对齐模型接受的文本：剥离标点符号（，。！？：等传入会
-                # 导致 wav2vec2 词表缺失而跳过整句），但保留空白和单词
-                # 内部撇号——前者是英语/韩语等多词语言的词边界，被误删
-                # 会导致整句被拼接成一个伪单词，wav2vec2 只能返回 1 个
-                # 跨越全句的 word 条目（详见 _clean_align_text() 顶部的
-                # bug 说明）。改用 _clean_align_text()，不再用
-                # _is_cjk_punct() 逐字符过滤（该函数把空白也判定为
-                # "标点"一并清除）。
-                seg_text_for_align = _clean_align_text(seg_text)
-                if not seg_text_for_align:
-                    continue
-
-                # 单句任务：局部时间从 0 开始
-                local_seg_list = [{"text": seg_text_for_align, "start": 0.0, "end": end_sec - start_sec}]
-
-                seg_entries: List[Tuple[float, float, str]] = []
-                try:
-                    local_aligned = whisperx.align(
-                        local_seg_list, model_a, metadata, cropped, self._device,
-                        return_char_alignments=True,   # CJK 字符级对齐
-                    )
-
-                    for a_seg in local_aligned.get("segments", []):
-                        # 中/粤/日/韩都按字符级（chars）切分：中日粤本身
-                        # 不用空格分词；韩语虽然书写时用空格分隔"词"
-                        # （어절），但歌唱场景下需要的是逐音节字符级时间戳
-                        # （和中文逐字一致），不是整个词组一条目——
-                        # _ko_entries_to_lab() 早就实现了逐字符的韩语
-                        # 处理（含初声"-"占位拆分），此前却一直走 else
-                        # 分支取 words（词组级），导致该函数从未真正吃到
-                        # 单字符输入，对齐结果停留在"整句/整词组一条目"。
-                        if int_lang in ("zh", "yue", "ja", "ko"):
-                            units    = a_seg.get("chars", [])
-                            text_key = "char"
-                        else:
-                            units    = a_seg.get("words", [])
-                            text_key = "word"
-
-                        for unit in units:
-                            s = unit.get("start")
-                            e = unit.get("end")
-                            t = (unit.get(text_key) or unit.get("text") or "").strip()
-                            if s is None or e is None or not t or _is_cjk_punct(t):
-                                continue
-                            # 局部时间 → 全局绝对时间
-                            seg_entries.append(
-                                (float(s) + start_sec, float(e) + start_sec, t)
-                            )
-
-                except Exception as exc:
-                    logger.error(
-                        f"[WhisperX] 第 {idx+1} 句对齐异常（'{seg_text[:30]}'）: {exc}"
-                    )
-                    # 降级：整句作为单一条目，保持时间轴不断裂
-                    seg_entries = [(start_sec, end_sec, seg_text)]
+                # 中/粤/日/韩按字符级（chars）切分，其余语言按词语级（words）
+                # 切分——与原 in-process 实现的语言分支一致。
+                use_key = "char" if int_lang in ("zh", "yue", "ja", "ko") else "word"
+                seg_entries: List[Tuple[float, float, str]] = [
+                    (float(s), float(e), t)
+                    for (s, e, t, kind) in raw_entries
+                    if kind == use_key and t and not _is_cjk_punct(t)
+                ]
+                if not seg_entries and raw_entries:
+                    # 服务端降级分支（对齐异常，整句退化为单一条目）：
+                    # entries 里只有一条，kind 固定为 "word"。
+                    seg_entries = [
+                        (float(s), float(e), t) for (s, e, t, kind) in raw_entries
+                    ]
 
                 # 【修复】中/粤/韩走的是字符级（chars）对齐，若参考文本里混有
                 # 英文单词（如中文歌词夹的 "Singing"），WhisperX 会把该单词
@@ -2396,46 +2228,27 @@ class WhisperXAligner(AltAlignerBase):
                 # _process_zh_words()/_process_yue_words()/_ko_entries_to_lab()
                 # 之前，把时间连续的单字母 entries 重新拼回完整英文单词。
                 #
-                # 注意：唯独日语 (ja) 不能做这个合并。_ja_entries_to_lab()
-                # 在 sudachipy 可用时会把 char_entries 拼成 joined_text 交给
-                # Sudachi 分词，再按每个 morpheme 的 surface 字符长度从
-                # char_entries 里"消费"对应数量的条目——这是"1 个字面字符
-                # = 1 个 entry"的强假设。先把字母合并成单词会让 surface 长度
-                # （字面字符数，不受合并影响）与可消费的 entries 数量（合并后
-                # 变少）不一致，导致该单词之后所有字符的时间戳全部错位。
-                # zh/yue 的 _process_*_words() 和 ko 的 _ko_entries_to_lab()
-                # 都是逐条独立处理每个 entry（不做基于字符位置的索引消费），
-                # 合并对它们是安全的。
+                # 注意：唯独日语 (ja) 不能做这个合并（详见原实现说明：
+                # _ja_entries_to_lab() 按字面字符数从 char_entries 里"消费"
+                # 对应数量的条目，先合并会让 surface 长度与可消费的 entries
+                # 数量不一致，导致该单词之后所有字符的时间戳全部错位）。
                 if int_lang in ("zh", "yue", "ko"):
                     seg_entries = _merge_latin_letter_chars(seg_entries)
 
-                # 句内标点停顿注入：在标点对应位置插入真正的 sil 条目
-                # （详见 _inject_sentence_pauses 顶部说明），条目数量会
-                # 因此增多，但不改变原有发音字符的相对顺序，不会引入
-                # 新的拼音/音节错位。
+                # 句内标点停顿注入：在标点对应位置插入真正的 sil 条目。
                 seg_entries = _inject_sentence_pauses(seg_entries, seg_text)
 
-                # 【CTC 拉伸修复】WhisperX wav2vec2 CTC blank frame 无"强制
-                # 停顿"概念，会把短语边界换气/停顿处的 blank frame 全部分配给
-                # 上一个 token，导致短语末尾字符时长被严重拉长（实测 1.2s～
-                # 1.7s）。_inject_sentence_pauses 只处理有标点标记的位置且
-                # 上限仅 40/80ms，无法解决无标点的呼气停顿拉伸问题。
-                # 此步截断超限 token 并插入 SP 占位，供下一步能量修正扩展到
-                # 真实静音边界（详见 _fix_ctc_stretch 顶部说明）。
-                # 注意：必须在 _inject_sentence_pauses 之后调用，避免破坏
-                # 该函数按字符索引映射 gap_after 的内部逻辑。
+                # CTC 拉伸修复：截断超限 token 并插入 SP 占位。
                 seg_entries = _fix_ctc_stretch(seg_entries, int_lang)
 
-                # 上一步给的 40/80ms 只是"至少要有多长停顿"的下限，
-                # 不代表音频里真实的换气/停顿就这么短——wav2vec2 经常
-                # 把真正的静音错误地算进标点前最后一个字的时长里。这里
-                # 用该句裁剪出来的真实音频（cropped，16kHz）做短时能量
-                # 扫描，把 sil 边界扩展到真正安静的区域（详见函数顶部
-                # 说明），让 SVP 里的停顿长度跟到这一句实际演唱的换气
-                # 时长，而不是一个跟内容无关的固定值。
-                seg_entries = _refine_sil_boundaries_by_energy(
-                    seg_entries, cropped, _SR, start_sec
-                )
+                # 能量法静音边界精修：需要该句真实裁剪音频（16kHz）。
+                if full_audio is not None:
+                    st_samp = max(0, int(start_sec * _SR))
+                    en_samp = min(len(full_audio), int(end_sec * _SR))
+                    cropped = full_audio[st_samp:en_samp]
+                    seg_entries = _refine_sil_boundaries_by_energy(
+                        seg_entries, cropped, _SR, start_sec
+                    )
 
                 if seg_entries:
                     seg_pair_list.append((seg_entries, seg_text))
@@ -2443,7 +2256,7 @@ class WhisperXAligner(AltAlignerBase):
             if not seg_pair_list:
                 return self._err("所有句子对齐均失败，请检查音频质量和语言设置", t0)
 
-            # ── 6. 音素时长守护（PDG）──────────────────────────────────────
+            # ── 5. 音素时长守护（PDG）──────────────────────────────────────
             #    每句内部独立运行，将 < min_phoneme_dur 的极短音标扩展到安全时长。
             #    句间间隙（说话停顿）不受影响，总时长严格守恒。
             guarded_pair_list: List[Tuple[List[Tuple[float, float, str]], str]] = []
@@ -2451,10 +2264,10 @@ class WhisperXAligner(AltAlignerBase):
                 guarded = self._apply_duration_guard(seg_entries, self.min_phoneme_dur)
                 guarded_pair_list.append((guarded, seg_text))
 
-            # ── 7. 逐句转换为 LAB（标点处含真实 sil 条目）──────────────────────
+            # ── 6. 逐句转换为 LAB（标点处含真实 sil 条目）──────────────────────
             #    每句独立调用 _word_entries_to_lab，用当句文本驱动音素转换，
             #    彻底杜绝字符数不一致跨句传播的偏移错误。fill_silences=False
-            #    是因为句内停顿已经由上面第 5 步的 _inject_sentence_pauses()
+            #    是因为句内停顿已经由上面第 4 步的 _inject_sentence_pauses()
             #    显式写入了 sil 条目，不需要再做一次基于时间间隙的全局扫描。
             lab_blocks: List[str] = []
             for seg_entries, seg_text in guarded_pair_list:
@@ -2480,11 +2293,31 @@ class WhisperXAligner(AltAlignerBase):
                 "backend": "whisperx",
             }
 
-        except ImportError as e:
-            return self._err(f"whisperx 未安装: {e}，请执行 pip install whisperx", t0)
         except Exception as e:
             logger.error(f"[WhisperX] 对齐失败: {e}", exc_info=True)
             return self._err(str(e), t0)
+
+    # ── 本地音频加载（用于能量法静音边界精修）────────────────────────────────
+    @staticmethod
+    def _load_audio_16k(audio_path: str):
+        """
+        加载音频并重采样到 16kHz 单声道 float32，仅供
+        _refine_sil_boundaries_by_energy() 的能量扫描使用。本进程
+        （.mfa_env）不再安装 whisperx，直接用 soundfile + librosa（主环境
+        本来就依赖，F0 提取等模块也在用），不需要 whisperx.load_audio()
+        的 ffmpeg 子进程路径。
+        """
+        import soundfile as _sf
+        import numpy as _np
+        _SR = 16_000
+        _data, _orig_sr = _sf.read(audio_path, always_2d=False)
+        if _data.ndim > 1:
+            _data = _data.mean(axis=1)
+        _data = _data.astype(_np.float32)
+        if _orig_sr != _SR:
+            import librosa as _librosa
+            _data = _librosa.resample(_data, orig_sr=_orig_sr, target_sr=_SR)
+        return _data
 
     # ── 音素时长守护算法（PDG）────────────────────────────────────────────────
     @staticmethod
@@ -2664,83 +2497,441 @@ class WhisperXAligner(AltAlignerBase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# 5b. Qwen3-ASR / Qwen3-ForcedAligner 本地模型管理（迁入 .mfa_env 主进程）
+#
+# 【2026-08 架构调整】此前 Qwen3-ASR 和 Qwen3-ForcedAligner 都常驻在独立
+# 进程 qwen3_server.py（.qwen3_env）里，主进程通过 HTTP 调用——原因是
+# qwen-asr==0.0.6 精确锁定 transformers==4.57.6，与当时 .mfa_env 里
+# whisperx 需要的 transformers==4.39.3 互斥，两者不能装进同一个环境。
+#
+# 现在 WhisperX 已经迁出主进程（改为独立的 whisperx_server.py /
+# .whisperx_env），.mfa_env 不再受 whisperx 的 transformers 版本约束，
+# qwen-asr 改为直接安装进 .mfa_env，Qwen3ASRAligner / Qwen3ForcedAligner
+# 都在当前进程内本地加载模型——qwen3_server.py 已下线。
+#
+# 以下模型加载/设备选择/结果归一化逻辑，原样从 qwen3_server.py 搬运过来
+# （只是从"HTTP 路由处理函数"变成"当前进程内的普通函数"），行为不变：
+# 显存不足 / CUDA 环境异常时的两级自动降级（腰斩 batch_size → 整体切
+# CPU）逻辑完全保留。
+# ═════════════════════════════════════════════════════════════════════════════
+
+_QWEN3_ASR_MODEL_ID = "Qwen/Qwen3-ASR-1.7B"
+_QWEN3_FA_MODEL_ID = "Qwen/Qwen3-ForcedAligner-0.6B"
+
+_qwen3_asr_model = None
+_qwen3_asr_model_lock = threading.Lock()
+_qwen3_asr_model_device: str = "auto"
+_qwen3_asr_model_batch_size: int = 8
+
+_qwen3_fa_model = None
+_qwen3_fa_model_lock = threading.Lock()
+_qwen3_fa_model_device: str = "auto"
+
+
+def _qwen3_pick_device_and_dtype(device_override: str = "auto"):
+    """
+    根据设备参数和实际 GPU 架构选择运行设备与数据类型（原
+    qwen3_server.py _pick_device_and_dtype()，逻辑不变）。
+
+    dtype 选择策略（避免在不支持的 GPU 上使用错误精度）：
+      - bfloat16：需要 Ampere (CC ≥ 8.0，RTX 30xx / A100+)
+      - float16 ：Pascal (CC 6.x) / Volta (CC 7.0) / Turing (CC 7.5) 均支持
+      - float32 ：CPU 或无法确定 GPU 能力时的保底选项
+    """
+    import torch
+
+    if device_override == "cpu":
+        return "cpu", torch.float32
+
+    if not torch.cuda.is_available():
+        if device_override == "cuda":
+            logger.warning("⚠️  请求 CUDA 但未检测到可用 GPU，回退到 CPU")
+        return "cpu", torch.float32
+
+    try:
+        torch.zeros(1, device="cuda")
+    except Exception as e:
+        logger.warning(f"⚠️  CUDA 初始化失败（{e}），回退到 CPU")
+        return "cpu", torch.float32
+
+    device = "cuda:0"
+    try:
+        props = torch.cuda.get_device_properties(0)
+        cc_major = props.major
+        logger.info(f"GPU: {props.name}  compute capability: {cc_major}.{props.minor}")
+
+        if cc_major >= 8:
+            dtype = torch.bfloat16
+        elif cc_major >= 6:
+            dtype = torch.float16
+        else:
+            dtype = torch.float32
+
+        logger.info(f"自动选择 dtype: {dtype}")
+        return device, dtype
+    except Exception as e:
+        logger.warning(f"⚠️  GPU 能力查询失败（{e}），使用 float32 保底")
+        return device, torch.float32
+
+
+def _qwen3_normalize_time_stamps(value) -> List[List[Optional[float]]]:
+    """尽量把不同返回形态统一成 [[start, end], ...]（原 qwen3_server.py 同名函数）。"""
+    if value is None:
+        return []
+    if isinstance(value, list) and value and isinstance(value[0], (list, tuple)):
+        out: List[List[Optional[float]]] = []
+        for item in value:
+            if len(item) >= 2:
+                out.append([item[0], item[1]])
+        return out
+    if isinstance(value, dict):
+        s = value.get("start")
+        e = value.get("end")
+        if s is not None or e is not None:
+            return [[s, e]]
+        return []
+    return []
+
+
+def _qwen3_normalize_segments(result) -> List[Dict]:
+    """
+    将 qwen_asr 的返回结果统一成客户端容易消费的格式（原
+    qwen3_server.py _normalize_segments()，逻辑不变）：
+    [{"language": ..., "text": ..., "time_stamps": [[s, e], ...]}, ...]
+    """
+    segments: List[Dict] = []
+
+    if result is None:
+        return segments
+
+    if isinstance(result, list):
+        for item in result:
+            if isinstance(item, dict):
+                text = (item.get("text") or "").strip()
+                lang = item.get("language")
+                ts = item.get("time_stamps")
+                if ts is None:
+                    ts = item.get("timestamp")
+                segments.append({"language": lang, "text": text, "time_stamps": _qwen3_normalize_time_stamps(ts)})
+            else:
+                text = (getattr(item, "text", "") or "").strip()
+                lang = getattr(item, "language", None)
+                ts = getattr(item, "time_stamps", None)
+                if ts is None:
+                    ts = getattr(item, "timestamp", None)
+                segments.append({"language": lang, "text": text, "time_stamps": _qwen3_normalize_time_stamps(ts)})
+        return segments
+
+    if isinstance(result, dict):
+        text = (result.get("text") or result.get("raw_text") or "").strip()
+        lang = result.get("language")
+        ts = result.get("time_stamps")
+        if ts is None:
+            ts = result.get("timestamp")
+
+        if "segments" in result and isinstance(result["segments"], list):
+            for seg in result["segments"]:
+                if isinstance(seg, dict):
+                    segments.append({
+                        "language": seg.get("language", lang),
+                        "text": (seg.get("text") or "").strip(),
+                        "time_stamps": _qwen3_normalize_time_stamps(seg.get("time_stamps", seg.get("timestamp"))),
+                    })
+            if segments:
+                return segments
+
+        if "chunks" in result and isinstance(result["chunks"], list):
+            for ch in result["chunks"]:
+                if isinstance(ch, dict):
+                    segments.append({
+                        "language": ch.get("language", lang),
+                        "text": (ch.get("text") or "").strip(),
+                        "time_stamps": _qwen3_normalize_time_stamps(ch.get("time_stamps", ch.get("timestamp"))),
+                    })
+            if segments:
+                return segments
+
+        segments.append({"language": lang, "text": text, "time_stamps": _qwen3_normalize_time_stamps(ts)})
+        return segments
+
+    text = (getattr(result, "text", "") or "").strip()
+    lang = getattr(result, "language", None)
+    ts = getattr(result, "time_stamps", None)
+    if ts is None:
+        ts = getattr(result, "timestamp", None)
+    segments.append({"language": lang, "text": text, "time_stamps": _qwen3_normalize_time_stamps(ts)})
+    return segments
+
+
+def _qwen3_load_asr_model(device_override: str = "auto", batch_size: int = 8):
+    """
+    惰性加载并缓存 Qwen3-ASR 模型（原 qwen3_server.py load_model()，逻辑
+    不变，含显存不足/CUDA 环境异常两级自动降级：先腰斩 batch_size 重试，
+    仍不行则整体切换到 CPU 重新加载）。
+    """
+    global _qwen3_asr_model, _qwen3_asr_model_device, _qwen3_asr_model_batch_size
+
+    with _qwen3_asr_model_lock:
+        if (_qwen3_asr_model is not None
+                and _qwen3_asr_model_device == device_override
+                and _qwen3_asr_model_batch_size == batch_size):
+            return _qwen3_asr_model
+
+        if _qwen3_asr_model is not None:
+            logger.info(
+                f"[Qwen3-ASR] 配置从 device='{_qwen3_asr_model_device}' batch_size={_qwen3_asr_model_batch_size} "
+                f"变为 device='{device_override}' batch_size={batch_size}，重新加载模型..."
+            )
+            _qwen3_asr_model = None
+            try:
+                import torch as _torch_reload
+                if _torch_reload.cuda.is_available():
+                    _torch_reload.cuda.empty_cache()
+            except Exception:
+                pass
+
+        logger.info("[Qwen3-ASR] 正在初始化模型...")
+        device_map, dtype = _qwen3_pick_device_and_dtype(device_override)
+        logger.info(f"[Qwen3-ASR] 使用设备: {device_map}, dtype: {dtype}, batch_size: {batch_size}")
+
+        import torch
+        from qwen_asr import Qwen3ASRModel
+
+        def _build(_device_map: str, _dtype, _batch_size: int):
+            kwargs = {
+                "dtype": _dtype,
+                "device_map": _device_map,
+                "max_inference_batch_size": _batch_size if _device_map.startswith("cuda") else 1,
+                "max_new_tokens": 256,
+                "forced_aligner": _QWEN3_FA_MODEL_ID,
+                "forced_aligner_kwargs": {"dtype": _dtype, "device_map": _device_map},
+            }
+            return Qwen3ASRModel.from_pretrained(_QWEN3_ASR_MODEL_ID, **kwargs)
+
+        try:
+            _qwen3_asr_model = _build(device_map, dtype, batch_size)
+            _qwen3_asr_model_device = device_override
+            _qwen3_asr_model_batch_size = batch_size
+            logger.info("✅ [Qwen3-ASR] 模型加载成功！")
+            return _qwen3_asr_model
+        except Exception as e:
+            if device_map.startswith("cuda") and _is_cuda_oom_or_env_error(e) and batch_size > 1:
+                half_batch = max(1, batch_size // 2)
+                logger.warning(f"⚠️  [Qwen3-ASR] 加载失败（{e}），尝试腰斩 max_inference_batch_size: {batch_size} → {half_batch} 重试...")
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                try:
+                    _qwen3_asr_model = _build(device_map, dtype, half_batch)
+                    _qwen3_asr_model_device = device_override
+                    _qwen3_asr_model_batch_size = half_batch
+                    logger.info(f"✅ [Qwen3-ASR] 模型加载成功（batch_size 降级为 {half_batch}）！")
+                    return _qwen3_asr_model
+                except Exception as e2:
+                    e = e2
+
+            if device_map.startswith("cuda") and _is_cuda_oom_or_env_error(e):
+                logger.warning(f"⚠️  [Qwen3-ASR] 在 GPU 上加载失败（{e}），自动切换到 CPU 重新加载...")
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                try:
+                    _qwen3_asr_model = _build("cpu", torch.float32, 1)
+                    _qwen3_asr_model_device = "cpu"
+                    _qwen3_asr_model_batch_size = 1
+                    logger.info("✅ [Qwen3-ASR] 模型加载成功（已回退到 CPU）！")
+                    return _qwen3_asr_model
+                except Exception as e3:
+                    logger.error(f"❌ [Qwen3-ASR] CPU 兜底加载仍然失败: {e3}", exc_info=True)
+                    _qwen3_asr_model = None
+                    return None
+
+            logger.error(f"❌ [Qwen3-ASR] 模型加载失败: {e}", exc_info=True)
+            _qwen3_asr_model = None
+            return None
+
+
+def _qwen3_load_forced_aligner(device_override: str = "auto"):
+    """
+    惰性加载并缓存独立的 Qwen3-ForcedAligner 模型（原 qwen3_server.py
+    load_forced_aligner()，逻辑不变）。没有 batch_size 这个轴——官方接口
+    本身不支持按批调用，每次都是单条音频单次前向。
+    """
+    global _qwen3_fa_model, _qwen3_fa_model_device
+
+    with _qwen3_fa_model_lock:
+        if _qwen3_fa_model is not None and _qwen3_fa_model_device == device_override:
+            return _qwen3_fa_model
+
+        if _qwen3_fa_model is not None:
+            logger.info(f"[Qwen3-FA] 配置从 device='{_qwen3_fa_model_device}' 变为 device='{device_override}'，重新加载模型...")
+            _qwen3_fa_model = None
+            try:
+                import torch as _torch_reload
+                if _torch_reload.cuda.is_available():
+                    _torch_reload.cuda.empty_cache()
+            except Exception:
+                pass
+
+        logger.info("[Qwen3-FA] 正在初始化模型...")
+        device_map, dtype = _qwen3_pick_device_and_dtype(device_override)
+        logger.info(f"[Qwen3-FA] 使用设备: {device_map}, dtype: {dtype}")
+
+        from qwen_asr import Qwen3ForcedAligner as _Qwen3FA
+
+        try:
+            _qwen3_fa_model = _Qwen3FA.from_pretrained(_QWEN3_FA_MODEL_ID, dtype=dtype, device_map=device_map)
+            _qwen3_fa_model_device = device_override
+            logger.info("✅ [Qwen3-FA] 模型加载成功！")
+            return _qwen3_fa_model
+        except Exception as e:
+            if device_map.startswith("cuda") and _is_cuda_oom_or_env_error(e):
+                logger.warning(f"⚠️  [Qwen3-FA] 在 GPU 上加载失败（{e}），自动切换到 CPU 重新加载...")
+                try:
+                    import torch as _torch_oom
+                    if _torch_oom.cuda.is_available():
+                        _torch_oom.cuda.empty_cache()
+                except Exception:
+                    pass
+                try:
+                    import torch as _torch_cpu
+                    _qwen3_fa_model = _Qwen3FA.from_pretrained(_QWEN3_FA_MODEL_ID, dtype=_torch_cpu.float32, device_map="cpu")
+                    _qwen3_fa_model_device = "cpu"
+                    logger.info("✅ [Qwen3-FA] 模型加载成功（已回退到 CPU）！")
+                    return _qwen3_fa_model
+                except Exception as e2:
+                    logger.error(f"❌ [Qwen3-FA] CPU 兜底加载仍然失败: {e2}", exc_info=True)
+                    _qwen3_fa_model = None
+                    return None
+
+            logger.error(f"❌ [Qwen3-FA] 模型加载失败: {e}", exc_info=True)
+            _qwen3_fa_model = None
+            return None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # 6. Qwen3ASRAligner
 # ═════════════════════════════════════════════════════════════════════════════
 
 class Qwen3ASRAligner(AltAlignerBase):
     """
-    Qwen3-ASR 独立服务客户端
-    只通过 HTTP 调用 qwen3_server.py，不在当前进程内加载模型。
+    Qwen3-ASR 本地推理（迁入 .mfa_env 主进程）
+
+    【2026-08 架构调整】此前这个类只通过 HTTP 调用独立的 qwen3_server.py
+    （.qwen3_env），原因是 qwen-asr==0.0.6 精确锁定 transformers==4.57.6，
+    与当时 requirements.txt 里 whisperx 需要的 transformers==4.39.3 互斥。
+    现在 WhisperX 已经迁出主进程、改为独立的 whisperx_server.py
+    （.whisperx_env，见该文件顶部说明），.mfa_env 不再需要满足 whisperx
+    的 transformers 版本要求，qwen-asr 可以直接安装进 .mfa_env 并在当前
+    进程内本地加载模型，不再需要 qwen3_server.py 这个独立服务
+    （已下线，见该文件原内容顶部的迁移说明）。
     """
 
     DEFAULT_MODEL = "Qwen/Qwen3-ASR-1.7B"
-    DEFAULT_ENDPOINT = "http://127.0.0.1:5001/asr"
 
     def __init__(
         self,
         model_id: str = DEFAULT_MODEL,
         device: str = "auto",
-        endpoint: str = DEFAULT_ENDPOINT,
         batch_size: int = 8,
+        **kwargs,
     ):
         super().__init__()
         self.model_id = model_id
         self._device = device
-        self.endpoint = endpoint.rstrip("/")
-        self._session = None
-        # 透传给 qwen3_server.py /asr 请求体里的 "batch_size" 字段，服务端
-        # 据此设置 qwen_asr 官方的 max_inference_batch_size（见
-        # qwen3_server.py load_model() 顶部说明）。默认 8，与
+        # 直接透传给 _qwen3_load_asr_model()，据此设置 qwen_asr 官方的
+        # max_inference_batch_size（见该函数顶部说明）。默认 8，与
         # app_settings.DEFAULT_SETTINGS["qwen3_batch_size"] 一致。
         self.batch_size = max(1, int(batch_size))
+        # 兼容旧调用方可能仍传入的 endpoint 关键字参数（独立服务模式的
+        # 遗留签名）；本地推理模式下不再使用，静默忽略即可，不影响任何
+        # 实际行为。
+        _ = kwargs.get("endpoint")
 
     @staticmethod
     def check_available() -> Tuple[bool, str]:
         try:
-            import requests  # noqa: F401
+            import qwen_asr  # noqa: F401
+            return True, "OK"
         except ImportError as e:
-            return False, f"未安装 requests: pip install requests ({e})"
-
-        try:
-            r = requests.get("http://127.0.0.1:5001/", timeout=2)
-            return True, "Qwen3-ASR 独立服务已可访问"
+            return False, f"未安装: pip install qwen-asr ({e})"
         except Exception as e:
-            return False, f"Qwen3-ASR 独立服务不可访问: {e}"
+            return False, str(e)
 
     def _load_model(self):
         """
-        独立服务模式下，不加载本地模型。
-        这里只做轻量级连接初始化。
+        本地推理模式：惰性加载并缓存 Qwen3-ASR 模型（模块级单例，见
+        _qwen3_load_asr_model()），跨任务复用，与旧版独立服务的"进程内
+        常驻模型"效果一致。
         """
-        if self._session is None:
-            self._session = requests.Session()
+        model = _qwen3_load_asr_model(_safe_device(getattr(self, "_device", "auto")), self.batch_size)
+        if model is None:
+            raise RuntimeError("Qwen3-ASR 模型加载失败")
+        return model
 
     def _call_qwen3_service(self, audio_path: str, language: str, context: str = "") -> Dict:
-        self._load_model()
+        """
+        本地推理（原为 HTTP 调用 qwen3_server.py 的 /asr 路由，现改为直接
+        调用 qwen_asr.Qwen3ASRModel.transcribe()，含与原服务端路由一致的
+        显存不足自动降级重试：先腰斩 batch_size 重新加载模型再推理一次，
+        仍不行则整体切换到 CPU 重新加载再推理一次）。
+        """
+        device_override = _safe_device(getattr(self, "_device", "auto"))
+        batch_size = self.batch_size
+        model = self._load_model()
 
-        payload = {
-            "audio": audio_path,
-            "language": language,
-            "context": context,
-            # 【修复】此前这里从未发送 "device" 字段，qwen3_server.py 的
-            # /asr 路由因此永远按其内部默认值 "auto" 解析设备，导致用户在
-            # "对齐工具运行设备"里选择 CPU 完全不会对 Qwen3-ASR 生效（与
-            # pipeline.py 里 WhisperX/Qwen3-FA/NeMo-FA 曾经历过的
-            # aligner_device 失效是同一类问题）。这里用 _safe_device() 在
-            # 客户端（主进程）先做一次 CUDA 可用性 smoke-test 再传给独立
-            # 服务进程，与 WhisperXAligner 的设备解析方式保持一致。
-            "device": _safe_device(getattr(self, "_device", "auto")),
-            "batch_size": self.batch_size,
+        try:
+            result = model.transcribe(
+                audio=audio_path,
+                language=language,
+                context=context,
+                return_time_stamps=True,
+            )
+        except Exception as e:
+            if not _is_cuda_oom_or_env_error(e):
+                raise
+            logger.warning(f"[Qwen3-ASR] 推理失败（{e}），尝试自动降级重试...")
+            try:
+                import torch as _torch_oom
+                if _torch_oom.cuda.is_available():
+                    _torch_oom.cuda.empty_cache()
+            except Exception:
+                pass
+
+            retried = False
+            if _qwen3_asr_model_device != "cpu" and batch_size > 1:
+                half_batch = max(1, batch_size // 2)
+                model = _qwen3_load_asr_model(device_override, half_batch)
+                if model is not None:
+                    retried = True
+            if not retried or model is None:
+                model = _qwen3_load_asr_model("cpu", 1)
+
+            if model is None:
+                raise RuntimeError("显存不足自动降级后模型仍加载失败")
+
+            result = model.transcribe(
+                audio=audio_path,
+                language=language,
+                context=context,
+                return_time_stamps=True,
+            )
+
+        segments = _qwen3_normalize_segments(result)
+        raw_text = "".join([seg.get("text", "") for seg in segments]).strip()
+        logger.info(f"✅ [Qwen3-ASR] 识别完成 | 设备={_qwen3_asr_model_device} | batch={_qwen3_asr_model_batch_size}")
+        logger.info(f"📝 [Qwen3-ASR] 识别文字: {raw_text}")
+
+        return {
+            "success": True,
+            "segments": segments,
+            "raw_text": raw_text,
+            "model_id": _QWEN3_ASR_MODEL_ID,
         }
-
-        resp = self._session.post(self.endpoint, json=payload, timeout=1800)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if not data.get("success", False):
-            raise RuntimeError(data.get("error", "Qwen3-ASR 服务返回失败"))
-
-        return data
 
     @staticmethod
     def _flatten_segments_to_entries(segments, int_lang: str):
@@ -2813,7 +3004,7 @@ class Qwen3ASRAligner(AltAlignerBase):
             if text:
                 text = convert_traditional_to_simplified(text, language)
 
-            logger.info(f"[Qwen3-ASR] 调用独立服务: {self.endpoint}")
+            logger.info(f"[Qwen3-ASR] 本地推理（模型: {self.model_id}）")
             result = self._call_qwen3_service(
                 audio_path=audio_path,
                 language=asr_lang,
@@ -2914,7 +3105,7 @@ class Qwen3ASRAligner(AltAlignerBase):
                 "phoneme_text": transcribed,
                 "audio_duration": self._get_audio_duration_100ns(audio_path),
                 "processing_time": int((time.time() - t0) * 1000),
-                "backend": "qwen3_asr_http",
+                "backend": "qwen3_asr_local",
             }
 
         except Exception as e:
@@ -4031,92 +4222,106 @@ def _split_text_by_duration_quota(
 
 class Qwen3ForcedAligner(AltAlignerBase):
     """
-    Qwen3-ForcedAligner 独立服务客户端。
+    Qwen3-ForcedAligner 本地推理（迁入 .mfa_env 主进程）
 
-    【架构调整】此前这个类直接 `from qwen_asr import Qwen3ForcedAligner`
-    在当前进程（.mfa_env）内加载模型，是本项目里唯一一个没有走独立服务
-    HTTP 调用模式的 Qwen 系列对齐器——Qwen3ASRAligner / NeMoForcedAligner
-    都早已是纯 HTTP 客户端（见二者的 DEFAULT_ENDPOINT / _call_*_service）。
-    这个不一致直接导致 backend/requirements.txt 里必须同时满足
-    qwen-asr==0.0.6（精确锁定 transformers==4.57.6）与 whisperx 需要的
-    transformers==4.39.3，二者互斥，`pip install -r requirements.txt`
-    必然报 ResolutionImpossible（qwen-asr 从未发布过不要求 4.57.6 的
-    版本，pip backtracking 到 0.0.1 依然如此）。
-
-    现改为与 Qwen3ASRAligner 完全对称的 HTTP 客户端模式：模型改为常驻在
-    qwen3_server.py 独立进程（.qwen3_env，见 requirements-qwen3.txt）里，
-    通过新增的 POST /align 路由调用，当前进程（.mfa_env）不再需要安装
-    qwen-asr / 对应版本的 transformers，requirements.txt 里的
-    `qwen-asr` 一行应删除。
+    【2026-08 架构调整】此前这个类只通过 HTTP 调用独立的 qwen3_server.py
+    （.qwen3_env），原因是 qwen-asr==0.0.6 精确锁定 transformers==4.57.6，
+    与当时 .mfa_env 里 whisperx 需要的 transformers==4.39.3 互斥。现在
+    WhisperX 已经迁出主进程（改为独立的 whisperx_server.py /
+    .whisperx_env，见该文件顶部说明），.mfa_env 不再受 whisperx 的
+    transformers 版本约束，qwen-asr 直接安装进 .mfa_env，本类改为与
+    Qwen3ASRAligner 完全对称的本地推理模式：模型通过模块级
+    _qwen3_load_forced_aligner() 在当前进程内直接加载（原来是 HTTP 请求
+    qwen3_server.py 的 /align 路由），qwen3_server.py 已下线。
 
     分句/分块规划（_plan_sentence_aligned_chunks）、退化区间检测与自愈
     修复（_find_degenerate_spans / _repair_degenerate_spans）、LAB 文本
-    组装等后处理逻辑全部不受影响、原样保留在本类里——只有
-    "调用模型拿单段对齐结果"这一个原语（原来是 self._model.align(...)
-    本地调用）改成了 HTTP 请求，返回值形状（entries 列表）保持一致，
-    上层调用方（_align_single_chunk 及以上的一切）无需改动。
+    组装等后处理逻辑全部不受影响、原样保留在本类里——只有"调用模型拿
+    单段对齐结果"这一个原语（原来是 HTTP POST /align）改成了直接调用
+    本地模型的 .align(...)，返回值形状（entries 列表）保持一致，上层
+    调用方（_align_single_chunk 及以上的一切）无需改动。
     """
 
     DEFAULT_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
-    DEFAULT_ENDPOINT = "http://127.0.0.1:5001/align"
 
-    def __init__(self, *args, device="cpu", batch_size: int = 8,
-                 endpoint: str = DEFAULT_ENDPOINT, **kwargs):
+    def __init__(self, *args, device="cpu", batch_size: int = 8, **kwargs):
         super().__init__(*args, **kwargs)
 
         self._device = device
-        self.endpoint = endpoint.rstrip("/")
-        self._session = None
         # Qwen3-ForcedAligner 官方接口没有真正意义上可调的批大小（每次
         # align() 调用都是单条音频单次前向），这里保留该参数纯粹是为了
         # 与 Qwen3ASRAligner / NeMoForcedAligner 构造签名一致，不影响任何
-        # 实际推理行为——qwen3_server.py 的 /align 路由也不读取它。
+        # 实际推理行为——_qwen3_load_forced_aligner() 也不读取它。
         self.batch_size = max(1, int(batch_size))
         self.model_id = kwargs.get("model_id", self.DEFAULT_MODEL)
 
     @staticmethod
     def check_available() -> Tuple[bool, str]:
         try:
-            import requests  # noqa: F401
+            import qwen_asr  # noqa: F401
+            return True, "OK"
         except ImportError as e:
-            return False, f"未安装 requests: pip install requests ({e})"
-
-        try:
-            requests.get("http://127.0.0.1:5001/", timeout=2)
-            return True, "Qwen3-ForcedAligner 独立服务已可访问"
+            return False, f"未安装: pip install qwen-asr ({e})"
         except Exception as e:
-            return False, f"Qwen3-ForcedAligner 独立服务不可访问: {e}"
+            return False, str(e)
 
     def _load_model(self, force_cpu: bool = False):
         """
-        独立服务模式下，不在当前进程加载模型，只做轻量级连接初始化。
-        force_cpu 参数保留（不再使用）纯粹是为了不改动调用方
-        （_align_single_chunk）的调用签名；显存不足时的自动降级现在完全
-        由 qwen3_server.py 的 /align 路由自行处理（先按当前设备尝试，
-        OOM/环境错误时服务端整体切换到 CPU 重新加载并重试），不需要客户
-        端这一侧再感知或重试。
+        本地推理模式：惰性加载并缓存 Qwen3-ForcedAligner 模型（模块级
+        单例，见 _qwen3_load_forced_aligner()）。force_cpu 参数保留（不再
+        使用）纯粹是为了不改动调用方（_align_single_chunk）的调用签名；
+        显存不足时的自动降级现在由 _call_qwen3_fa_service() 自行处理
+        （先按当前设备尝试，OOM/环境错误时整体切换到 CPU 重新加载并
+        重试），不需要调用方再感知或重试。
         """
-        if self._session is None:
-            self._session = requests.Session()
+        model = _qwen3_load_forced_aligner(_safe_device(getattr(self, "_device", "cpu")))
+        if model is None:
+            raise RuntimeError("Qwen3-ForcedAligner 模型加载失败")
+        return model
 
     def _call_qwen3_fa_service(self, audio_path: str, text: str, language: str) -> Dict:
-        self._load_model()
+        """
+        本地推理（原为 HTTP 调用 qwen3_server.py 的 /align 路由，现改为
+        直接调用 qwen_asr.Qwen3ForcedAligner.align()，含与原服务端路由
+        一致的显存不足自动降级重试：整体切换到 CPU 重新加载再推理一次。
+        官方接口没有 batch_size 可调，只有这一级降级，不像 Qwen3-ASR 那样
+        先腰斩批大小再切 CPU）。
+        """
+        device_override = _safe_device(getattr(self, "_device", "cpu"))
+        model = self._load_model()
 
-        payload = {
-            "audio": audio_path,
-            "text": text,
-            "language": language,
-            "device": _safe_device(getattr(self, "_device", "cpu")),
+        try:
+            results = model.align(audio=audio_path, text=text, language=language)
+        except Exception as e:
+            if not _is_cuda_oom_or_env_error(e):
+                raise
+            logger.warning(f"[Qwen3-FA] 推理失败（{e}），自动切换到 CPU 重新加载并重试...")
+            try:
+                import torch as _torch_oom
+                if _torch_oom.cuda.is_available():
+                    _torch_oom.cuda.empty_cache()
+            except Exception:
+                pass
+            model = _qwen3_load_forced_aligner("cpu")
+            if model is None:
+                raise RuntimeError("显存不足自动降级后模型仍加载失败")
+            results = model.align(audio=audio_path, text=text, language=language)
+
+        items = results[0] if results else []
+        entries = [
+            {
+                "text": getattr(item, "text", "") or "",
+                "start_time": float(item.start_time),
+                "end_time": float(item.end_time),
+            }
+            for item in items
+        ]
+
+        return {
+            "success": True,
+            "entries": entries,
+            "model_id": _QWEN3_FA_MODEL_ID,
         }
-
-        resp = self._session.post(self.endpoint, json=payload, timeout=1800)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if not data.get("success", False):
-            raise RuntimeError(data.get("error", "Qwen3-ForcedAligner 服务返回失败"))
-
-        return data
 
     def align(self, audio_path: str, text: Optional[str], language: str,
               english_word_align: bool = False,
@@ -4501,14 +4706,14 @@ class Qwen3ForcedAligner(AltAlignerBase):
         "按字符切分还是按空格切分"；不传时退化为不做自愈（保持旧行为），
         调用方应尽量把已有的 int_lang 传进来。
 
-        显存不足 / CUDA 环境异常自动降级：现在完全由 qwen3_server.py 的
-        /align 路由自行处理（服务端命中 CUDA OOM / 环境错误时整体切换到
-        CPU 重新加载模型并重试），这里只需要发一次 HTTP 请求、等待最终
-        结果即可，不需要客户端这一侧再重试。
+        显存不足 / CUDA 环境异常自动降级：现在由 _call_qwen3_fa_service()
+        自行处理（命中 CUDA OOM / 环境错误时整体切换到 CPU 重新加载模型
+        并重试），这里只需要调用一次、等待最终结果即可，不需要在这一层
+        再重试。
         """
         data = self._call_qwen3_fa_service(audio_path, text, lang_name)
 
-        # /align 路由返回 {"entries": [{"text":, "start_time":, "end_time":}, ...]}
+        # _call_qwen3_fa_service() 返回 {"entries": [{"text":, "start_time":, "end_time":}, ...]}
         entries: List[Tuple[float, float, str]] = []
         for item in data.get("entries", []):
             tok = (item.get("text") or "").strip()
@@ -4954,7 +5159,7 @@ class Qwen3ForcedAligner(AltAlignerBase):
 #
 #    因此本类不在当前进程内 import nemo，而是作为 HTTP 客户端调用一个
 #    独立的 nemo_server.py 微服务（运行在独立 conda/venv 环境里，默认端口
-#    127.0.0.1:5002），真正的模型加载、CTC log-probs 计算、
+#    127.0.0.1:5852），真正的模型加载、CTC log-probs 计算、
 #    torchaudio.functional.forced_align Viterbi 强制对齐全部在那个独立
 #    进程里完成，这边只负责发请求、拿 token_entries、合并成 LAB。
 #
@@ -4970,7 +5175,7 @@ class Qwen3ForcedAligner(AltAlignerBase):
 #      conda create -n nemo_env python=3.10 -y
 #      conda activate nemo_env
 #      pip install "nemo_toolkit[asr]>=2.7.0,<2.8.0"
-#      python nemo_server.py     # 默认监听 127.0.0.1:5002
+#      python nemo_server.py     # 默认监听 127.0.0.1:5852
 #    然后正常启动主 Flask 应用（.mfa_env），选择 nemo_aligner 后端即可。
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -4992,7 +5197,7 @@ class NeMoForcedAligner(AltAlignerBase):
     模型类型硬跑。
     """
 
-    DEFAULT_ENDPOINT = "http://127.0.0.1:5002/align"
+    DEFAULT_ENDPOINT = "http://127.0.0.1:5852/align"
 
     # 仅用于前端展示 / 状态接口，不影响实际对齐逻辑（真正的模型选择逻辑在
     # nemo_server.py 里，因为模型必须在那个独立进程里加载）。
@@ -5029,7 +5234,7 @@ class NeMoForcedAligner(AltAlignerBase):
             return False, f"未安装 requests: pip install requests ({e})"
 
         try:
-            r = requests.get("http://127.0.0.1:5002/", timeout=2)
+            r = requests.get("http://127.0.0.1:5852/", timeout=2)
             return True, "NeMo Forced Aligner 独立服务已可访问"
         except Exception as e:
             return False, f"NeMo Forced Aligner 独立服务不可访问: {e}"

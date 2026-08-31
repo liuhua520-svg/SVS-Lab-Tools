@@ -3,7 +3,7 @@
 # NeMo Forced Aligner (NFA) 独立服务
 # https://github.com/NVIDIA-NeMo/Speech/tree/main/tools/nemo_forced_aligner
 #
-# 与 qwen3_server.py 同样的理由：nemo_toolkit 对 packaging / fsspec /
+# 与 whisperx_server.py 同样的理由：nemo_toolkit 对 packaging / fsspec /
 # omegaconf / hydra-core / lightning 等核心依赖有严格的版本限制，装进主
 # Flask 进程所在的 .mfa_env 会跟其它包（比如 pipdeptree 要求的
 # packaging>=26）发生版本冲突，把这些包"降级"。所以照搬 Qwen3-ASR 的
@@ -17,7 +17,8 @@
 #   pip install "nemo_toolkit[asr]>=2.7.0,<2.8.0"
 #   python nemo_server.py
 #
-# 默认监听 127.0.0.1:5002（5001 已被 qwen3_server.py 占用）。
+# 默认监听 127.0.0.1:5852（5851 是历史遗留端口参考、5854 已被
+# whisperx_server.py 占用、5853 已被 qwen3tts_server.py 占用）。
 from __future__ import annotations
 
 from flask import Flask, request, jsonify
@@ -58,7 +59,7 @@ BACKEND_DIR = Path(__file__).resolve().parent
 
 # HuggingFace Hub 模型缓存（如 nvidia/stt_zh_citrinet_1024_gamma_0_25、
 # nvidia/parakeet-tdt_ctc-0.6b-ja）——独立复用一份缓存目录，不与
-# qwen3_server.py 的 HF 缓存共享，避免两个进程同时写同一个 hub 缓存
+# whisperx_server.py 的 HF 缓存共享，避免两个进程同时写同一个 hub 缓存
 # 目录产生竞态。
 CACHE_DIR = BACKEND_DIR / "models" / "nemo_hf_cache"
 HUB_CACHE_DIR = CACHE_DIR / "hub"
@@ -88,7 +89,7 @@ except Exception as _settings_err:
 # 之后 /restart 触发的自重启会拉起全新进程，新进程执行到这里时会重新读
 # 到最新设置，无需额外处理。仅在 Windows 上生效，其余平台直接跳过。
 # 【2026-08 起】launcher.py 正常启动本进程时用 CREATE_NO_WINDOW，本身
-# 就没有控制台窗口，这里调用是无操作，详见 qwen3_server.py 里的同名说明。
+# 就没有控制台窗口，这里调用是无操作，详见 whisperx_server.py 里的同名说明。
 try:
     from app_settings import apply_console_visibility as _apply_console_visibility
     _apply_console_visibility()
@@ -125,7 +126,7 @@ _model_device: str = "auto"           # 记录当前所有已加载模型使用�
 
 def _pick_device(device_override: str = "auto") -> str:
     """
-    与 qwen3_server.py 的 _pick_device_and_dtype 同样的探测逻辑，但 NeMo
+    与 whisperx_server.py 的 _pick_device_and_dtype 同样的探测逻辑，但 NeMo
     模型走 fp32/AMP 自动管理，这里只需要决定 "cpu" 还是 "cuda"。
     """
     import torch
@@ -283,13 +284,22 @@ def load_model(model_name: str, device_override: str = "auto"):
 
 # ── CTC 辅助函数（与 alt_aligners.py 中曾经的进程内实现逻辑一致，现在搬到
 #    这个独立进程里执行）────────────────────────────────────────────────
+#
+# 注意：Hybrid RNNT/TDT+CTC 模型上 model.decoder 是 RNNT/TDT 的
+# prediction network（joint 解码器用），词表/blank id 与 CTC 头完全不是
+#一回事；CTC 相关信息必须从 model.ctc_decoder 取，取不到才退回
+# model.decoder（纯 CTC 模型的情况）。
+def _get_ctc_head(model):
+    return getattr(model, "ctc_decoder", None) or getattr(model, "decoder", None)
+
+
 def _get_blank_id(model) -> int:
-    decoder = getattr(model, "decoder", None)
-    vocab = getattr(decoder, "vocabulary", None)
+    head = _get_ctc_head(model)
+    vocab = getattr(head, "vocabulary", None)
     if vocab is not None:
         return len(vocab)
     try:
-        return int(model.decoder.num_classes_with_blank) - 1
+        return int(head.num_classes_with_blank) - 1
     except Exception:
         return 0
 
@@ -314,8 +324,8 @@ def _tokenize(model, text: str) -> Tuple[List[int], List[str]]:
                 texts = list(text)[: len(ids)] + [""] * max(0, len(ids) - len(text))
             return list(ids), texts
 
-    decoder = getattr(model, "decoder", None)
-    vocab = getattr(decoder, "vocabulary", None)
+    head = _get_ctc_head(model)
+    vocab = getattr(head, "vocabulary", None)
     if vocab:
         vocab_idx = {ch: i for i, ch in enumerate(vocab)}
         ids, texts = [], []
@@ -351,12 +361,41 @@ def _get_log_probs(model, audio_path: str, device: str) -> Tuple["Any", int, flo
     audio_len = torch.tensor([audio_tensor.shape[1]], dtype=torch.long, device=device)
 
     with torch.no_grad():
-        try:
-            log_probs, enc_len, _ = model(
+        # Hybrid RNNT/TDT + CTC 模型（如 parakeet-tdt_ctc-0.6b-ja）的 forward()
+        # 继承自 RNNT 基类，只返回编码器输出 (encoded, encoded_len) 两个值，
+        # 并不像纯 CTC 模型那样直接给出 log_probs——即使之前调用过
+        # change_decoding_strategy(decoder_type="ctc")，那只影响解码/转写用的
+        # decoding 分支，不改变 forward() 的返回签名。
+        # 因此这里要分两种模型类型处理：
+        #   1) Hybrid 模型：手动跑 forward_encoder 拿编码器输出，
+        #      再喂给 model.ctc_decoder 得到 log_probs。
+        #   2) 纯 CTC 模型：直接调用 model()，按官方签名解包 3 个值。
+        ctc_decoder = getattr(model, "ctc_decoder", None)
+        if ctc_decoder is not None and hasattr(model, "forward_encoder"):
+            # Hybrid 模型路径
+            encoded, encoded_len = model.forward_encoder(
                 input_signal=audio_tensor, input_signal_length=audio_len,
             )
-        except TypeError:
-            log_probs, enc_len, _ = model(audio_tensor, audio_len)
+            log_probs = ctc_decoder(encoder_output=encoded)
+            enc_len = encoded_len
+        elif ctc_decoder is not None and hasattr(model, "encoder"):
+            # 部分 NeMo 版本没有 forward_encoder 封装，退回手动调 encoder
+            processed_signal, processed_signal_length = model.preprocessor(
+                input_signal=audio_tensor, length=audio_len,
+            )
+            encoded, encoded_len = model.encoder(
+                audio_signal=processed_signal, length=processed_signal_length,
+            )
+            log_probs = ctc_decoder(encoder_output=encoded)
+            enc_len = encoded_len
+        else:
+            # 纯 CTC 模型（无 ctc_decoder 属性），走原生 forward
+            try:
+                log_probs, enc_len, _ = model(
+                    input_signal=audio_tensor, input_signal_length=audio_len,
+                )
+            except TypeError:
+                log_probs, enc_len, _ = model(audio_tensor, audio_len)
 
     T = int(enc_len[0].item())
     lp = log_probs[0, :T, :].detach().to("cpu").float()
@@ -408,26 +447,26 @@ def restart():
     里的 NeMo 模型会随进程重建一起释放，重启后按需重新惰性加载，属于
     预期行为。
 
-    【重要】这里不再使用 os.execv 原地重建进程（与 qwen3_server.py 同步
+    【重要】这里不再使用 os.execv 原地重建进程（与 whisperx_server.py 同步
     修复，问题和原因完全一致）。
 
     之前是 os.execv(python, [python] + sys.argv)：Windows 没有真正的
     exec()，是 CRT 用 _spawnve(P_OVERLAY, ...) 模拟出来的，而且是从
     _delayed_restart 这个后台线程里调用、主线程还阻塞在 accept 循环里。
-    第一次重启"凑巧"能成功，但旧进程监听 5002 端口的 socket 句柄等状态
+    第一次重启"凑巧"能成功，但旧进程监听 5852 端口的 socket 句柄等状态
     没有被干净释放，第二次再触发 /restart 时新进程 bind 端口失败，看起来
     就是"进程直接消失了"，只能重新打开整个启动器——这就是"重启一次没
     问题，重启第二次以上就必须重新打开应用"的根因。
 
     新做法改成"先干净关闭、再拉起全新独立进程"：
-      1) 显式调用 _httpd.shutdown() + server_close()，确保 5002 端口被
+      1) 显式调用 _httpd.shutdown() + server_close()，确保 5852 端口被
          完全释放；
       2) 端口释放后用 subprocess.Popen 启动全新 python 进程，不继承旧
          进程任何多余的线程/句柄状态，此时端口已空闲，一定能 bind 成功；
       3) 【2026-08 变更】显式传入 stdout=sys.stdout, stderr=sys.stderr：
          launcher.py 正常启动本进程时用 CREATE_NO_WINDOW（不再创建控制台
          窗口），sys.stdout/sys.stderr 已经被重定向到 logs/nemo.log 文件
-         （详见 qwen3_server.py 里的同名说明）。之前这里不传
+         （详见 whisperx_server.py 里的同名说明）。之前这里不传
          stdout/stderr，在 Windows 上配合 close_fds=True 意味着新进程不
          继承任何标准句柄，会导致重启后日志彻底丢失甚至报错；现在显式
          传当前进程的句柄过去，日志能在重启前后连续不丢失。
@@ -443,8 +482,8 @@ def restart():
         try:
             if _httpd is not None:
                 _httpd.shutdown()       # 停止 serve_forever 循环
-                _httpd.server_close()   # 真正释放 5002 端口
-                logger.info("✓ 已释放端口 5002，准备拉起新进程")
+                _httpd.server_close()   # 真正释放 5852 端口
+                logger.info("✓ 已释放端口 5852，准备拉起新进程")
         except Exception as e:
             logger.warning(f"关闭旧 HTTP server 时出现异常（继续重启流程）: {e}")
 
@@ -670,13 +709,13 @@ def align():
 
 
 if __name__ == "__main__":
-    # 生产环境建议改成 waitress / gevent / gunicorn，与 qwen3_server.py 一致
+    # 生产环境建议改成 waitress / gevent / gunicorn，与 whisperx_server.py 一致
     #
     # 这里不用 app.run(...)，改用 werkzeug.serving.make_server(...) 拿到
     # 底层 server 对象存进 _httpd —— /restart 需要它来在重启前调用
     # shutdown() + server_close() 干净地释放端口，见 restart() 里的说明。
     from werkzeug.serving import make_server
 
-    _httpd = make_server("127.0.0.1", 5002, app)
-    logger.info("🚀 NeMo Forced Aligner service listening on http://127.0.0.1:5002")
+    _httpd = make_server("127.0.0.1", 5852, app)
+    logger.info("🚀 NeMo Forced Aligner service listening on http://127.0.0.1:5852")
     _httpd.serve_forever()

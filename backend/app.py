@@ -1204,13 +1204,21 @@ def english_extract_g2p():
 # 应用设置：模型自动更新 / 镜像站下载（功能 2）
 # =====================================================================
 
-# Qwen3-ASR / NeMo Forced Aligner / Qwen3-TTS 微服务的固定本地地址（与
-# alt_aligners.py 里 Qwen3ASRAligner.DEFAULT_ENDPOINT /
+# WhisperX / NeMo Forced Aligner / Qwen3-TTS 微服务的固定本地地址（与
+# alt_aligners.py 里 WhisperXAligner.DEFAULT_ENDPOINT /
 # NeMoForcedAligner.DEFAULT_ENDPOINT、tts_processor.py 里
 # QWEN3_TTS_BASE_URL 使用的端口保持一致）。
-_QWEN3_BASE_URL = "http://127.0.0.1:5001"
-_NEMO_BASE_URL = "http://127.0.0.1:5002"
-_QWEN3TTS_BASE_URL = "http://127.0.0.1:5003"
+#
+# 【2026-08 起】Qwen3-ASR / Qwen3-ForcedAligner 已迁入本进程（.mfa_env）
+# 内本地加载，不再是独立微服务，因此不再需要一个可探活/可 /restart 的
+# 基地址——它俩的 HF_HUB_OFFLINE / HF_ENDPOINT 生效方式与本进程自身完全
+# 一致，保存新设置后无法像独立微服务那样自我重启生效，需要用户手动重启
+# 整个程序（见 app_settings.py 模块顶部说明、下方 update_settings() 里
+# 返回的 restart 结果）。WhisperX 反过来迁出为独立微服务
+# （whisperx_server.py / .whisperx_env），新增 _WHISPERX_BASE_URL。
+_WHISPERX_BASE_URL = "http://127.0.0.1:5854"
+_NEMO_BASE_URL = "http://127.0.0.1:5852"
+_QWEN3TTS_BASE_URL = "http://127.0.0.1:5853"
 
 
 def _restart_microservice(base_url: str, display_name: str) -> Dict[str, str]:
@@ -1253,12 +1261,18 @@ def get_settings():
 @app.route("/api/settings", methods=["POST"])
 def update_settings():
     """
-    更新设置并写入共享配置文件，然后自动尝试重启 Qwen3-ASR / NeMo 两个
-    独立微服务进程，让 HF_HUB_OFFLINE / HF_ENDPOINT 立即生效——不再需要
-    用户手动去关闭再重开那两个独立终端窗口。
+    更新设置并写入共享配置文件，然后自动尝试重启 WhisperX / NeMo /
+    Qwen3-TTS 三个独立微服务进程，让 HF_HUB_OFFLINE / HF_ENDPOINT 立即
+    生效——不再需要用户手动去关闭再重开那几个独立终端窗口。
 
     每个微服务是否成功重启（或本来就没在运行）会在返回的 "restart"
     字段里分别标出，前端据此展示准确的结果提示。
+
+    【2026-08 起】Qwen3-ASR / Qwen3-ForcedAligner 已迁入本进程（app.py）
+    内本地加载，不再是可以单独重启的微服务，因此不出现在 restart_result
+    里——这两项的新下载设置需要用户手动重启整个程序才会生效，前端应在
+    提示文案中单独说明，不要让用户误以为它们和 WhisperX/NeMo/Qwen3-TTS
+    一样"保存即生效"。
     """
     data = request.get_json(force=True, silent=True) or {}
     try:
@@ -1275,7 +1289,7 @@ def update_settings():
             logger.warning(f"⚠️  设置控制台窗口显示状态失败（不影响服务本身运行）: {e}")
 
         restart_result = {
-            "qwen3": _restart_microservice(_QWEN3_BASE_URL, "Qwen3-ASR"),
+            "whisperx": _restart_microservice(_WHISPERX_BASE_URL, "WhisperX"),
             "nemo": _restart_microservice(_NEMO_BASE_URL, "NeMo Forced Aligner"),
             "qwen3tts": _restart_microservice(_QWEN3TTS_BASE_URL, "Qwen3-TTS"),
         }
@@ -1579,8 +1593,8 @@ def pipeline_full_process():
         # Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner 共用批大小：
         # 语义与 whisperx_batch_size 不完全相同（Qwen3-ASR 直接对应
         # max_inference_batch_size；Qwen3-FA / NeMo-FA 只作为显存不足自动
-        # 降级重试的参考值，见 alt_aligners.py / qwen3_server.py /
-        # nemo_server.py 里的说明），但校验规则保持一致。
+        # 降级重试的参考值，见 alt_aligners.py / nemo_server.py 里的
+        # 说明），但校验规则保持一致。
         try:
             qwen3_batch_size = int(request.form.get("qwen3_batch_size", 8))
         except (TypeError, ValueError):
@@ -4210,9 +4224,13 @@ def _get_subtitle_job(job_id: str):
 @app.route("/api/subtitle/status", methods=["GET"])
 def subtitle_status():
     """
-    字幕功能依赖检查：ffmpeg 是否可用 + Qwen3-ASR 独立服务是否在线。
+    字幕功能依赖检查：ffmpeg 是否可用 + qwen-asr 包是否已正确安装。
     前端进入字幕页面时先调用一次，据此展示"未就绪"提示，避免用户上传
     大文件后才发现依赖缺失。
+
+    【2026-08 起】Qwen3-ASR 已迁入 .mfa_env 主进程内本地加载，不再是
+    需要单独探活的独立微服务，check_available() 现在检查的是 qwen_asr
+    包本身是否已安装，返回字段名（"qwen3_asr"）为兼容前端保留不变。
     """
     ffmpeg_ok, ffmpeg_msg = subtitle_processor.check_ffmpeg_available()
     from alt_aligners import Qwen3ASRAligner
@@ -4324,7 +4342,7 @@ def subtitle_recognize():
       - media_id           : /api/subtitle/upload 返回的媒体 ID（必填）
       - language           : 语言代码，"auto" 或 zh/en/ja/... 等（默认 "auto"，
                               对应 Qwen3-ASR 自动语言检测）
-      - device             : "auto"|"cpu"|"cuda"，转发给 qwen3_server.py（默认 "auto"）
+      - device             : "auto"|"cpu"|"cuda"，Qwen3-ASR 本地推理使用的运行设备（默认 "auto"）
       - max_chars          : 单条字幕最大字符数，超过则按标点二次拆分（默认 34）
       - split_at_sentence_end : 是否允许按句末切分（默认 False）。开启后
                               无条件遇到句末标点（。！？；等）就切成下
@@ -4344,7 +4362,7 @@ def subtitle_recognize():
       - vad_gap_threshold_sec : 触发这一处理的间隔下限（秒，默认 0.6）；
                               间隔小于等于该值时保持原样不动
       - batch_size         : Qwen3-ASR 推理批大小（默认 8），透传给
-                              qwen3_server.py /asr 的 max_inference_batch_size；
+                              本地模型的 max_inference_batch_size；
                               显存不足调小，显存充裕可调大提速
 
     与 /api/pipeline/job/<job_id> 使用同一套"轮询进度"前端交互模式，但
@@ -5438,7 +5456,7 @@ def open_browser(host: str, port: int):
     webbrowser.open(f"http://{host}:{port}")
 
 
-def main(host: str = "127.0.0.1", port: int = 5000):
+def main(host: str = "127.0.0.1", port: int = 5850):
     # 命令提示符窗口显示/隐藏：读取设置页面保存的配置，决定 app.py 自己
     # 这个终端窗口是否隐藏。【2026-08 起】launcher.py 正常启动时用
     # CREATE_NO_WINDOW，本身就没有控制台窗口，这里调用是无操作（返回

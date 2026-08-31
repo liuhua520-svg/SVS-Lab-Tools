@@ -15,9 +15,9 @@
 #   需要装 qwen-tts / 对应版本的 transformers 这一套。
 #
 #   之所以单独建环境：qwen-tts 官方要求较新的 transformers 版本（用于
-#   支持 Qwen3-TTS-Tokenizer-12Hz 的模型结构），与 qwen3_server.py
-#   （qwen-asr 所在环境）锁定的 transformers>=4.40.0 不一定是同一个精确
-#   版本，装进同一个 venv 容易互相"打架"，把对方需要的版本降级。
+#   支持 Qwen3-TTS-Tokenizer-12Hz 的模型结构），与 .mfa_env 里 qwen-asr
+#   锁定的 transformers>=4.40.0 不一定是同一个精确版本，装进同一个 venv
+#   容易互相"打架"，把对方需要的版本降级。
 #
 #   官方推荐 Python 3.12（见 https://github.com/QwenLM/Qwen3-TTS
 #   Environment Setup 一节），这里与之保持一致。
@@ -89,11 +89,11 @@ tqdm
 # torchaudio==2.3.1+cu121
 
 # CUDA 11.8（旧版显卡保留选项，如 GTX10系显卡 等 Pascal 架构）
-torch==2.3.1+cu118
+# torch==2.3.1+cu118
 # torchvision==0.18.1+cu118
 # torchaudio==2.3.1+cu118
 
 # CPU Only（无显卡，默认激活）
-# torch==2.3.1+cpu
+torch==2.3.1+cpu
 torchvision==0.18.1+cpu
 torchaudio==2.3.1+cpu

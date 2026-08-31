@@ -10,7 +10,7 @@ alt_aligners.py 里已经跑通的强制对齐流程。核心思路：
   2) 用能量阈值法做 VAD 静音检测，把整段音频切成若干"语音块"
      （块之间是静音间隙）——切点必然落在真实停顿处，不会切断字词。
      这一步只负责"在哪里必须切"，不关心块有多长。
-  3) 逐块调用 qwen3_server.py 的 /asr 接口做识别（return_time_stamps=True，
+  3) 逐块调用本地加载的 Qwen3-ASR 模型做识别（return_time_stamps=True，
      拿到块内逐字/逐词时间戳），块的起止时间就是该句字幕的时间轴。
   4) 若某一块识别出的文本过长（超过阈值，一屏放不下），在标点符号处
      寻找离中点最近的切分点，结合块内已有的字级时间戳拆成两条子字幕，
@@ -346,9 +346,9 @@ def _char_time_from_segments(
     text: str, time_stamps: List[List[Optional[float]]], block_start: float, block_end: float
 ) -> List[Tuple[str, float, float]]:
     """
-    把 qwen3_server 返回的 (text, time_stamps) 归一化为
+    把 Qwen3-ASR 返回的 (text, time_stamps) 归一化为
     [(char_or_token, start_sec, end_sec), ...]，坐标已经加上 block_start
-    偏移（qwen3_server 返回的是相对该次请求音频片段起点的时间）。
+    偏移（Qwen3-ASR 返回的是相对该次调用音频片段起点的时间）。
 
     time_stamps 长度可能与 text 不完全一致（标点、静音符号等不一定有
     对应时间戳），此处做尽力而为的对齐：数量一致按逐字符对应，否则退化
@@ -520,7 +520,7 @@ def _split_by_length(
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 主流程：调用 qwen3_server 逐块识别 → 组装字幕条目
+# 主流程：调用本地 Qwen3-ASR 逐块识别 → 组装字幕条目
 # ─────────────────────────────────────────────────────────────────────────
 
 class SubtitleEntry:
@@ -574,7 +574,6 @@ def resolve_qwen3_language(lang_code: str) -> Optional[str]:
 def transcribe_to_subtitles(
     wav_path: str,
     language: str = "auto",
-    endpoint: str = "http://127.0.0.1:5001/asr",
     device: str = "auto",
     max_chars: int = MAX_SUBTITLE_CHARS,
     tmp_dir: Optional[str] = None,
@@ -614,55 +613,96 @@ def transcribe_to_subtitles(
     vad_gap_threshold_sec：触发这一处理的间隔下限（秒），默认 0.6。
         间隔小于等于该值时视为已经足够紧凑，保持原样不动；大于该值
         才会被对半分配到中点。
-    batch_size：透传给 qwen3_server.py /asr 请求体里的 "batch_size"
-        字段，服务端据此设置 qwen_asr 官方的 max_inference_batch_size
-        （默认 8，与该接口自身默认值一致）。显存不足时可调小；显存
-        充裕时调大可以提速。
+    batch_size：透传给 alt_aligners._qwen3_load_asr_model() 的
+        max_inference_batch_size（默认 8，与该接口自身默认值一致）。
+        显存不足时可调小；显存充裕时调大可以提速。
+
+    【2026-08 起】Qwen3-ASR 已迁入本进程（.mfa_env）内本地加载，这里不再
+    通过 HTTP 调用独立的 qwen3_server.py，改为直接调用
+    alt_aligners._qwen3_load_asr_model() 拿到（惰性加载、跨调用复用的）
+    本地模型实例，逐块调用其 .transcribe()。显存不足时的自动降级（腰斩
+    batch_size → 整体切 CPU）逻辑与 alt_aligners.Qwen3ASRAligner 保持
+    一致，直接复用同一套模块级辅助函数，不再维护两份。
     """
-    import requests
+    from alt_aligners import (
+        _qwen3_load_asr_model,
+        _qwen3_normalize_segments,
+        _is_cuda_oom_or_env_error,
+        _safe_device,
+    )
+    import alt_aligners as _alt_aligners_mod
 
     segments = vad_split_segments(wav_path)
     if not segments:
         return []
 
     asr_lang = resolve_qwen3_language(language)
-    session = requests.Session()
+    device_override = _safe_device(device)
     tmp_root = Path(tmp_dir) if tmp_dir else Path(wav_path).parent / f"_subtitle_chunks_{uuid.uuid4().hex[:8]}"
     tmp_root.mkdir(parents=True, exist_ok=True)
 
     entries: List[SubtitleEntry] = []
     total = len(segments)
 
+    model = _qwen3_load_asr_model(device_override, batch_size)
+    if model is None:
+        raise RuntimeError("Qwen3-ASR 模型加载失败")
+
     try:
         for i, (seg_start, seg_end) in enumerate(segments):
             chunk_path = tmp_root / f"chunk_{i:05d}.wav"
             _slice_wav(wav_path, seg_start, seg_end, str(chunk_path))
 
-            payload = {
-                "audio": str(chunk_path.resolve()),
-                "language": asr_lang,
-                "context": "",
-                "device": device,
-                "batch_size": batch_size,
-            }
-            resp = session.post(endpoint, json=payload, timeout=600)
-            resp.raise_for_status()
-            data = resp.json()
-            if not data.get("success"):
-                logger.warning("字幕分块识别失败（第 %d 块）：%s", i, data.get("error"))
-                if progress_cb:
-                    progress_cb(i + 1, total)
-                continue
+            try:
+                result = model.transcribe(
+                    audio=str(chunk_path.resolve()),
+                    language=asr_lang,
+                    context="",
+                    return_time_stamps=True,
+                )
+            except Exception as e:
+                if not _is_cuda_oom_or_env_error(e):
+                    raise
+                logger.warning("字幕分块识别失败（第 %d 块，显存不足，自动降级重试）：%s", i, e)
+                try:
+                    import torch as _torch_oom
+                    if _torch_oom.cuda.is_available():
+                        _torch_oom.cuda.empty_cache()
+                except Exception:
+                    pass
+                retried_model = None
+                if _alt_aligners_mod._qwen3_asr_model_device != "cpu" and batch_size > 1:
+                    retried_model = _qwen3_load_asr_model(device_override, max(1, batch_size // 2))
+                if retried_model is None:
+                    retried_model = _qwen3_load_asr_model("cpu", 1)
+                if retried_model is None:
+                    logger.warning("字幕分块识别失败（第 %d 块）：显存不足自动降级后模型仍加载失败", i)
+                    if progress_cb:
+                        progress_cb(i + 1, total)
+                    continue
+                model = retried_model
+                try:
+                    result = model.transcribe(
+                        audio=str(chunk_path.resolve()),
+                        language=asr_lang,
+                        context="",
+                        return_time_stamps=True,
+                    )
+                except Exception as e2:
+                    logger.warning("字幕分块识别失败（第 %d 块）：%s", i, e2)
+                    if progress_cb:
+                        progress_cb(i + 1, total)
+                    continue
 
-            raw_segments = data.get("segments") or []
+            raw_segments = _qwen3_normalize_segments(result)
             block_text = "".join((s.get("text") or "") for s in raw_segments).strip()
             if not block_text:
                 if progress_cb:
                     progress_cb(i + 1, total)
                 continue
 
-            # 合并所有子 segment 的时间戳（qwen3_server 通常单块只返回一个
-            # segment，但保留多 segment 的兼容处理）。
+            # 合并所有子 segment 的时间戳（通常单块只返回一个 segment，
+            # 但保留多 segment 的兼容处理）。
             merged_ts: List[List[Optional[float]]] = []
             for s in raw_segments:
                 merged_ts.extend(s.get("time_stamps") or [])

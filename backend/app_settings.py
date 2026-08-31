@@ -6,19 +6,27 @@
 设计说明
 ────────
 【HF_HUB_OFFLINE / HF_ENDPOINT】
-这两个环境变量分别由四个各自独立的进程消费：
-  - app.py（经由其在模块顶层 import 的 alt_aligners.py）
-  - qwen3_server.py（独立 venv 子服务，端口 5001，Qwen3-ASR / Qwen3-FA）
-  - nemo_server.py（独立 venv 子服务，端口 5002，NeMo-FA）
-  - qwen3tts_server.py（独立 venv 子服务，端口 5003，Qwen3-TTS 跟读语音合成）
+这两个环境变量分别由三个各自独立的进程消费：
+  - app.py（经由其在模块顶层 import 的 alt_aligners.py——现在 Qwen3-ASR /
+    Qwen3-FA 也在这个进程内本地加载模型，同样消费这两个变量）
+  - whisperx_server.py（独立 venv 子服务，端口 5854，WhisperX）
+  - nemo_server.py（独立 venv 子服务，端口 5852，NeMo-FA）
+  - qwen3tts_server.py（独立 venv 子服务，端口 5853，Qwen3-TTS 跟读语音合成）
 
 四者都会在各自最早的时机（import huggingface_hub / transformers /
-qwen_asr / nemo / qwen_tts 之前）调用本模块的 apply_env_from_settings()，
+whisperx / nemo / qwen_tts 之前）调用本模块的 apply_env_from_settings()，
 从同一份 JSON 配置文件读取设置并写入 os.environ。这样设置页面只需要写
-一次文件，四个进程各自重启后即可生效——环境变量只在"进程启动时"读取
-一次，所以修改设置后必须重启对应进程（尤其是 Qwen3 / NeMo / Qwen3-TTS
-三个微服务）才能让新配置真正生效，这一点在设置页面的提示文案里需要向
-用户说清楚。
+一次文件，各进程各自重启后即可生效——环境变量只在"进程启动时"读取
+一次，所以修改设置后必须重启对应进程才能让新配置真正生效。
+
+【2026-08 起】WhisperX / NeMo / Qwen3-TTS 三个独立子服务仍可以通过各自
+的 /restart 路由自我重启来应用新设置（见 app.py 里的
+_restart_microservice()）；但 Qwen3-ASR / Qwen3-FA 已迁入主进程
+（app.py）内本地加载，主进程本身没有对应的自重启机制（它是
+launcher.py 拉起的顶层进程），因此保存新的模型下载设置后，Qwen3-ASR /
+Qwen3-FA 这两项要等下一次手动重启整个程序才会生效——这一点在设置页面
+的提示文案里需要向用户说清楚（与 WhisperX / NeMo / Qwen3-TTS 三者"保存
+后立即自动生效"的体验不同）。
 
 【对齐调优参数】
 与上面两个环境变量不同，以下这批参数只被 alt_aligners.py 消费，而
@@ -51,7 +59,7 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "mirror_url": "https://hf-mirror.com/",
 
     # 【2026-08 起，历史遗留字段，正常发布环境下不再有实际效果】
-    # 早期版本：True → 尝试隐藏 app.py / qwen3_server.py / qwen3tts_server.py /
+    # 早期版本：True → 尝试隐藏 app.py / whisperx_server.py / qwen3tts_server.py /
     # nemo_server.py 四个进程各自所在的命令提示符（终端）窗口；进程本身
     # 继续正常运行，只是窗口不可见。
     #
@@ -64,7 +72,7 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     # 底层句柄对任务栏毫无效果，所以改为从源头不创建窗口。
     #
     # 保留这个字段只是为了兼容旧版本写过的设置文件（避免加载报错）；仅在
-    # 有人直接用 `python app.py` / `python qwen3_server.py` 等命令在真实
+    # 有人直接用 `python app.py` / `python whisperx_server.py` 等命令在真实
     # 终端里手动调试时，apply_console_visibility() 仍会按这个值隐藏/显示
     # 那个真实终端窗口——但这不是 launcher.py 正常拉起服务的路径。设置
     # 页面的这个开关目前保留但已在提示文案里注明"当前版本已默认不显示，
@@ -72,18 +80,24 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "hide_console_window": False,
 
     # True  → 下次完整启动本应用（即重新打开 exe 启动器）时，不再自动拉起
-    #         qwen3_server.py / nemo_server.py 对应的那个微服务进程。
+    #         whisperx_server.py / nemo_server.py 对应的那个微服务进程。
     # False → 下次启动时正常拉起（默认）。
     # 与 hide_console_window 不同，这两项不会触发/也不需要触发任何"立即
     # 生效"的动作——它们只在下一次完整启动应用（即启动器重新拉起三个子
     # 进程）时被读取一次，对当前已经在运行的进程没有任何影响，保存设置
     # 本身也不会关闭正在运行的服务。具体的"跳过启动"逻辑在启动器
     # (launcher.py) 里实现：它在拉起子进程之前读取这两个字段。
-    "skip_start_qwen3_server": False,
+    #
+    # 【2026-08 起】Qwen3-ASR / Qwen3-ForcedAligner 已迁入 app.py 主进程
+    # 内本地加载，不再是可以单独跳过启动的独立微服务，因此
+    # skip_start_qwen3_server 已重命名为 skip_start_whisperx_server（原
+    # 字段名保留仅为兼容旧配置文件读取，见 save_settings() 里的迁移逻辑，
+    # 不再写回旧字段名）。
+    "skip_start_whisperx_server": False,
     "skip_start_nemo_server": False,
     "skip_start_qwen3tts_server": False,
 
-    # ── Qwen3-TTS（TTS跟读独立引擎，qwen3tts_server.py，端口 5003）────────
+    # ── Qwen3-TTS（TTS跟读独立引擎，qwen3tts_server.py，端口 5853）────────
     # 模型规模：1.7B 效果最好但显存需求更高；0.6B 更省显存/更快。
     # VoiceDesign（仅文本描述）目前只有 1.7B 权重，选择 0.6B 时该模式会
     # 自动回退到 1.7B（见 qwen3tts_server.py MODEL_IDS 说明）。
@@ -186,7 +200,7 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     #
     #   - Qwen3-ASR：直接透传给 qwen_asr.Qwen3ASRModel.from_pretrained(...)
     #     的 max_inference_batch_size（官方参数，限制模型内部单次推理的
-    #     最大批量，-1 为不限制）。qwen3_server.py 目前对 GPU 硬编码为 8，
+    #     最大批量，-1 为不限制）。原 qwen3_server.py 对 GPU 硬编码为 8，
     #     这里把它变成可调项；值越小，显存占用峰值越低。
     #   - Qwen3-ForcedAligner / NeMo Forced Aligner：两者服务端调用本身
     #     就是单音频单次前向，没有真正的"批"概念可调；这个值改为用作
@@ -298,6 +312,16 @@ def load_settings() -> Dict[str, object]:
                 data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
                 merged = dict(DEFAULT_SETTINGS)
                 if isinstance(data, dict):
+                    # 【2026-08 迁移】skip_start_qwen3_server 已重命名为
+                    # skip_start_whisperx_server（Qwen3-ASR/FA 迁入主进程
+                    # 后不再是可跳过启动的独立微服务，WhisperX 反过来变成
+                    # 了新的独立微服务）。旧配置文件里如果还带着旧字段名，
+                    # 这里读出它的值当作新字段的初始值，避免用户之前设置
+                    # 的"跳过启动"选择在这次架构调整后被静默丢弃——旧字段
+                    # 不在 DEFAULT_SETTINGS 里，下面 update() 时会被自动
+                    # 过滤掉，不会残留写回文件。
+                    if "skip_start_qwen3_server" in data and "skip_start_whisperx_server" not in data:
+                        merged["skip_start_whisperx_server"] = bool(data["skip_start_qwen3_server"])
                     merged.update({k: v for k, v in data.items() if k in DEFAULT_SETTINGS})
                 return merged
             except Exception as e:
@@ -317,7 +341,7 @@ def save_settings(new_settings: Dict[str, object]) -> Dict[str, object]:
         mirror_url = str(current.get("mirror_url") or "").strip()
         current["mirror_url"] = mirror_url or DEFAULT_SETTINGS["mirror_url"]
         current["hide_console_window"] = bool(current.get("hide_console_window"))
-        current["skip_start_qwen3_server"] = bool(current.get("skip_start_qwen3_server"))
+        current["skip_start_whisperx_server"] = bool(current.get("skip_start_whisperx_server"))
         current["skip_start_nemo_server"] = bool(current.get("skip_start_nemo_server"))
         current["skip_start_qwen3tts_server"] = bool(current.get("skip_start_qwen3tts_server"))
 
@@ -477,7 +501,7 @@ def apply_console_visibility() -> bool:
     显示或隐藏当前进程所在的命令提示符（控制台）窗口，取决于设置文件里
     hide_console_window 的当前值。
 
-    【2026-08 起，重要】launcher.py 正常拉起 app.py / qwen3_server.py /
+    【2026-08 起，重要】launcher.py 正常拉起 app.py / whisperx_server.py /
     qwen3tts_server.py / nemo_server.py 这四个服务时，已经改用
     CREATE_NO_WINDOW，从系统层面直接不为子进程分配任何控制台窗口——这种
     情况下本函数里的 GetConsoleWindow() 会返回空句柄，函数直接走
@@ -509,7 +533,7 @@ def apply_console_visibility() -> bool:
     调用时机（均为兼容手动调试场景保留，正常发布环境下是无操作）：
       - app.py：在 main() 启动时调用一次；另外在 /api/settings 保存设置
         时也会调用一次。
-      - qwen3_server.py / qwen3tts_server.py / nemo_server.py：在模块
+      - whisperx_server.py / qwen3tts_server.py / nemo_server.py：在模块
         导入阶段、紧跟 apply_env_from_settings() 之后调用一次。
 
     仅在 Windows 上有效（用到 kernel32 / user32 的 GetConsoleWindow /
@@ -674,17 +698,17 @@ def get_tts_split_options() -> Dict[str, object]:
 
 def get_qwen3_batch_size() -> int:
     """
-    供 alt_aligners.py（主进程内的 Qwen3ForcedAligner OOM 自动重试）以及
-    qwen3_server.py / nemo_server.py（各自独立进程）共用：实时读取
-    qwen3_batch_size 设置。
+    供 alt_aligners.py（主进程内的 Qwen3ASRAligner / Qwen3ForcedAligner，
+    现已在同一进程内本地加载模型）以及 nemo_server.py（独立进程）共用：
+    实时读取 qwen3_batch_size 设置。
 
     与 get_alignment_tuning() 使用的 mtime 缓存不同，这里同 whisperx 的
-    _get_whisperx_batch_size() 一样直接读盘——三个消费方里有两个
-    （qwen3_server.py / nemo_server.py）是独立子进程，各自的调用频率远低于
-    主进程的对齐热路径，没有必要为此额外维护一层跨进程都要生效的缓存；
-    直接读盘成本可忽略，且保证"设置页面保存后下一次任务立即生效"
-    （qwen3_server.py / nemo_server.py 每次 /asr 、/align 请求都会重新调用，
-    不需要重启这两个微服务）。
+    _get_whisperx_batch_size() 一样直接读盘——nemo_server.py 是独立子
+    进程，调用频率远低于主进程的对齐热路径，没有必要为此额外维护一层
+    跨进程都要生效的缓存；直接读盘成本可忽略，且保证"设置页面保存后
+    下一次任务立即生效"（nemo_server.py 每次 /align 请求都会重新调用，
+    不需要重启这个微服务；主进程内的 Qwen3-ASR/Qwen3-FA 同样每次调用时
+    实时读取，不需要重启整个程序）。
 
     读取失败或配置值非法时安全回退到默认值 8。
 

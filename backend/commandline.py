@@ -6,7 +6,7 @@ commandline.py — 命令行调用入口（不启动 HTTP 服务，单次执行�
 ────
 让 app.py 除了作为常驻 HTTP 服务被 launcher.py 拉起之外，还能被直接以
 命令行方式调用，一次性执行"标注提取 / 音高提取 / 工程文件生成 / 完整
-处理"其中一个操作，不启动 Flask 服务、不占用 5000 端口，跑完立即退出，
+处理"其中一个操作，不启动 Flask 服务、不占用 5850 端口，跑完立即退出，
 方便写批处理脚本或接入其它命令行工具链。
 
 用法（在 app.py 所在的 mfa_env 环境执行；打包后也可以直接
@@ -83,14 +83,10 @@ subtitle_processor.transcribe_to_subtitles()，识别完立即用
 subtitle_processor.export_subtitles() 把结果落盘成 SRT/LRC/TXT/LAB 文本
 文件。与「字幕跟读」（subtitle 子命令）的方向正好相反：字幕跟读是"已有
 文本字幕，只是没有精确时间轴，靠强制对齐补上时间轴"；asr-subtitle 是
-"什么都没有，靠 Qwen3-ASR 从音频里识别出文本 + 时间轴"。此操作固定依赖
-qwen3_server.py 已经在运行（通过 HTTP 调用 127.0.0.1:5001/asr，没有像
-mfa-only 默认后端那样的"本地直接跑、不需要额外微服务"选项），命令行下
-不会像界面模式那样自动拉起该微服务，需要用户自己确保它已启动（正常
-双击启动器.exe 的界面模式就会自动拉起，命令行模式默认不做任何服务
-生命周期管理，见 __init__.py 顶部关于"不重新实现业务逻辑"的说明）。不
-提供网页版「字幕编辑器」里手动拆分/内嵌字幕进视频等交互式编辑功能，
-只覆盖"识别 → 导出文本文件"这条最核心的链路。
+"什么都没有，靠 Qwen3-ASR 从音频里识别出文本 + 时间轴"。【2026-08 起】
+Qwen3-ASR 已迁入 .mfa_env 主进程内本地加载（不再是需要额外拉起的独立
+微服务），此操作与 mfa-only 默认后端一样"本地直接跑，不需要额外微
+服务"，命令行下开箱即用，不需要用户额外启动任何进程。
 
 dict-edit（词典编辑）对应网页版「单词映射音素词典管理」页面里"新增/
 编辑/删除单个词条"以及词典本身的新建/删除/改名这几个操作，与
@@ -589,8 +585,8 @@ class CmdUI:
         # 与 subtitle 子命令方向相反：subtitle 是"已有文本字幕，靠强制
         # 对齐补时间轴"；这里是"什么都没有，靠 Qwen3-ASR 从音频/视频里
         # 识别出文本 + 时间轴"，对应网页版「字幕」页面的识别 + 导出。
-        # 固定依赖 qwen3_server.py 已经在运行（见模块顶部说明），命令行
-        # 下不会替用户拉起它。
+        # 【2026-08 起】Qwen3-ASR 已迁入 .mfa_env 主进程内本地加载，本
+        # 命令开箱即用，不需要额外启动独立微服务。
         p = sub.add_parser("asr-subtitle", aliases=["asr", "subtitle-recognize"],
                             help="用 Qwen3-ASR 识别音频/视频里的语音，导出字幕文本文件",
                             parents=[json_flag_parent])
@@ -598,7 +594,7 @@ class CmdUI:
         p.add_argument("-l", "--language", default="auto",
                         help='语言代码，默认 "auto"（自动检测），常见取值: zh/en/ja/ko/fr/de/es/ru 等 '
                              "(完整列表见 subtitle_processor.resolve_qwen3_language())")
-        p.add_argument("--device", default="auto", choices=F0_DEVICES, help="转发给 qwen3_server.py 的运行设备")
+        p.add_argument("--device", default="auto", choices=F0_DEVICES, help="Qwen3-ASR 本地推理使用的运行设备")
         p.add_argument("--batch-size", type=int, default=8, help="Qwen3-ASR 推理批大小")
         p.add_argument("--max-chars", type=int, default=None,
                         help="单条字幕最大字符数，超过则按标点二次拆分（不传则用 subtitle_processor 内置默认值）")
@@ -1058,10 +1054,10 @@ class CmdUI:
         """
         字幕识别：等价于网页版 /api/subtitle/recognize + /api/subtitle/export
         背后的逻辑，去掉 Thread/Job 轮询包装、以及"前端持有 entries 再传
-        回来导出"的中间步骤——识别完立即导出成文件。固定依赖
-        qwen3_server.py 已经在运行（见模块顶部说明），命令行下不会替
-        用户拉起它，未启动时这里会先检测到并给出明确报错，而不是让请求
-        卡住等超时。
+        回来导出"的中间步骤——识别完立即导出成文件。【2026-08 起】
+        Qwen3-ASR 已迁入 .mfa_env 主进程内本地加载，开箱即用；这里仍先
+        检测一次 qwen_asr 包是否已正确安装，未安装时给出明确报错，而不
+        是让首次调用时才报出一个不易理解的 ImportError。
         """
         if not os.path.exists(args.audio):
             raise ValueError(f"音频/视频文件不存在: {args.audio}")
@@ -1074,8 +1070,8 @@ class CmdUI:
         qwen_ok, qwen_msg = Qwen3ASRAligner.check_available()
         if not qwen_ok:
             raise ValueError(
-                f"Qwen3-ASR 服务不可用: {qwen_msg}（字幕识别固定依赖 qwen3_server.py，"
-                f"请确认它已经启动——正常双击启动器.exe 的界面模式会自动拉起，命令行模式不会替你启动）"
+                f"Qwen3-ASR 不可用: {qwen_msg}（请确认已在 .mfa_env 里执行"
+                f" pip install -r requirements.txt 安装 qwen-asr）"
             )
 
         src_path = Path(args.audio)

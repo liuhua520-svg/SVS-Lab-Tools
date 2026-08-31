@@ -1,66 +1,16 @@
-# requirements-qwen3.txt
-# qwen3_server.py 独立服务依赖（不要装进主 .mfa_env，也不要和 nemo_env 共用！）
+# requirements-qwen3.txt — 已废弃（2026-08）
 #
-# 用法：
-#   conda create --prefix ./.qwen3_env python=3.10 -y
-#   conda activate ./.qwen3_env
-#   pip install -r requirements-qwen3.txt
-#   python qwen3_server.py
+# 【2026-08 架构调整】qwen3_server.py 独立服务已下线。Qwen3-ASR /
+# Qwen3-ForcedAligner（qwen-asr 包）现在直接安装进主环境 .mfa_env
+# （见 requirements.txt 里的 "Qwen3-ASR / Qwen3-ForcedAligner" 一节），
+# 在 app.py 进程内本地加载，不再需要一个独立的 .qwen3_env。
 #
-# 说明：
-#   这是 Qwen3-ASR-1.7B / Qwen3-ForcedAligner-0.6B 跑在独立进程里所需的
-#   全部依赖。主 Flask 应用（app.py 所在的 .mfa_env）只通过 HTTP 调用
-#   127.0.0.1:5001，完全不需要装 qwen-asr / transformers 这一套。
-
-# 【修复】原先 --index-url 写在文件末尾 torch 那三行旁边，但 pip 对
-# requirements 文件里的 --index-url 是"全局生效"的（不是只作用于它下面
-# 紧挨着的那几行），一旦出现就会把默认的 PyPI 源整个替换掉，导致同一个
-# 文件里的 flask / qwen-asr / transformers 等其它包全部只在
-# download.pytorch.org/whl/cpu 这个只托管 PyTorch 系列 wheel 的索引里
-# 找，自然全部报 "Could not find a version that satisfies the
-# requirement flask==2.3.3 (from versions: none)"。改为 --extra-index-url
-# 并放在文件顶部：它是"追加"而不是"替换"默认源，PyPI 上的包正常从 PyPI
-# 装，torch 系列在 PyPI 找不到时会额外去 PyTorch 官方索引找，与
-# requirements.txt / requirements-nemo.txt 两个文件的写法保持一致。
---extra-index-url https://download.pytorch.org/whl/cpu
-
-# ====================== 服务框架 ======================
-flask==2.3.3
-
-# ====================== Qwen3-ASR / ForcedAligner ======================
-# 【修复】原先是 qwen-asr>=1.0.0——但 qwen-asr 在 PyPI 上从未发布到
-# 1.0.0（截至本次核对最新版本是 0.0.6），这个版本条件永远无法被满足，
-# 会导致 pip 报 "No matching distribution found for qwen-asr>=1.0.0"。
-# 改为不锁版本，直接安装当前最新的 0.0.6。
-qwen-asr==0.0.6
-# qwen-asr 自身在 PyPI 上精确锁定了 transformers==4.57.6 /
-# accelerate==1.12.0（见其 requires_dist），下面两行的宽松下限不会与
-# 之冲突，pip 解析时最终会以 qwen-asr 的精确锁定版本为准；这里保留
-# 宽松下限只是为了在 qwen-asr 未来放宽自己的锁定范围时仍有一个基本
-# 版本保障，不需要跟着精确改动。
-transformers==4.57.6
-accelerate==1.12.0
-# ====================== 基础数值库 ======================
-numpy==1.26.4
-
-# ====================== 音频处理 ======================
-soundfile==0.12.1
-
-# ====================== 网络与其他基础库 ======================
-requests
-tqdm
-
-# ====================== PyTorch (根据硬件三选一，与主项目一致) ======================
-# 注意：CUDA 版 wheel（+cu121 / +cu118）不在 PyPI 默认源上，只在文件顶部
-# 那行 --extra-index-url 指向的 PyTorch 官方索引里，若切换到 GPU 选项，
-# 顶部的 --extra-index-url 那一行必须保留（不要删掉），否则会重新出现
-# "Could not find a version that satisfies the requirement torch==2.3.1+cu121"。
-
-# CUDA 12.1（用于 RTX 30/40 系等现代显卡）
-# torch==2.3.1+cu121
-
-# CUDA 11.8（旧版显卡保留选项，如 GTX10系显卡 等 Pascal 架构）
-# torch==2.3.1+cu118
-
-# CPU Only（推荐，无显卡；默认激活）
-torch==2.3.1+cpu
+# WhisperX 反过来迁出为独立服务 whisperx_server.py（.whisperx_env），
+# 依赖见 requirements-whisperx.txt。
+#
+# 如果你的发布目录下还有旧的 runtime/qwen3_env（或 .qwen3_env）目录、
+# 或者 launcher.py 的 SERVICES 列表里还残留旧的 "qwen3" 条目，可以直接
+# 删除，不再需要。
+#
+# 保留这个文件本身只是为了避免任何仍然引用 "requirements-qwen3.txt"
+# 这个文件名的旧脚本/文档在文件缺失时报错；这里不再列出任何依赖。

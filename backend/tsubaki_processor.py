@@ -48,6 +48,25 @@ class LabelSegment:
     # 单独元音 / ん・ン・N / っ・ッ / 静音段没有辅音起始 → 保持 None，
     # 届时 VSQX <p> 字段留空，交给 VOCALOID 自带 G2P 处理。
     devoiced_phoneme: Optional[str] = None
+    # 可选：该段落"元音自己的真实起始时间"（100ns 单位）。
+    #
+    # 【发音提前问题】当 phoneme_mode（合并辅音/平假名/片假名）把辅音+元音
+    # 合并成一个段落时，段落自身的 start_time 会变成"辅音开始的时刻"，而
+    # 不是元音真正开始发声的时刻——如果下游直接拿 start_time 当 SVP/VSQX
+    # 音符方块的 onset，音符方块会被整体拉早，导致合成引擎提前触发发音。
+    #
+    # note_onset 由 apply_phoneme_mode(..., with_note_onset=True) /
+    # phoneme_converter.build_ja_merged_lab(..., with_note_onset=True) 计算
+    # 并填充，表示这个合并音节里元音自己的起始时间；构建 SVP/VSQX 音符时
+    # 应使用 note_onset 作为音符方块的 onset（而不是 start_time），并把
+    # [start_time, note_onset) 这段被合并掉的辅音时长追加到时间轴上前一个
+    # 音符的 duration 上——这正是 koharu-label 项目 margeConsonantNote()
+    # 的做法：音符方块锚定在元音自己的时刻，辅音只通过 phonemes 字段告知
+    # 合成引擎，不移动音符方块本身。
+    #
+    # 为 None 时表示"未合并/尚未计算"，此时应退回使用 start_time 本身
+    # （即行为与合并前完全一致，向后兼容）。
+    note_onset: Optional[int] = None
 
 
 @dataclass
@@ -190,6 +209,167 @@ def _split_lyrics_to_words(text: str) -> List[str]:
             i = j
 
     return result
+
+
+class TempoMap:
+    """
+    分段恒定 tempo 的秒→musical time（blicks / ticks）换算器。
+
+    背景
+    ────
+    SVP 的 blick、USTX/VSQX 的 tick 都是"musical time"，不是秒的固定倍数：
+    每个 tempo 事件之间是恒定 BPM，跨越 tempo 事件时换算比例会变——这与
+    Synthesizer V 官方脚本手册对 TimeAxis 的描述一致（tempo mark 存
+    position + 生效 bpm，seconds↔blicks 换算按当前生效的 tempo 分段进行），
+    OpenUtau/VOCALOID 的 tick 同理。
+
+    此前代码对整份工程只用一个全局常数 BPM 做线性换算
+    （blicks = seconds * bpm * 705600000/60），这在音源 MIDI 本身带有
+    tempo 变化时是错的：音符时间戳仍会按秒正确统计（见
+    midi_processor.parse_midi_notes_with_lyrics 对 tempo 变化的处理），
+    但换算成 blicks/ticks 写入工程文件时全部被压扁成一个恒定速度，导致
+    换算过 tempo 变化点之后的音符/音高曲线整体错位。
+
+    用法
+    ────
+    没有 MIDI tempo 变化（tempo_events 为 None 或只有一段）时，
+    seconds_to_blicks/seconds_to_ticks 与旧的线性公式完全等价，纯 LAB /
+    无 MIDI 场景行为不受影响。
+    """
+
+    __slots__ = ("_bpms", "_bounds_sec", "_bounds_musical")
+
+    def __init__(self, tempo_events: Optional[List[Tuple[float, float]]] = None,
+                 default_bpm: float = 120.0):
+        """
+        Parameters
+        ----------
+        tempo_events : list of (position_sec, bpm)，必须按 position_sec
+            升序排列（调用方——通常是 midi_processor 的 MidiTempoEvent
+            列表——已保证这一点）。第一个事件的 position_sec 通常为 0；
+            若不为 0，会在其前方自动补一段 default_bpm。
+        default_bpm : 当 tempo_events 为空或 None 时使用的恒定 BPM。
+        """
+        events = list(tempo_events) if tempo_events else []
+        if not events:
+            events = [(0.0, float(default_bpm))]
+        elif events[0][0] > 1e-9:
+            events = [(0.0, float(default_bpm))] + events
+
+        # 按位置合并同点/相邻同 BPM 事件，保证 position 严格递增
+        merged: List[Tuple[float, float]] = []
+        for pos, bpm in events:
+            pos = float(pos)
+            bpm = float(bpm) if bpm and bpm > 0 else float(default_bpm)
+            if merged and pos <= merged[-1][0] + 1e-9:
+                merged[-1] = (merged[-1][0], bpm)
+                continue
+            merged.append((pos, bpm))
+
+        self._bpms: List[float] = [b for _, b in merged]
+        self._bounds_sec: List[float] = [p for p, _ in merged]
+
+        # 预计算每个分段起点对应的 musical time（quarters），供分段换算叠加
+        quarters = [0.0]
+        for i in range(1, len(merged)):
+            prev_pos_sec, prev_bpm = merged[i - 1]
+            cur_pos_sec, _ = merged[i]
+            dt = max(0.0, cur_pos_sec - prev_pos_sec)
+            quarters.append(quarters[-1] + dt * (prev_bpm / 60.0))
+        self._bounds_musical: List[float] = quarters
+
+    @property
+    def is_constant(self) -> bool:
+        """是否只有单一恒定 BPM（无 MIDI tempo 变化时为真）。"""
+        return len(self._bpms) <= 1
+
+    @property
+    def initial_bpm(self) -> float:
+        return self._bpms[0]
+
+    def seconds_to_quarters(self, sec: float) -> float:
+        """秒 → 拍数（quarters），按分段 tempo 累加换算。"""
+        sec = float(sec)
+        # 找到 sec 所属的分段（bisect，_bounds_sec 严格递增）
+        lo, hi = 0, len(self._bounds_sec) - 1
+        idx = 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if self._bounds_sec[mid] <= sec:
+                idx = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        seg_start_sec = self._bounds_sec[idx]
+        seg_bpm = self._bpms[idx]
+        seg_start_q = self._bounds_musical[idx]
+        return seg_start_q + max(0.0, sec - seg_start_sec) * (seg_bpm / 60.0)
+
+    def seconds_to_blicks(self, sec: float) -> int:
+        """秒 → SVP blicks（1 quarter = 705600000 blicks）。"""
+        return int(round(self.seconds_to_quarters(sec) * 705600000))
+
+    def seconds_to_ticks(self, sec: float, resolution: int = 480) -> int:
+        """秒 → USTX/VSQX tick（1 quarter = resolution ticks，通常 480）。"""
+        return int(round(self.seconds_to_quarters(sec) * resolution))
+
+    def to_svp_tempo_array(self) -> List[Dict]:
+        """生成 SVP time.tempo 数组：[{"position": blicks, "bpm": bpm}, ...]。"""
+        return [
+            {"position": int(round(q * 705600000)), "bpm": bpm}
+            for q, bpm in zip(self._bounds_musical, self._bpms)
+        ]
+
+    def to_ustx_tempo_array(self, resolution: int = 480) -> List[Dict]:
+        """生成 USTX tempos 数组：[{"position": tick, "bpm": bpm}, ...]。"""
+        return [
+            {"position": int(round(q * resolution)), "bpm": bpm}
+            for q, bpm in zip(self._bounds_musical, self._bpms)
+        ]
+
+    def to_vsqx_tempo_xml(self, resolution: int = 480, tick_offset: int = 0) -> str:
+        """
+        生成 VSQX <tempo> 标签序列（按顺序拼接，供写入 <masterTrack>）。
+
+        tick_offset : masterTrack 的 <tempo><t> 是"项目绝对 tick"（从 0 开始，
+            含 VOCALOID 强制的 preMeasure 空白小节），而 tempo_map 内部换算
+            用的是"MIDI 自身时间零点"（MIDI 音符/歌词事件从秒 0 开始，不知
+            道、也不该知道 VOCALOID 的 preMeasure 概念）。
+
+            单音轨 (_build_vsqx_project_text) 场景下，vsPart 固定挂在
+            t_start=_VSQX_PART_OFFSET（默认 1920，即 preMeasure=1 的 4/4
+            一整小节），note/cc 的 <t> 是相对 vsPart 起点的偏移量，二者相加
+            才是绝对 tick——但 <tempo> 标签没有"相对 vsPart"这一层，只能
+            直接写绝对 tick。如果不加这个偏移量，MIDI 里"1.5 秒处发生的
+            tempo 变化"会被写到项目绝对 tick 1440（仍落在 preMeasure 空白小
+            节内），比实际音符所在的位置（tick 1920 起）整整提前了一小节，
+            播放时听感对不上、TRACK EDITOR 里 TEMPO 行的变化点也会显示在
+            音符开始之前的空白小节里。
+
+            调用方必须传入与该次调用里 note/cc 换算时使用的 t_start 一致的
+            值（当前单文件场景固定是 _VSQX_PART_OFFSET；未来如果 tempo_map
+            也被接入 sequenced 多音轨场景，这里要传对应 vsPart 的 t_start，
+            而不是想当然地用 _VSQX_PART_OFFSET）。默认 0 是为了不影响其它
+            调用方（如果将来有调用方确实想要 tempo 从项目绝对 0 开始）。
+
+            第一条 tempo 事件（tempo_map 保证一定存在、位于 quarters=0，见
+            __init__ 里"保证时间轴从 0 秒开始就有一个生效的 tempo"）例外，
+            始终固定写在绝对 tick 0，不加 tick_offset：VOCALOID 的
+            preMeasure 空白小节本身仍然需要一个生效中的初始 tempo（作为
+            "项目初始速度"），且这与实际手工创建的 VSQX 工程一致——参考
+            工程文件（VOCALOID Editor 中手工制作）里第一条 <tempo> 恒为
+            <t>0</t>，后续变化点的 tick 才是"已经算上 preMeasure 偏移"的
+            绝对值。只把 tick_offset 加到第一条之后的事件上，才能同时满足
+            "preMeasure 有初始 tempo" 和 "tempo 变化点与音符位置对齐"两点。
+        """
+        lines = []
+        for i, (q, bpm) in enumerate(zip(self._bounds_musical, self._bpms)):
+            tick = int(round(q * resolution))
+            if i > 0:
+                tick += tick_offset
+            tempo_v = int(round(bpm * 100))
+            lines.append(f'\t\t<tempo><t>{tick}</t><v>{tempo_v}</v></tempo>\n')
+        return "".join(lines)
 
 
 class TsubakiProcessor:
@@ -498,6 +678,7 @@ class TsubakiProcessor:
                     end_time=seg.end_time,
                     label=prev.label,
                     devoiced_phoneme=getattr(prev, "devoiced_phoneme", None),
+                    note_onset=getattr(prev, "note_onset", None),
                 )
                 filled_count += 1
                 continue
@@ -512,6 +693,115 @@ class TsubakiProcessor:
                 max_blicks / _BLICKS_PER_SECOND,
                 config.bpm,
             )
+
+        return result
+
+    def _apply_note_onset_correction(
+        self, segments: List[LabelSegment]
+    ) -> List[LabelSegment]:
+        """
+        修正"合并辅音"导致的发音提前问题（SVP / USTX / VSQX 通用）。
+
+        背景
+        ────
+        phoneme_mode（合并辅音/平假名/片假名）把 LAB 里独立的辅音段和
+        元音段合并成一个音节段落时，段落自身的 start_time 变成了"辅音
+        开始的时刻"，而不是元音真正开始发声的时刻。build_ja_merged_lab()
+        / apply_phoneme_mode(..., with_note_onset=True) 已经把"元音自己
+        的真实起始时间"算出来、放进了 LabelSegment.note_onset 字段，但
+        如果下游直接拿 start_time 当音符方块的 onset，音符方块会被整体
+        拉早，导致合成引擎（SynthesizerV / OpenUtau / VOCALOID）提前
+        触发发音——这正是"发音靠前"问题的成因。
+
+        参考实现：koharu-label 项目 svp-file.ts 的 margeConsonantNote()。
+        它的做法不是把合并后音符的 onset 往前挪到辅音开始的时刻，而是：
+        · 合并后的音符方块仍然锚定在元音自己的起始时刻；
+        · 辅音占用的时间段改为"追加"到时间轴上前一个音符的 duration 上
+          （即让前一个音符的尾部拉长、过渡到当前元音）；
+        · 辅音本身只通过 phonemes/<p> 字段告诉合成引擎"这个音节带有这个
+          辅音"，不移动音符方块本身。
+
+        本方法对 segments 做同样的时间轴调整，调整后的结果可以被
+        _build_svp_track_payload / _build_ustx_track_payload /
+        _build_vsqx_part_xml 三个格式的音符构建逻辑直接消费——三者都只
+        读取 seg.start_time / seg.end_time，不需要再各自处理
+        note_onset，从而保证 SVP、USTX、VSQX 三种输出格式的发音提前
+        问题被同一处逻辑一次性修复，不会出现三种格式各自修一半、行为
+        不一致的情况。
+
+        算法
+        ────
+        按时间顺序遍历 segments（静音段——sil/pau/sp 等——不参与吸收，
+        因为它们本来就不会生成可见音符，是时间轴上的物理空白）：
+        · 若某段落的 note_onset 存在且晚于 start_time，说明它是一个
+          合并了辅音的音节，[start_time, note_onset) 是被合并掉的辅音
+          时长；
+        · 该辅音时长优先"追加"给时间顺序上真正相邻（start_time 与前一个
+          已产出段落的 end_time 严丝合缝相接）的前一个非静音段落的
+          end_time；
+        · 若不存在这样的前一个段落（例如这是整条时间轴上第一个段落，
+          或前一个段落是静音段——中间隔着物理空白，没有"前一个音符"
+          可供延长），则退回原始行为：直接把该段落自身的 start_time
+          提前到 note_onset，与旧逻辑等价，不产生断音或异常间隙。
+
+        不修改传入的 segments 列表本身以外的对象（与 _fill_short_rests
+        风格一致），返回一份新列表。
+        """
+        if not segments:
+            return segments
+
+        result: List[LabelSegment] = []
+        # 上一个"非静音"段落在 result 中的下标（用于吸收辅音时长），
+        # 静音段落会被追加进 result（保持时间轴完整）但不作为吸收目标。
+        prev_voiced_idx: Optional[int] = None
+
+        for seg in segments:
+            note_onset = getattr(seg, "note_onset", None)
+            is_silence = self._is_true_silence(seg.label)
+
+            if (
+                note_onset is not None
+                and note_onset > seg.start_time
+                and note_onset < seg.end_time
+                and not is_silence
+            ):
+                absorbed = note_onset - seg.start_time
+                prev = result[prev_voiced_idx] if prev_voiced_idx is not None else None
+                if prev is not None and prev.end_time == seg.start_time:
+                    # 前一个音符时间上真正相邻 → 延长它的 end_time 来
+                    # "吸收"这段辅音时长，当前段落的音符方块则锚定在
+                    # 元音自己的起始时刻（note_onset）。
+                    result[prev_voiced_idx] = LabelSegment(
+                        start_time=prev.start_time,
+                        end_time=prev.end_time + absorbed,
+                        label=prev.label,
+                        devoiced_phoneme=getattr(prev, "devoiced_phoneme", None),
+                        note_onset=getattr(prev, "note_onset", None),
+                    )
+                    new_seg = LabelSegment(
+                        start_time=note_onset,
+                        end_time=seg.end_time,
+                        label=seg.label,
+                        devoiced_phoneme=getattr(seg, "devoiced_phoneme", None),
+                        note_onset=note_onset,
+                    )
+                else:
+                    # 没有可供延长的相邻前驱（时间轴起点，或前面是静音
+                    # 间隙）→ 退回旧行为：直接把该段落起点提前到
+                    # note_onset，避免产生新的空隙或断音。
+                    new_seg = LabelSegment(
+                        start_time=note_onset,
+                        end_time=seg.end_time,
+                        label=seg.label,
+                        devoiced_phoneme=getattr(seg, "devoiced_phoneme", None),
+                        note_onset=note_onset,
+                    )
+                result.append(new_seg)
+            else:
+                result.append(seg)
+
+            if not is_silence:
+                prev_voiced_idx = len(result) - 1
 
         return result
 
@@ -969,7 +1259,7 @@ class TsubakiProcessor:
                 "导致的底层崩溃（Access Violation / 栈溢出），并非本次"
                 "音频或参考文本内容本身的问题。建议：① 尝试切换到 "
                 "CREPE 或 RMVPE 提取 F0（不依赖 pyworld 原生扩展）；"
-                "② 检查 .mfa_env 内 pyworld 与其它原生扩展包（如 "
+                "② 检查 .app_env 内 pyworld 与其它原生扩展包（如 "
                 "opencc、ctranslate2 等）是否存在版本冲突，必要时重建"
                 "虚拟环境。"
             )
@@ -1171,6 +1461,7 @@ class TsubakiProcessor:
         language: str = "",
         native_english_words: Optional[set] = None,
         dict_source: str = "default",
+        tempo_map: Optional["TempoMap"] = None,
     ) -> Tuple[List[Dict], List[float]]:
         """
         构建单条音轨的 notes 列表 + pitchDelta points（float cents）。
@@ -1178,6 +1469,11 @@ class TsubakiProcessor:
         供单音轨 (_build_svp_project_text) 与多音轨
         (build_svp_project_text_multitrack，对话文本框批量处理功能) 共用，
         避免逻辑重复导致行为不一致。
+
+        tempo_map : 可选。提供时（仅单文件 MFAProcessor.vue 导入 MIDI 且该
+            MIDI 含 tempo 变化时会传入），按 MIDI 原始的分段 tempo 正确换算
+            秒→blicks；未提供时退回旧的 config.bpm 恒定换算（与此前行为
+            完全一致，不影响纯 LAB / 无 MIDI 场景）。
 
         Returns
         -------
@@ -1191,7 +1487,11 @@ class TsubakiProcessor:
         #   sil / pau / sp     → 转换为 '-' dash 音符（填充间隙，使时间轴连续）
         #   其他（hai, da ...） → 保留
 
-        offset_ratio = config.bpm * 705600000 / 60
+        _tempo_map = tempo_map or TempoMap(None, default_bpm=config.bpm)
+        offset_ratio = config.bpm * 705600000 / 60  # 仍用于恒定 tempo 场景（未变化）
+
+        def _sec_to_blicks(sec: float) -> int:
+            return _tempo_map.seconds_to_blicks(sec)
 
         all_notes: List[Dict] = []
         voiced_refs: List[Dict] = []
@@ -1200,9 +1500,10 @@ class TsubakiProcessor:
             if seg.end_time <= seg.start_time:
                 continue
 
-            # 后续的重构公式保持不变
-            onset = int(seg.start_time * offset_ratio / 10000000)
-            end_offset = int(seg.end_time * offset_ratio / 10000000)
+            # 后续的重构公式保持不变（恒定 tempo 时与旧公式完全等价；
+            # 有 MIDI tempo 变化时改为按分段 tempo 正确换算，见 TempoMap）
+            onset = _sec_to_blicks(self._lab_time_to_seconds(seg.start_time))
+            end_offset = _sec_to_blicks(self._lab_time_to_seconds(seg.end_time))
             dur = max(1, end_offset - onset)
 
             # 【修改点】如果是 lab 里的显式静音标签（sil/pau/sp），直接跳过不生成音符，使其在 SVP 中保持物理空白
@@ -1370,7 +1671,7 @@ class TsubakiProcessor:
                 voiced_sample_count += 1
 
                 # 音频时间（秒）→ SV blick 轴
-                pos = int(float(ti) * offset_ratio)
+                pos = _sec_to_blicks(float(ti))
 
                 nominal_tone = base_tone
                 for vn in voiced_refs:
@@ -1411,6 +1712,7 @@ class TsubakiProcessor:
         language: str = "",                   # 语种（用于 word_phoneme_map 防误判）
         native_english_words: Optional[set] = None,  # 从原始文本预提取的英语单词集合（防拼音误判）
         dict_source: str = "default",         # 单词→音素词典来源："default"/"synthesizerv"/"vocaloid"
+        midi_tempo_changes: Optional[List] = None,  # MIDI 导入：List[MidiTempoEvent]，含 tempo 变化时传入
     ) -> str:
         """
         生成可被 Synthesizer V 正确识别的 SVP JSON 文本（单音轨）。
@@ -1431,6 +1733,12 @@ class TsubakiProcessor:
 
         5. time 结构去除 version 7 格式的顶层 bpm 字段，改为 version 119 格式。
 
+        6. midi_tempo_changes 提供且含多段 tempo 时（导入的 MIDI 本身有曲速
+           变化），time.tempo 会写入完整的多段 tempo 数组（与音符/音高曲线
+           换算共用同一份 TempoMap），而不是把整条时间轴压扁成单一 BPM——
+           否则曲速变化点之后的所有音符/音高都会整体错位。未提供或只有单
+           段时，行为与此前完全一致（time.tempo 仍是一条 config.bpm）。
+
         实际的音符 / 音高曲线构建逻辑已提取到 _build_svp_track_payload()，
         与对话文本框批量处理功能的多音轨生成器共用，本方法只负责组装
         单音轨的 library/tracks JSON 结构。
@@ -1439,6 +1747,10 @@ class TsubakiProcessor:
             audio_duration_sec = 0.0
 
         import uuid
+
+        tempo_map = None
+        if midi_tempo_changes and len(midi_tempo_changes) > 1:
+            tempo_map = TempoMap([(ev.position_sec, ev.bpm) for ev in midi_tempo_changes])
 
         all_notes, pitch_data = self._build_svp_track_payload(
             segments=segments,
@@ -1450,6 +1762,7 @@ class TsubakiProcessor:
             language=language,
             native_english_words=native_english_words,
             dict_source=dict_source,
+            tempo_map=tempo_map,
         )
 
         # ── 组装 JSON ─────────────────────────────────────────────────
@@ -1482,11 +1795,16 @@ class TsubakiProcessor:
             "notes":      [],
         }
 
+        svp_tempo_array = (
+            tempo_map.to_svp_tempo_array() if tempo_map is not None
+            else [{"position": 0, "bpm": float(config.bpm)}]
+        )
+
         project = {
             "version": 119,
             "time": {
                 "meter": [{"index": 0, "numerator": 4, "denominator": 4}],
-                "tempo": [{"position": 0, "bpm": float(config.bpm)}],
+                "tempo": svp_tempo_array,
             },
             "library": [library_group],
             "tracks": [
@@ -1813,6 +2131,7 @@ class TsubakiProcessor:
         t: Optional[np.ndarray],
         config: AudioProcessingConfig,
         midi_notes: Optional[List] = None,   # MIDI 导入：(start_sec, end_sec, pitch) 列表
+        tempo_map: Optional["TempoMap"] = None,
     ) -> Tuple[List[Dict], List[Dict], int]:
         """
         构建单条 USTX 音轨所需的 notes / curves(pitd) / voice_duration。
@@ -1846,7 +2165,10 @@ class TsubakiProcessor:
         (notes, curves, voice_duration)
         """
         resolution    = 480
-        ticks_per_sec = (float(config.bpm) / 60.0) * resolution
+        _tempo_map = tempo_map or TempoMap(None, default_bpm=config.bpm)
+
+        def _sec_to_tick(sec: float) -> int:
+            return _tempo_map.seconds_to_ticks(sec, resolution)
 
         # ── 工具：默认 pitch 过渡曲线（两端锚点，不携带 F0 数据） ───────────
         def make_default_pitch():
@@ -1878,8 +2200,8 @@ class TsubakiProcessor:
             if end_sec <= start_sec:
                 continue
 
-            pos      = int(round(start_sec * ticks_per_sec))
-            end_pos  = int(round(end_sec   * ticks_per_sec))
+            pos      = _sec_to_tick(start_sec)
+            end_pos  = _sec_to_tick(end_sec)
             dur_tick = max(1, end_pos - pos)
 
             tone = int(config.base_pitch)
@@ -1949,7 +2271,7 @@ class TsubakiProcessor:
             for ti, f0i in zip(t, f0):
                 if f0i <= 0.0:
                     continue
-                tick    = int(round(float(ti) * ticks_per_sec))
+                tick    = _sec_to_tick(float(ti))
                 midi_f0 = 69.0 + 12.0 * np.log2(float(f0i) / 440.0)
 
                 # 找该 tick 所属音符的 tone（二分查找，O(log n)）
@@ -1980,15 +2302,27 @@ class TsubakiProcessor:
         config: AudioProcessingConfig,
         audio_duration_sec: Optional[float] = None,
         midi_notes: Optional[List] = None,   # MIDI 导入：(start_sec, end_sec, pitch) 列表
+        midi_tempo_changes: Optional[List] = None,  # MIDI 导入：List[MidiTempoEvent]，含 tempo 变化时传入
     ) -> str:
-        """生成单音轨 USTX 工程文件内容（音符/曲线计算见 _build_ustx_track_payload）。"""
+        """生成单音轨 USTX 工程文件内容（音符/曲线计算见 _build_ustx_track_payload）。
+
+        midi_tempo_changes 提供且含多段 tempo 时，tempos 数组会写入完整的
+        多段 tempo（与 _build_svp_project_text 的 midi_tempo_changes 处理
+        方式一致），音符/曲线换算共用同一份 TempoMap；未提供或只有单段时，
+        行为与此前完全一致（tempos 仍只有一条 config.bpm）。
+        """
         from ruamel.yaml import YAML
         from io import StringIO
 
         resolution = 480
 
+        tempo_map = None
+        if midi_tempo_changes and len(midi_tempo_changes) > 1:
+            tempo_map = TempoMap([(ev.position_sec, ev.bpm) for ev in midi_tempo_changes])
+
         notes, curves, voice_duration = self._build_ustx_track_payload(
             segments=segments, f0=f0, t=t, config=config, midi_notes=midi_notes,
+            tempo_map=tempo_map,
         )
 
         # ── Track + VoicePart ─────────────────────────────────────────────
@@ -2022,7 +2356,10 @@ class TsubakiProcessor:
             "beat_per_bar": 4,
             "beat_unit":    4,
             "time_signatures": [{"bar_position": 0, "beat_per_bar": 4, "beat_unit": 4}],
-            "tempos":          [{"position": 0, "bpm": float(config.bpm)}],
+            "tempos":          (
+                tempo_map.to_ustx_tempo_array(resolution) if tempo_map is not None
+                else [{"position": 0, "bpm": float(config.bpm)}]
+            ),
             "expressions":      self._get_default_expressions(),
             "tracks":           [track],
             "voice_parts":      [voice_part],
@@ -2341,17 +2678,24 @@ class TsubakiProcessor:
             # ── ① MIDI 优先解析（BPM + 音符，供后续用） ───────────────────────
             midi_notes = None
             midi_lyric_words = []
+            midi_tempo_changes = None   # List[MidiTempoEvent]，MIDI 本身有 tempo 变化时才非空
 
             if midi_exists:
                 try:
                     from dataclasses import replace as _dc_replace
                     from midi_processor import parse_midi_notes_with_lyrics
 
-                    midi_bpm, midi_notes, midi_lyrics = parse_midi_notes_with_lyrics(midi_path)
+                    midi_bpm, midi_notes, midi_lyrics, midi_tempo_changes = parse_midi_notes_with_lyrics(midi_path)
 
                     if midi_bpm and midi_bpm > 0:
                         config = _dc_replace(config, bpm=float(midi_bpm))
                         logger.info(f"✓ MIDI BPM 已覆盖 config.bpm → {midi_bpm:.1f}")
+
+                    if midi_tempo_changes and len(midi_tempo_changes) > 1:
+                        logger.info(
+                            "✓ MIDI 含 %d 段 tempo 变化，工程文件将写入完整 tempo 曲线（而非单一 BPM）",
+                            len(midi_tempo_changes),
+                        )
 
                     logger.info(f"✓ MIDI 音符导入: {len(midi_notes)} 个")
 
@@ -2361,6 +2705,7 @@ class TsubakiProcessor:
                 except Exception as _midi_err:
                     logger.warning(f"⚠ MIDI 解析失败，回退到默认模式: {_midi_err}")
                     midi_notes = None
+                    midi_tempo_changes = None
                     midi_lyric_words = []
 
             # ── ② 段落来源：优先 LAB，否则从 MIDI 音符生成 ──────────────────
@@ -2383,22 +2728,30 @@ class TsubakiProcessor:
                         # 用 VOCALOID4 官方去母音化专属符号（k'/C/p'/S/tS/p\），
                         # 否则 SVP 会收到它不认识的 VOCALOID4 专属符号。
                         _devoiced_target = "synthesizerv" if output_format in ("sv", "svp") else "vocaloid4"
+                        # with_note_onset=True：始终一并要回每个合并音节里
+                        # "元音自己的真实起始时间"，用于修正下游 SVP/VSQX
+                        # 音符方块的 onset（否则合并辅音会导致发音提前，
+                        # 见 LabelSegment.note_onset 的说明）。
                         converted = apply_phoneme_mode(
                             seg_tuples, phoneme_mode,
                             with_devoiced_phoneme=ja_devoiced_phoneme,
                             devoiced_target=_devoiced_target,
+                            with_note_onset=True,
                         )
                         if ja_devoiced_phoneme:
                             segments = [
                                 LabelSegment(
                                     start_time=t[0], end_time=t[1], label=t[2],
-                                    devoiced_phoneme=t[3],
+                                    devoiced_phoneme=t[3], note_onset=t[4],
                                 )
                                 for t in converted
                             ]
                         else:
                             segments = [
-                                LabelSegment(start_time=t[0], end_time=t[1], label=t[2])
+                                LabelSegment(
+                                    start_time=t[0], end_time=t[1], label=t[2],
+                                    note_onset=t[3],
+                                )
                                 for t in converted
                             ]
                         logger.info(f"音素转换完成 (mode={phoneme_mode}, ja_devoiced_phoneme={ja_devoiced_phoneme}): {len(segments)} 个音节段落")
@@ -2428,6 +2781,13 @@ class TsubakiProcessor:
             if getattr(config, "fill_short_rests", False):
                 segments = self._fill_short_rests(segments, config)
 
+            # ── ②.6 修正合并辅音导致的发音提前（SVP/USTX/VSQX 通用，
+            #    见 _apply_note_onset_correction 说明）。必须在
+            #    _fill_short_rests 之后执行（休止符吞并会改变"前一个
+            #    音符"的邻接关系，需要先落定），在 F0/格式分支之前执行
+            #    （三种输出格式共用同一份修正后的 segments）──
+            segments = self._apply_note_onset_correction(segments)
+
             # ── ③ F0 数据 ─────────────────────────────────────────────────────
             f0, t, sr = None, None, None
             if audio_f0_data and audio_f0_data.get("success"):
@@ -2448,6 +2808,7 @@ class TsubakiProcessor:
                     language=language,
                     native_english_words=native_english_words,
                     dict_source=dict_source,
+                    midi_tempo_changes=midi_tempo_changes,
                 )
                 out_path = self.work_dir / f"{Path(wav_path).stem}.svp"
                 out_path.write_text(project_text, encoding="utf-8")
@@ -2458,6 +2819,7 @@ class TsubakiProcessor:
                     f0=f0, t=t, sr=sr, wav_path=wav_path,
                     config=config, audio_duration_sec=audio_duration_sec,
                     midi_notes=midi_notes,
+                    midi_tempo_changes=midi_tempo_changes,
                 )
                 out_path = self.work_dir / f"{Path(wav_path).stem}.ustx"
                 out_path.write_text(project_text, encoding="utf-8")
@@ -2485,6 +2847,7 @@ class TsubakiProcessor:
                     language=language,
                     native_english_words=native_english_words,
                     dict_source=dict_source,
+                    midi_tempo_changes=midi_tempo_changes,
                 )
                 out_path = self.work_dir / f"{Path(wav_path).stem}.vsqx"
                 out_path.write_text(project_text, encoding="utf-8")
@@ -2675,12 +3038,15 @@ class TsubakiProcessor:
                         from midi_processor import parse_midi_notes_with_lyrics
                         from dataclasses import replace as _dc_replace
 
-                        midi_bpm, midi_notes, midi_lyrics = parse_midi_notes_with_lyrics(str(midi_path))
+                        midi_bpm, midi_notes, midi_lyrics, _midi_tempo_changes = parse_midi_notes_with_lyrics(str(midi_path))
                         if midi_bpm and midi_bpm > 0:
                             # 注意：这里只替换该音轨自己的 tr_config，不再覆盖
                             # 外层共享的 config 变量——bpm 决定整批对话框合并
                             # 后的时间轴换算，必须全局统一，不应被某一个提供
                             # 了 MIDI 的对话框悄悄改写，影响到它后面的音轨。
+                            # _midi_tempo_changes（该对话框 MIDI 自身的 tempo
+                            # 变化列表）在多音轨合并场景下按设计不使用——见
+                            # 上面的说明，此处丢弃，仅取代表性 bpm。
                             tr_config = _dc_replace(tr_config, bpm=float(midi_bpm))
                     except Exception as _midi_err:
                         logger.warning("[多音轨] 音轨 %r MIDI 解析失败: %s", tr_title, _midi_err)
@@ -2717,23 +3083,33 @@ class TsubakiProcessor:
                             # 去母音化专属符号（k'/C/p'/S/tS/p\）；否则 SVP 会收到
                             # 它不认识的 VOCALOID4 专属符号导致发音异常。
                             _devoiced_target = "synthesizerv" if fmt in ("sv", "svp") else "vocaloid4"
+                            # with_note_onset=True：始终一并要回每个合并音节里
+                            # "元音自己的真实起始时间"，用于修正下游 SVP/USTX/VSQX
+                            # 音符方块的 onset（否则合并辅音会导致发音提前，
+                            # 见 LabelSegment.note_onset 的说明）。对 sv/ustx/vsqx
+                            # 三种格式一视同仁——三者都从同一份 segments 构建音符，
+                            # 都需要这份修正后的时间信息。
                             converted = apply_phoneme_mode(
                                 seg_tuples, tr_phoneme_mode,
                                 with_devoiced_phoneme=_want_devoiced,
                                 devoiced_target=_devoiced_target,
+                                with_note_onset=True,
                             )
                             if _want_devoiced:
                                 segments = [
                                     LabelSegment(
                                         start_time=t0, end_time=t1, label=lbl,
-                                        devoiced_phoneme=devoiced,
+                                        devoiced_phoneme=devoiced, note_onset=note_onset,
                                     )
-                                    for (t0, t1, lbl, devoiced) in converted
+                                    for (t0, t1, lbl, devoiced, note_onset) in converted
                                 ]
                             else:
                                 segments = [
-                                    LabelSegment(start_time=t0, end_time=t1, label=lbl)
-                                    for (t0, t1, lbl) in converted
+                                    LabelSegment(
+                                        start_time=t0, end_time=t1, label=lbl,
+                                        note_onset=note_onset,
+                                    )
+                                    for (t0, t1, lbl, note_onset) in converted
                                 ]
                         except Exception as _pm_err:
                             logger.warning(
@@ -2754,6 +3130,11 @@ class TsubakiProcessor:
                 # 的调用时机一致，见 _fill_short_rests 说明）。
                 if getattr(tr_config, "fill_short_rests", False):
                     segments = self._fill_short_rests(segments, tr_config)
+
+                # 修正合并辅音导致的发音提前（SVP/USTX/VSQX 三种输出格式
+                # 通用，与单文件模式 process_full_pipeline 的调用时机一致，
+                # 见 _apply_note_onset_correction 说明）。
+                segments = self._apply_note_onset_correction(segments)
 
                 # F0 提取（每条音轨独立提取，使用该音轨自己的有效配置
                 # tr_config：未开启"单独设置"时与全局 config 完全一致）。
@@ -3094,6 +3475,7 @@ class TsubakiProcessor:
         dict_source: str = "default",
         t_start: Optional[int] = None,
         part_name: str = "NewPart",
+        tempo_map: Optional["TempoMap"] = None,
     ) -> str:
         """
         构建单个 VSQX <vsPart> XML 块（音符 / 音高曲线），供：
@@ -3108,6 +3490,12 @@ class TsubakiProcessor:
         自身起点为 0，不做整体平移）——vsPart 内 <note><t> 是相对 vsPart
         自身 <t> 的偏移量，音符的绝对时间轴位置 = vsPart.<t> + note.<t>，
         因此只需通过 t_start 整体挪动 vsPart，不需要改动 segments 本身。
+
+        tempo_map : 可选，仅单文件 (_build_vsqx_project_text →
+            _build_vsqx_track_block) 在导入的 MIDI 含 tempo 变化时传入；
+            _build_vsqx_project_text_sequenced（对话文本框批量合并）继续
+            传 None，与此前行为一致（该场景的时间轴定位始终基于全局
+            config.bpm，不接受按对话框覆盖，见调用方注释）。
         """
         RESOLUTION  = 480        # ticks per quarter note
         PBS         = 13         # pitch bend sensitivity (semitones)
@@ -3115,10 +3503,12 @@ class TsubakiProcessor:
             t_start = self._VSQX_PART_OFFSET
         VELOCITY    = 64
         bpm = float(config.bpm)
+        _tempo_map = tempo_map or TempoMap(None, default_bpm=bpm)
 
         def sec_to_ticks(sec: float) -> int:
-            """秒 → vsPart 内部 tick（相对偏移）"""
-            return int(round(float(sec) * (bpm / 60.0) * RESOLUTION))
+            """秒 → vsPart 内部 tick（相对偏移）。恒定 tempo 时与旧公式
+            完全等价；有 MIDI tempo 变化时按分段 tempo 正确换算。"""
+            return _tempo_map.seconds_to_ticks(float(sec), RESOLUTION)
 
         base_tone = int(config.base_pitch)
 
@@ -3553,6 +3943,7 @@ class TsubakiProcessor:
         language: str = "",
         native_english_words: Optional[set] = None,
         dict_source: str = "default",
+        tempo_map: Optional["TempoMap"] = None,
     ) -> str:
         """
         构建单条 VSQX <vsTrack> XML 块（tNo + 恰好一个 vsPart）。
@@ -3562,6 +3953,10 @@ class TsubakiProcessor:
         实际的 vsPart / 音符 / 音高曲线构建已提取到 _build_vsqx_part_xml()，
         与新版 _build_vsqx_project_text_sequenced()（同一条 vsTrack 下挂多个
         vsPart，各自定位到时间轴）共用，避免逻辑重复导致行为不一致。
+
+        tempo_map : 可选，仅单文件调用方 (_build_vsqx_project_text) 在导入
+            的 MIDI 含 tempo 变化时传入；build_vsqx_project_text_multitrack
+            不传（保持多音轨场景全局恒定 bpm 的既有行为不变）。
         """
         part_xml = self._build_vsqx_part_xml(
             segments=segments,
@@ -3576,6 +3971,7 @@ class TsubakiProcessor:
             dict_source=dict_source,
             t_start=self._VSQX_PART_OFFSET,
             part_name="NewPart",
+            tempo_map=tempo_map,
         )
         return (
             '\t<vsTrack>\n'
@@ -3620,6 +4016,7 @@ class TsubakiProcessor:
         language: str = "",                # 语种（用于 word_phoneme_map 防误判）
         native_english_words: Optional[set] = None,  # 从原始文本预提取的英语单词集合（防拼音误判）
         dict_source: str = "default",      # 单词→音素词典来源："default"/"synthesizerv"/"vocaloid"
+        midi_tempo_changes: Optional[List] = None,  # MIDI 导入：List[MidiTempoEvent]，含 tempo 变化时传入
     ) -> str:
         """
         生成 VOCALOID4 VSQX 工程文件（XML 格式，单音轨）。
@@ -3638,6 +4035,10 @@ class TsubakiProcessor:
           若 segment.devoiced_phoneme 有值（日语音素锁定开关 ja_devoiced_phoneme
           开启、且该音节含辅音起始），则写入 <p lock="1">…</p> 并锁定为
           该辅音起始（如 's'/'sh'/'ky'），跳过 VOCALOID 自带 G2P。
+        • midi_tempo_changes 提供且含多段 tempo 时，<masterTrack> 会写入
+          完整的多段 <tempo> 标签序列（与音符/音高曲线换算共用同一份
+          TempoMap），而不是把整条时间轴压扁成单一 BPM；未提供或只有单段
+          时，行为与此前完全一致（仍只有一条 tick=0 的 <tempo>）。
 
         实际的音符 / 音高曲线 / <vsTrack> XML 构建逻辑已提取到
         _build_vsqx_track_block()，与对话文本框批量处理功能的多音轨生成器
@@ -3645,7 +4046,19 @@ class TsubakiProcessor:
         工程级别结构，并拼接唯一一条 <vsTrack>（tNo=0）。
         """
         bpm = float(config.bpm)
-        tempo_v = int(round(bpm * 100))   # VSQX tempo value = BPM × 100
+
+        tempo_map = None
+        if midi_tempo_changes and len(midi_tempo_changes) > 1:
+            tempo_map = TempoMap([(ev.position_sec, ev.bpm) for ev in midi_tempo_changes])
+
+        if tempo_map is not None:
+            # tick_offset=_VSQX_PART_OFFSET：必须与下方 _build_vsqx_track_block
+            # 传给 note/cc 换算的 t_start 一致（这里固定用 _VSQX_PART_OFFSET），
+            # 否则 tempo 变化点会跟音符错位——见 to_vsqx_tempo_xml 的详细说明。
+            tempo_xml = tempo_map.to_vsqx_tempo_xml(480, tick_offset=self._VSQX_PART_OFFSET)
+        else:
+            tempo_v = int(round(bpm * 100))   # VSQX tempo value = BPM × 100
+            tempo_xml = f'\t\t<tempo><t>0</t><v>{tempo_v}</v></tempo>\n'
 
         track_xml = self._build_vsqx_track_block(
             tNo=0,
@@ -3660,6 +4073,7 @@ class TsubakiProcessor:
             language=language,
             native_english_words=native_english_words,
             dict_source=dict_source,
+            tempo_map=tempo_map,
         )
 
         xml = (
@@ -3714,7 +4128,7 @@ class TsubakiProcessor:
             '\t\t<resolution>480</resolution>\n'
             '\t\t<preMeasure>1</preMeasure>\n'
             '\t\t<timeSig><m>0</m><nu>4</nu><de>4</de></timeSig>\n'
-            f'\t\t<tempo><t>0</t><v>{tempo_v}</v></tempo>\n'
+            + tempo_xml +
             '\t</masterTrack>\n'
             + track_xml
             + '\t<monoTrack>\n'

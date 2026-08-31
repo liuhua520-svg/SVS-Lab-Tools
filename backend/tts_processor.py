@@ -12,9 +12,9 @@ TTS 文本转语音模块（"讲述人" / "TTS跟读" 功能后端）
        - "windows_sapi" ：调用 Windows 系统自带的语音合成功能（即"讲述人"，
                           通过 SAPI5 / pywin32 驱动，纯本地、不需要联网）；
        - "qwen3_tts"    ：Qwen3-TTS 独立服务（qwen3tts_server.py，端口
-                          5003），本进程通过 HTTP 调用，不在本进程内加载
-                          模型（依赖较重且与 qwen3_server.py 的
-                          qwen_asr/transformers 版本不完全兼容，见
+                          5853），本进程通过 HTTP 调用，不在本进程内加载
+                          模型（依赖较重且与 .mfa_env 里 qwen-asr 锁定的
+                          transformers 版本不完全兼容，见
                           requirements-qwen3tts.txt 顶部说明）。支持官方
                           三种模式：CustomVoice（预设音色+可选风格指令）/
                           VoiceDesign（仅文本描述音色）/ VoiceClone（Base
@@ -155,8 +155,8 @@ def _windows_sapi_check_available() -> Tuple[bool, str]:
 
 
 # Qwen3-TTS 独立服务固定本地地址（与 app.py 里 _QWEN3TTS_BASE_URL 保持
-# 一致；qwen3_server.py 用 5001，nemo_server.py 用 5002，本服务用 5003）。
-QWEN3_TTS_BASE_URL = "http://127.0.0.1:5003"
+# 一致；whisperx_server.py 用 5854，nemo_server.py 用 5852，本服务用 5853）。
+QWEN3_TTS_BASE_URL = "http://127.0.0.1:5853"
 
 
 def _qwen3_tts_check_available() -> Tuple[bool, str]:
@@ -168,7 +168,7 @@ def _qwen3_tts_check_available() -> Tuple[bool, str]:
         requests.get(QWEN3_TTS_BASE_URL + "/", timeout=2)
         return True, "Qwen3-TTS 独立服务已可访问"
     except Exception as e:
-        return False, f"Qwen3-TTS 独立服务不可访问（请先启动 qwen3tts_server.py）: {e}"
+        return False, "Qwen3-TTS 独立服务不可访问（请先启动 qwen3tts_server.py）"
 
 
 # 引擎注册表。label_zh 供前端"选择 TTS"下拉框直接展示，不需要再单独维护

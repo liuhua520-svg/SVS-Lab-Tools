@@ -1,0 +1,80 @@
+# requirements-whisperx.txt
+# whisperx_server.py 独立服务依赖（不要装进主 .mfa_env，也不要和
+# .qwen3tts_env / .nemo_env 共用！）
+#
+# 用法：
+#   conda create --prefix ./.whisperx_env python=3.10 -y
+#   conda activate ./.whisperx_env
+#   pip install -r requirements-whisperx.txt
+#   python whisperx_server.py
+#
+# 说明：
+#   这是 WhisperX 跑在独立进程里所需的全部依赖。主 Flask 应用（app.py
+#   所在的 .mfa_env）只通过 HTTP 调用 127.0.0.1:5854，完全不需要装
+#   whisperx / faster-whisper / ctranslate2 / 对应版本的 transformers
+#   这一套。
+#
+#   之所以单独建环境：WhisperX 3.2.0 因为本项目刻意保留 NumPy 1.26.x
+#   而锁定使用；它需要 faster-whisper==1.0.0 + ctranslate2==4.4.0，二者
+#   又要求 tokenizers<0.16，因此需要较旧的 transformers==4.39.3。这与
+#   .mfa_env 里 qwen-asr==0.0.6 精确锁定的 transformers==4.57.6 直接冲突
+#   ——两个包历史上都从未发布过放宽这条锁定的版本，装进同一个环境
+#   `pip install` 必然报 ResolutionImpossible，无论 pip backtracking 到
+#   哪个版本都无法同时满足两者。
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# ====================== 服务框架 ======================
+flask==2.3.3
+
+# ====================== 打包基础设施 ======================
+# ctranslate2==4.4.0 在导入时执行 `import pkg_resources`（来自
+# setuptools，并非标准库）。较新的 conda-forge python=3.10 引导环境 /
+# 某些 venv 默认不再自带 setuptools，若缺失会在首次真正调用
+# whisperx.load_model()（即首次 /transcribe 请求，而非服务启动时）才
+# 报 ModuleNotFoundError: No module named 'pkg_resources'，具有较强
+# 迷惑性。显式锁定版本号，避免仅依赖 setup.bat/setup.sh 里的
+# `pip install --upgrade pip setuptools wheel` 这一步隐式满足。
+setuptools>=65
+
+# ====================== WhisperX ======================
+# WhisperX 3.2.0 is retained because this project intentionally keeps NumPy 1.26.x.
+# WhisperX 3.2.0 requires faster-whisper==1.0.0, ctranslate2==4.4.0 and an unconstrained transformers.
+# faster-whisper==1.0.0 requires tokenizers<0.16, so pin an older Transformers stack here.
+# PyAV 11.0.0 is NOT installed by pip: setup.bat/setup.sh installs conda-forge av=11.0.0 first
+# to avoid a Windows source build that requires FFmpeg import libraries.
+whisperx==3.2.0
+ctranslate2==4.4.0
+transformers==4.39.3
+tokenizers==0.15.2
+huggingface-hub==0.36.2
+
+# ====================== 基础数值库 ======================
+numpy==1.26.4
+
+# ====================== 音频处理 ======================
+soundfile==0.12.1
+librosa==0.11.0
+resampy==0.4.3
+
+# ====================== 网络与其他基础库 ======================
+requests
+tqdm
+
+# ====================== PyTorch (根据硬件三选一，与主项目一致) ======================
+# 注意：CUDA 版 wheel（+cu121 / +cu118）不在 PyPI 默认源上，只在文件顶部
+# 那行 --extra-index-url 指向的 PyTorch 官方索引里，若切换到 GPU 选项，
+# 顶部的 --extra-index-url 那一行必须保留（不要删掉），否则会重新出现
+# "Could not find a version that satisfies the requirement torch==2.3.1+cu121"。
+
+# CUDA 12.1（用于 RTX 30/40 系等现代显卡）
+# torch==2.3.1+cu121
+# torchaudio==2.3.1+cu121
+
+# CUDA 11.8（旧版显卡保留选项，如 GTX10系显卡 等 Pascal 架构）
+# torch==2.3.1+cu118
+# torchaudio==2.3.1+cu118
+
+# CPU Only（推荐，无显卡；默认激活）
+torch==2.3.1+cpu
+torchaudio==2.3.1+cpu

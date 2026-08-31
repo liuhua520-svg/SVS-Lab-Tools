@@ -20,6 +20,13 @@ class MidiLyricEvent:
     text: str
 
 
+@dataclass
+class MidiTempoEvent:
+    """一个 set_tempo 事件，position_sec 为其在 MIDI 中的绝对时间（秒）。"""
+    position_sec: float
+    bpm: float
+
+
 def midi_note_name(pitch: int) -> str:
     """MIDI 音符号 → 音名（如 60 → C4）"""
     octave = (pitch // 12) - 1
@@ -28,9 +35,10 @@ def midi_note_name(pitch: int) -> str:
 
 def parse_midi_notes_with_lyrics(
     midi_path: str,
-) -> Tuple[float, List[Tuple[float, float, int]], List[MidiLyricEvent]]:
+) -> Tuple[float, List[Tuple[float, float, int]], List[MidiLyricEvent], List[MidiTempoEvent]]:
     """
-    解析 MIDI 文件，提取全局 BPM、所有音符，以及 lyrics meta event。
+    解析 MIDI 文件，提取全局 BPM、所有音符、lyrics meta event，以及完整的
+    tempo 变化列表。
 
     Parameters
     ----------
@@ -40,11 +48,29 @@ def parse_midi_notes_with_lyrics(
     Returns
     -------
     bpm : float
-        文件中第一个 set_tempo 事件的 BPM（默认 120.0）
+        文件中第一个 set_tempo 事件的 BPM（默认 120.0）。仅作为兼容旧调用方
+        的"代表性/初始"BPM 使用；曲速会变化的 MIDI 请改用 tempo_changes。
+
+        【历史 bug 说明】此前用 `bpm == 120.0` 判断"是否已经从某个 tempo
+        事件里取过值"，把 120.0 同时当默认哨兵值和合法 BPM 用。如果 MIDI
+        的第一个 set_tempo 事件本身恰好就是 120 BPM（常见情况——很多 DAW/
+        制谱软件的默认速度就是 120），这个判断会一直为真，导致后续所有
+        tempo 事件都会继续覆盖 bpm，最终返回的是"最后一个偶然只被判断为
+        与 120.0 不同之前的那个值"，而不是真正的第一个 tempo 事件——从而
+        表现为诡异地"总是取到某个中间/偏低的 BPM"。现在改用显式的
+        `_bpm_set` 标记位，只在真正尚未见过任何 tempo 事件时才写入。
     notes : list of (start_sec, end_sec, pitch)
-        按开始时间升序排列的音符列表，pitch 为 MIDI 音高 (0–127)
+        按开始时间升序排列的音符列表，pitch 为 MIDI 音高 (0–127)。
+        起止时间已经按照 MIDI 内实际生效的 tempo（含变化）正确换算为秒，
+        不受本函数返回的单一 bpm 影响。
     lyrics : list of MidiLyricEvent
         按时间升序排列的歌词事件
+    tempo_changes : list of MidiTempoEvent
+        按时间升序排列、去重后的完整 tempo 变化列表（position_sec, bpm）。
+        只含全局 tempo 轨道（mido type 0/1 时 tempo 通常只出现在一个
+        track 上；多 tempo 事件相邻位置相同时只保留最后一个，相邻 BPM
+        相同时合并）。下游工程文件生成器可用它写入真实的多段 tempo，
+        而不是把整条时间轴强行拉平成一个恒定 BPM。
     """
     try:
         import mido
@@ -55,8 +81,10 @@ def parse_midi_notes_with_lyrics(
     ticks_per_beat = mid.ticks_per_beat
 
     bpm: float = 120.0
+    _bpm_set = False   # 显式标记：是否已经从真实 tempo 事件里取过 bpm
     notes_result: List[Tuple[float, float, int]] = []
     lyrics_result: List[MidiLyricEvent] = []
+    tempo_events_raw: List[Tuple[float, float]] = []  # (position_sec, bpm)，未去重
 
     for track in mid.tracks:
         tempo = 500_000      # 默认 120 BPM（微秒/拍）
@@ -70,9 +98,12 @@ def parse_midi_notes_with_lyrics(
 
             if msg.type == 'set_tempo':
                 tempo = msg.tempo
-                # 仅取第一个 tempo 事件作为全局 BPM
-                if bpm == 120.0:
-                    bpm = round(60_000_000 / max(tempo, 1), 3)
+                tempo_bpm = round(60_000_000 / max(tempo, 1), 3)
+                tempo_events_raw.append((abs_time_sec, tempo_bpm))
+                # 仅取第一个真正出现的 tempo 事件作为兼容旧接口的代表 BPM
+                if not _bpm_set:
+                    bpm = tempo_bpm
+                    _bpm_set = True
             elif msg.type == 'lyrics':
                 text = (getattr(msg, "text", "") or "").strip()
                 if text:
@@ -94,24 +125,44 @@ def parse_midi_notes_with_lyrics(
     notes_result.sort(key=lambda n: n[0])
     lyrics_result.sort(key=lambda e: e.time_sec)
 
+    # ── 整理 tempo_changes：按位置排序，同一位置只保留最后写入的值，
+    #    相邻事件 BPM 相同（浮点误差内）时合并去重 ──────────────────────
+    tempo_events_raw.sort(key=lambda e: e[0])
+    tempo_changes: List[MidiTempoEvent] = []
+    for pos_sec, ev_bpm in tempo_events_raw:
+        if tempo_changes and abs(tempo_changes[-1].position_sec - pos_sec) < 1e-9:
+            tempo_changes[-1] = MidiTempoEvent(position_sec=pos_sec, bpm=ev_bpm)
+            continue
+        if tempo_changes and abs(tempo_changes[-1].bpm - ev_bpm) < 1e-9:
+            continue
+        tempo_changes.append(MidiTempoEvent(position_sec=pos_sec, bpm=ev_bpm))
+    if not tempo_changes:
+        tempo_changes.append(MidiTempoEvent(position_sec=0.0, bpm=bpm))
+    elif tempo_changes[0].position_sec > 1e-9:
+        # 保证时间轴从 0 秒开始就有一个生效的 tempo（用第一个事件的 BPM
+        # 回填起始点，与 MIDI 播放语义一致：tempo 事件生效前默认 120，
+        # 但这里第一个事件通常就在 0 附近；若确实晚于 0，则 0~该位置
+        # 按 mido 的默认 120 BPM 处理更符合标准 MIDI 播放行为）。
+        tempo_changes.insert(0, MidiTempoEvent(position_sec=0.0, bpm=120.0))
+
     if notes_result:
         pitches = [n[2] for n in notes_result]
         logger.info(
-            f"MIDI 解析完成: BPM={bpm:.1f}, "
+            f"MIDI 解析完成: BPM={bpm:.1f} (tempo 变化 {len(tempo_changes)} 段), "
             f"共 {len(notes_result)} 个音符, "
             f"音高范围 {midi_note_name(min(pitches))}–{midi_note_name(max(pitches))}"
         )
     else:
         logger.warning(f"MIDI 解析完成但未找到任何音符: {midi_path}")
 
-    return bpm, notes_result, lyrics_result
+    return bpm, notes_result, lyrics_result, tempo_changes
 
 
 def parse_midi_notes(midi_path: str) -> Tuple[float, List[Tuple[float, float, int]]]:
     """
     兼容旧接口：仍然只返回 bpm + notes。
     """
-    bpm, notes, _lyrics = parse_midi_notes_with_lyrics(midi_path)
+    bpm, notes, _lyrics, _tempo_changes = parse_midi_notes_with_lyrics(midi_path)
     return bpm, notes
 
 

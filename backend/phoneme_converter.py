@@ -119,7 +119,7 @@ JA_CV_TO_HIRAGANA: dict[str, str] = {
     # ── さ行 ─────────────────────────────────────────────────
     "sa": "さ", "si": "し", "su": "す", "se": "せ", "so": "そ",
     "sha": "しゃ", "shi": "し", "shu": "しゅ", "she": "しぇ", "sho": "しょ",
-    "sya": "しゃ", "syi": "し",　"syu": "しゅ", "sye": "しぇ", "syo": "しょ",
+    "sya": "しゃ", "syi": "し", "syu": "しゅ", "sye": "しぇ", "syo": "しょ",
 
     # ── ざ行 ─────────────────────────────────────────────────
     "za": "ざ", "zi": "じ", "zu": "ず", "ze": "ぜ", "zo": "ぞ",
@@ -129,7 +129,7 @@ JA_CV_TO_HIRAGANA: dict[str, str] = {
     # ── た行 ─────────────────────────────────────────────────
     "ta": "た", "ti": "てぃ", "tu": "つ", "te": "て", "to": "と",
     "cha": "ちゃ", "chi": "ち", "chu": "ちゅ", "che": "ちぇ", "cho": "ちょ",
-    "tya": "ちゃ", "tyi": "ち", "tyu": "ちゅ", "tye": "ちぇ",　"tyo": "ちょ",
+    "tya": "ちゃ", "tyi": "ち", "tyu": "ちゅ", "tye": "ちぇ", "tyo": "ちょ",
     "tsa": "つぁ", "tsi": "つぃ", "tsu": "つ", "tse": "つぇ", "tso": "つぉ",
 
     # ── だ行 ─────────────────────────────────────────────────
@@ -579,9 +579,9 @@ def debug_unknown_phonemes(phonemes: list[str], language: str) -> list[str]:
 #
 #   背景：EN_IPA_TO_ARPABET 只是"音素 → 音素"的重标注表，前提是已经
 #   有一份真实的逐音素时间戳（来自 MFA 对 TextGrid 的强制对齐）。
-#   WhisperX / Qwen3 等替代对齐后端只能给出词级（英语）或字符级
+#   Qwen3-ASR / Qwen3-ForcedAligner 只能给出词级（英语）或字符级
 #   （中日韩）时间戳，没有这份音素层，因此英语词永远无法从这张表
-#   受益——这正是 WhisperXAligner 英语输出始终停留在"整词一条 LAB
+#   受益——这正是 Qwen3 系对齐器英语输出始终停留在"整词一条 LAB
 #   行"、从未到达音素级的根本原因。
 #
 #   本节补上"词 → ARPABET 音素序列"这一步（真正的 G2P），两级查询：
@@ -639,8 +639,7 @@ def _load_en_mfa_dictionary() -> dict[str, list[str]]:
 
     if dict_path is None:
         logger.info(
-            "[G2P] 未找到本地 MFA english_us_mfa.dict 词典文件"
-            "（可执行 mfa model download dictionary english_us_mfa 获取），"
+            "[G2P] 未找到本地 MFA english_us_mfa.dict 词典文件，"
             "英语单词将仅通过 g2p_en 兜底（若已安装）"
         )
         _EN_DICT_CACHE = table
@@ -1123,8 +1122,8 @@ def distribute_arpabet_phones(
     把一个词的时间跨度（100ns 整数刻度，与本项目 LAB 时间单位一致）
     按音素类型权重比例分配给该词的 ARPABET 音素序列。
 
-    用途：WhisperX 等替代对齐后端只能给出词级时间戳，没有真实的逐
-    音素强制对齐结果；用这个比例分配近似出音素级时间戳，比把整个
+    用途：Qwen3-ASR / Qwen3-ForcedAligner 等对齐后端只能给出词级时间戳，
+    没有真实的逐音素强制对齐结果；用这个比例分配近似出音素级时间戳，比把整个
     词压缩成单条目（旧行为）更贴近真实发音节奏，是该场景下合理的
     最佳近似（与 MFAProcessor._distribute_syllables_by_weight() 处理
     中文拼音音节时间分配的思路一致）。
@@ -1513,7 +1512,13 @@ def build_ja_merged_lab(
     output: str = "romaji",
     with_devoiced_phoneme: bool = False,
     devoiced_target: str = "vocaloid4",
-) -> list[tuple[int, int, str]] | list[tuple[int, int, str, Optional[str]]]:
+    with_note_onset: bool = False,
+) -> (
+    list[tuple[int, int, str]]
+    | list[tuple[int, int, str, Optional[str]]]
+    | list[tuple[int, int, str, Optional[int]]]
+    | list[tuple[int, int, str, Optional[str], Optional[int]]]
+):
     """
     Merge consecutive consonant-onset + vowel segments into a single entry
     whose time span covers *both* the consonant and the vowel.
@@ -1521,6 +1526,30 @@ def build_ja_merged_lab(
     Unlike build_ja_hiragana_lab(), which emits a '-' note for the consonant
     and a separate note for the vowel, this function produces **one** merged
     entry: (consonant_start, vowel_end, label).
+
+    ⚠️ 关于"合并音节起始时间"与"音符落点"的区别（发音提前问题）──────
+    该函数返回的 (start, end) 时间跨度仍然是 **consonant_start → vowel_end**
+    （即辅音起始时刻到元音结束时刻），这是 LAB / 唱名映射意义上正确的
+    "这个音节完整占据的时间范围"，调用方仍然可以用它来做静音填充、
+    上一段落 duration 拼接等时间轴运算。
+
+    但如果调用方直接把这个 start 当成 SVP/VSQX 音符的 onset（音符方块的
+    左边界），会导致音符方块的起始点被拉到辅音开始的时刻——比元音的
+    真实起始时刻早——这在渲染时会让合成引擎把发音整体提前触发
+    （即"发音靠前"问题，音素混合模式合并辅音后尤其明显）。
+
+    koharu-label 工程的做法（见 svp-file.ts 的 margeConsonantNote()）是：
+    合并后的音符方块仍然锚定在元音自己的起始时刻，辅音占用的时间段
+    转而"追加"到上一个音符的 duration 上（相当于让上一个音符的尾部
+    拉长、过渡到当前元音），辅音本身只通过 phonemes 字段告诉合成引擎
+    "这个音节带有这个辅音"，不移动音符方块本身。
+
+    with_note_onset=True 时，本函数会额外返回每个合并音节 **元音自己的
+    真实起始时间** (note_onset)，供调用方按 koharu-label 的方式构建音符：
+    音符 onset 使用 note_onset（而不是本函数返回的 start），辅音占用的
+    [start, note_onset) 时间段则应追加到时间轴上前一个音符的 duration。
+    对于没有合并辅音的条目（单独元音、ん/ン/N、っ/ッ、静音直通），
+    note_onset 恒等于该条目自身的 start，调用方无需特殊处理。
 
     Parameters
     ----------
@@ -1563,8 +1592,10 @@ def build_ja_merged_lab(
 
     Returns
     -------
-    list of (start_100ns, end_100ns, label)                           [default]
-    list of (start_100ns, end_100ns, label, devoiced_phoneme)          [with_devoiced_phoneme=True]
+    list of (start_100ns, end_100ns, label)                                      [默认]
+    list of (start_100ns, end_100ns, label, devoiced_phoneme)                     [with_devoiced_phoneme=True]
+    list of (start_100ns, end_100ns, label, note_onset)                          [with_note_onset=True]
+    list of (start_100ns, end_100ns, label, devoiced_phoneme, note_onset)         [两者都 True]
 
     Examples
     --------
@@ -1618,7 +1649,14 @@ def build_ja_merged_lab(
             return hiragana_to_katakana(hira) if output == "katakana" else hira
         return cv  # romaji passthrough
 
-    def _emit(start: int, end: int, label: str, devoiced: Optional[str]) -> tuple:
+    def _emit(
+        start: int, end: int, label: str,
+        devoiced: Optional[str], note_onset: int,
+    ) -> tuple:
+        if with_devoiced_phoneme and with_note_onset:
+            return (start, end, label, devoiced, note_onset)
+        if with_note_onset:
+            return (start, end, label, note_onset)
         if with_devoiced_phoneme:
             return (start, end, label, devoiced)
         return (start, end, label)
@@ -1638,7 +1676,11 @@ def build_ja_merged_lab(
             ph_v = ph.lower()                # normalize devoiced I → i, U → u for the label itself
             if pending is not None:
                 cv = pending[2] + ph_v
-                # Merged entry: consonant_start → vowel_end.
+                # Merged entry: consonant_start → vowel_end (仍然是完整
+                # 音节的时间跨度，供调用方做时间轴运算)，note_onset 则是
+                # 元音自己的真实起始时间——调用方若要构建音符方块，应使用
+                # note_onset 作为 onset，而不是本条目的 start（辅音起始
+                # 时刻），否则会导致发音提前，见函数顶部说明。
                 # devoiced_phoneme = VOCALOID4 official devoiced phonetic
                 # symbol for this consonant onset + vowel (e.g. き→k',
                 # ひ→C, ぴ→p', ふ→p\; く/す/つ/ぷ fall back to their plain
@@ -1652,11 +1694,13 @@ def build_ja_merged_lab(
                     ja_devoiced_onset_to_vocaloid4(
                         pending[2], ph_v, target=devoiced_target
                     ) if is_devoiced else None,
+                    start,  # note_onset = 元音自己的起始时间
                 ))
                 pending = None
             else:
-                # Standalone vowel: no consonant onset → never devoiced-onset.
-                result.append(_emit(start, end, _cv_label(ph_v), None))
+                # Standalone vowel: no consonant onset → never devoiced-onset,
+                # note_onset == 自己的 start（未合并，无需调整）。
+                result.append(_emit(start, end, _cv_label(ph_v), None, start))
             i += 1
             continue
 
@@ -1664,10 +1708,13 @@ def build_ja_merged_lab(
         if ph in JA_MORA_NASAL_PHONEMES:
             if pending is not None:
                 # Flush pending consonant without a vowel → '-'
-                result.append(_emit(pending[0], pending[1], "-", None))
+                # （未合并的孤立辅音，note_onset 用它自己的 start 即可，
+                # 因为下游不会对 '-' 音符做辅音吸收处理）。
+                result.append(_emit(pending[0], pending[1], "-", None, pending[0]))
                 pending = None
             # ん/ン/N has no consonant onset → devoiced_phoneme is always None.
-            result.append(_emit(start, end, _mora_label(), None))
+            # 未合并，note_onset = 自己的 start。
+            result.append(_emit(start, end, _mora_label(), None, start))
             i += 1
             continue
 
@@ -1677,13 +1724,13 @@ def build_ja_merged_lab(
             is_mora = (next_ph is None) or (next_ph.lower() not in JA_VOWELS)
             if is_mora:
                 if pending is not None:
-                    result.append(_emit(pending[0], pending[1], "-", None))
+                    result.append(_emit(pending[0], pending[1], "-", None, pending[0]))
                     pending = None
-                result.append(_emit(start, end, _mora_label(), None))
+                result.append(_emit(start, end, _mora_label(), None, start))
             else:
                 # Treat as consonant onset (will combine with next vowel)
                 if pending is not None:
-                    result.append(_emit(pending[0], pending[1], "-", None))
+                    result.append(_emit(pending[0], pending[1], "-", None, pending[0]))
                 pending = (start, end, ph)
             i += 1
             continue
@@ -1694,11 +1741,12 @@ def build_ja_merged_lab(
         # 而非与后续元音合并（避免输出错误的音节，如 "cchi" 等）。
         if ph == "cl":
             if pending is not None:
-                result.append(_emit(pending[0], pending[1], "-", None))
+                result.append(_emit(pending[0], pending[1], "-", None, pending[0]))
                 pending = None
             cl_char = "ッ" if output == "katakana" else "っ"
             # っ/ッ has no consonant onset → devoiced_phoneme is always None.
-            result.append(_emit(start, end, cl_char, None))
+            # 未合并，note_onset = 自己的 start。
+            result.append(_emit(start, end, cl_char, None, start))
             i += 1
             continue
 
@@ -1723,15 +1771,16 @@ def build_ja_merged_lab(
                 # 输出 っ/ッ，第二个辅音重新进入 pending、继续等待其后的
                 # 元音正常合并成音节。
                 cl_char = "ッ" if output == "katakana" else "っ"
-                result.append(_emit(pending[0], pending[1], cl_char, None))
+                # 促音单独成音符，未与元音合并，note_onset = 自己的 start。
+                result.append(_emit(pending[0], pending[1], cl_char, None, pending[0]))
             else:
-                result.append(_emit(pending[0], pending[1], "-", None))
+                result.append(_emit(pending[0], pending[1], "-", None, pending[0]))
         pending = (start, end, ph)
         i += 1
 
     # Trailing consonant with no following vowel → '-'
     if pending is not None:
-        result.append(_emit(pending[0], pending[1], "-", None))
+        result.append(_emit(pending[0], pending[1], "-", None, pending[0]))
 
     return result
 
@@ -1751,7 +1800,13 @@ def apply_phoneme_mode(
     mode: str,
     with_devoiced_phoneme: bool = False,
     devoiced_target: str = "vocaloid4",
-) -> list[tuple[int, int, str]] | list[tuple[int, int, str, Optional[str]]]:
+    with_note_onset: bool = False,
+) -> (
+    list[tuple[int, int, str]]
+    | list[tuple[int, int, str, Optional[str]]]
+    | list[tuple[int, int, str, Optional[int]]]
+    | list[tuple[int, int, str, Optional[str], Optional[int]]]
+):
     """
     Apply a phoneme-mode transformation to a flat list of LAB segments.
 
@@ -1780,11 +1835,31 @@ def apply_phoneme_mode(
     devoiced_target :
         'vocaloid4' 或 'synthesizerv'。决定去母音化覆盖音素使用
         VSQX 记号还是 SVP 记号。
+    with_note_onset :
+        False (default) → 不返回 note_onset（向后兼容）。
+        True  → 额外返回每个音节 **元音自己的真实起始时间**
+                 note_onset（100ns 单位）。合并了辅音的音节，其
+                 (start, end) 仍然是"辅音起始 → 元音结束"这一完整
+                 时间跨度，但 note_onset 单独给出元音自己的起始点——
+                 下游构建 SVP/VSQX 音符时应该用 note_onset 作为音符
+                 方块的 onset，把 [start, note_onset) 这一段辅音时长
+                 追加到时间轴上前一个音符的 duration 上（做法见
+                 build_ja_merged_lab() 顶部说明，对应 koharu-label 的
+                 margeConsonantNote()），而不要直接把 start 当成音符
+                 onset——否则会把音符方块整体拉到辅音开始的时刻，
+                 造成合成引擎提前触发发音（"发音靠前"问题）。
+                 未合并辅音的条目（静音直通、单独元音、ん/ン/N、
+                 っ/ッ）的 note_onset 恒等于该条目自身的 start。
+                 Ignored when mode == 'none'（此时每个条目本就未合并，
+                 调用方可以直接用条目自身的 start）。
 
     Returns
     -------
-    Transformed list of (start_100ns, end_100ns, label), sorted by start time.
-    With with_devoiced_phoneme=True: (start_100ns, end_100ns, label, devoiced_phoneme).
+    Transformed list, sorted by start time. Shape depends on the flags above:
+        (start_100ns, end_100ns, label)                                      [默认]
+        (start_100ns, end_100ns, label, devoiced_phoneme)                     [with_devoiced_phoneme]
+        (start_100ns, end_100ns, label, note_onset)                          [with_note_onset]
+        (start_100ns, end_100ns, label, devoiced_phoneme, note_onset)         [两者都开]
 
     Notes
     -----
@@ -1795,10 +1870,19 @@ def apply_phoneme_mode(
     • For non-Japanese LAB files the merge algorithm may produce unexpected
       results; use mode='none' for Chinese / English / Korean LAB files.
     """
-    if mode == "none":
+    def _passthrough(seg: tuple[int, int, str]) -> tuple:
+        """未合并/静音直通条目的输出：devoiced 恒 None，note_onset 恒等于自己的 start。"""
+        s, e, lbl = seg[0], seg[1], seg[2]
+        if with_devoiced_phoneme and with_note_onset:
+            return (s, e, lbl, None, s)
+        if with_note_onset:
+            return (s, e, lbl, s)
         if with_devoiced_phoneme:
-            return [(s, e, lbl, None) for (s, e, lbl) in segments]
-        return list(segments)
+            return (s, e, lbl, None)
+        return seg
+
+    if mode == "none":
+        return [_passthrough(seg) for seg in segments]
 
     phoneme_output = "romaji" if mode == "merge" else mode
 
@@ -1814,6 +1898,7 @@ def apply_phoneme_mode(
                 output=phoneme_output,
                 with_devoiced_phoneme=with_devoiced_phoneme,
                 devoiced_target=devoiced_target,
+                with_note_onset=with_note_onset,
             )
             result.extend(merged)
             phoneme_buf.clear()
@@ -1822,7 +1907,7 @@ def apply_phoneme_mode(
         label = seg[2]
         if label.strip().lower() in _MERGE_SILENCE:
             _flush()
-            result.append((seg[0], seg[1], seg[2], None) if with_devoiced_phoneme else seg)
+            result.append(_passthrough(seg))
         else:
             phoneme_buf.append(seg)
 
