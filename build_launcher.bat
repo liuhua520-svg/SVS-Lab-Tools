@@ -15,11 +15,11 @@ if errorlevel 1 (
 
 echo [2/2] 打包 launcher.py 为多文件(onedir) exe
 pyinstaller ^
-  --name "SVS-Lab-Talkloid-Tools" ^
+  --name "SVS-Lab-Tools" ^
   --onedir ^
   --noconsole ^
   --clean ^
-  --icon="SVS-Lab-Talkloid-Tools.ico" ^
+  --icon="assets/icon/icon.ico" ^
   --hidden-import=clr_loader ^
   --hidden-import=pythonnet ^
   launcher.py
