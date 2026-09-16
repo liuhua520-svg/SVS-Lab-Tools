@@ -244,6 +244,13 @@ _models_lock = threading.Lock()
 # 当前 HTTP server 实例（用法与 whisperx_server.py 一致，供 /restart 使用）
 _httpd = None
 
+# 【2026-09 新增，修复"重启后旧进程和新进程一起消失"的偶发崩溃】保存
+# _delayed_restart() 所在的后台线程对象，供 __main__ 最后 join()——原因
+# 见 restart() 函数顶部新增的说明（与 whisperx_server.py / nemo_server.py
+# 完全一致）。这个偶发问题这次凑巧没在 Qwen3-TTS 上发作，但竞态本身跟
+# 具体服务无关，三个微服务的 /restart 实现完全一样，必须同步修。
+_restart_thread: Optional[threading.Thread] = None
+
 
 def _model_key(mode: str, size: str, device_override: str) -> Tuple[str, str, str]:
     return (mode, size, device_override)
@@ -414,6 +421,19 @@ def restart():
     让重启后的新进程继续写同一个 logs/qwen3tts.log 文件，而不是像之前
     那样在 close_fds=True 且不传 stdout/stderr 的情况下丢失所有标准句柄
     （详见 whisperx_server.py /restart 文档字符串里的完整说明）。
+
+    【2026-09 修复，重要，与 whisperx_server.py / nemo_server.py 同步】
+    补上一个衔接细节：_httpd.shutdown() 从这个后台线程调用后，会让运行
+    在【主线程】里的 _httpd.serve_forever()（见文件末尾 __main__ 块）
+    几乎立刻返回，主线程随即跑到脚本末尾。CPython 的规则是"一旦所有非
+    daemon 线程都结束，进程就可以退出"，不会等这个 daemon 后台线程把
+    server_close() / subprocess.Popen() / os._exit(0) 执行完——主线程
+    "脚本跑完"和这里"还没执行完"之间是纯粹的竞态，跟机器负载/GIL 调度
+    有关，运气不好时主线程会先一步把整个进程收掉，这个后台线程可能连
+    subprocess.Popen() 都还没调用到就被掐断，导致旧进程和新进程一起
+    消失。完整原因和本地实测复现过程见 whisperx_server.py 里的同名说明；
+    修法同样是让 __main__ 里的主线程 join() 这个后台线程，不让它抢先
+    跑完脚本。
     """
     def _delayed_restart():
         time.sleep(0.5)
@@ -441,7 +461,9 @@ def restart():
 
         os._exit(0)
 
-    threading.Thread(target=_delayed_restart, daemon=True).start()
+    global _restart_thread
+    _restart_thread = threading.Thread(target=_delayed_restart, daemon=True)
+    _restart_thread.start()
     return jsonify({"success": True, "message": "Qwen3-TTS 服务正在重启..."})
 
 
@@ -496,7 +518,17 @@ def generate_voice_design():
     body: {
       "text": str, "instruct": str（音色描述，如"体现撒娇稚嫩的萝莉女声..."）,
       "language"?: str, "size"?: "1.7B"|"0.6B"（0.6B 自动回退到 1.7B）,
-      "device"?: "auto"|"cpu"|"cuda"
+      "device"?: "auto"|"cpu"|"cuda",
+      "emotion"?: str（可选，自由文本，如 "Happy"/"温柔中带一点委屈"；
+        不限定于固定列表——Qwen3-TTS 能理解的情绪/语气描述远不止
+        Happy/Sad 等几个常见词，前端下拉框只是给出几个常见选项作为
+        输入建议，允许用户自行输入任意内容。空字符串或 "none"（大小写
+        不敏感）表示不附加。会拼接进 instruct（"{instruct}，情绪：
+        {emotion}"），因为 qwen-tts 的 generate_voice_design 本身不接受
+        独立的 emotion 参数，与官方参考 GUI（qwen3-tts.py 的
+        process_voice_design）做法一致）,
+      "seed"?: int（可选随机种子，便于复现同一次生成结果；对应
+        torch.manual_seed(seed)，在调用 generate_voice_design 之前设置）
     }
     """
     data = request.get_json(force=True, silent=True) or {}
@@ -511,6 +543,25 @@ def generate_voice_design():
         size = data.get("size") or "1.7B"
         device = data.get("device") or "auto"
         language = _qwen_language(data.get("language"))
+
+        # Emotion：自由文本，非空且不是 "none"（大小写不敏感）时原样拼接进
+        # instruct，不做任何白名单校验——用户可以输入任意情绪/语气描述，
+        # 不局限于前端下拉框给出的那几个常见建议项。拼接格式与参考实现
+        # qwen3-tts.py 的 process_voice_design 一致，便于对照官方 Gradio
+        # Demo 的效果。
+        emotion_raw = (data.get("emotion") or "").strip()
+        if emotion_raw and emotion_raw.lower() != "none":
+            instruct = f"{instruct}，情绪：{emotion_raw}"
+
+        # Seed：仅在传入合法整数时设置，异常值静默忽略（不影响正常生成），
+        # 与参考实现 process_voice_design 的容错方式一致。
+        seed_raw = data.get("seed")
+        if seed_raw is not None and str(seed_raw).strip() != "":
+            try:
+                import torch
+                torch.manual_seed(int(seed_raw))
+            except Exception as e:
+                logger.warning(f"⚠️  设置随机种子失败（seed={seed_raw!r}）：{e}")
 
         model = load_model("voice_design", size, device)
         wavs, sr = model.generate_voice_design(
@@ -593,3 +644,12 @@ if __name__ == "__main__":
     _httpd = make_server("127.0.0.1", 5853, app)
     logger.info("🚀 Qwen3-TTS service listening on http://127.0.0.1:5853")
     _httpd.serve_forever()
+
+    # 【2026-09 新增】serve_forever() 只会在 /restart 触发 shutdown() 后
+    # 提前返回，不代表后台的 _delayed_restart 线程已经跑完"释放端口→拉起
+    # 新进程→os._exit(0)"这一整套流程。这里必须 join() 等它，否则主线程
+    # 直接跑完脚本会让 CPython 提前收掉整个进程，把还没执行完的后台线程
+    # 一起掐断，导致重启变成"旧进程和新进程一起消失"——完整原因见
+    # restart() 函数里 2026-09 新增的说明。
+    if _restart_thread is not None:
+        _restart_thread.join()

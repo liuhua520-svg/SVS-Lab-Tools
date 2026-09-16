@@ -123,6 +123,36 @@ _model_lock = threading.Lock()
 _httpd = None
 _model_device: str = "auto"           # 记录当前所有已加载模型使用的 device_override
 
+# 【2026-09 新增，修复"重启后旧进程和新进程一起消失"的偶发崩溃】保存
+# _delayed_restart() 所在的后台线程对象，供 __main__ 最后 join()——原因
+# 见 restart() 函数顶部新增的说明（与 whisperx_server.py 完全一致）。
+_restart_thread: Optional[threading.Thread] = None
+
+
+def unload_model() -> int:
+    """
+    释放已缓存的全部 NeMo 模型（"用完即卸"设置开启时，由主进程 app.py
+    在每次 NeMoForcedAligner 任务结束后调用 /unload 触发；也可手动
+    POST /unload 调用）。写法与 whisperx_server.py / qwen3tts_server.py
+    的同名函数保持一致。
+
+    返回释放的模型槽位数。
+    """
+    with _model_lock:
+        n = len(_models)
+        _models.clear()
+    if n:
+        try:
+            import gc
+            gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info(f"[NeMo-FA] 已按「用完即卸」设置释放模型（共 {n} 个）")
+    return n
+
 
 def _pick_device(device_override: str = "auto") -> str:
     """
@@ -473,6 +503,30 @@ def restart():
       4) 最后 os._exit(0) 立即结束旧进程。
     无论重启多少次，每次都是确定性的"干净关端口 → 起新进程"，不会有
     状态累积。
+
+    【2026-09 修复，重要，与 whisperx_server.py 同步】上面这套流程本身
+    没问题，但过去遗漏了一个衔接细节，导致"设置页面保存后有时 WhisperX/
+    NeMo 直接消失，Qwen3-TTS 却没事"这种偶发、看起来毫无规律的崩溃：
+
+    _httpd.shutdown() 是从这个后台线程里调用的，但它会让运行在【主线程】
+    里的 _httpd.serve_forever()（见文件末尾 __main__ 块）几乎立刻返回。
+    serve_forever() 一返回，主线程就跑到了整个脚本的末尾——而 CPython 的
+    规则是："一旦所有非 daemon 线程都结束，进程就可以退出"，不会等还在
+    跑的 daemon 线程（这个后台线程被 threading.Thread(daemon=True) 标记）
+    执行完。也就是说，主线程"脚本跑完"和这个后台线程"还没来得及执行
+    server_close() / subprocess.Popen() / os._exit(0)"之间存在竞态：谁先
+    谁后完全看时序，跟机器负载、GIL 调度有关，跟这个服务本身"该不该
+    正常重启成功"没有任何关系。运气不好时，主线程先一步把整个进程收
+    掉，这个后台线程会在执行到一半（可能连 subprocess.Popen() 都还没
+    调用）时被直接掐断——旧进程没了，新进程也没起来，表现就是服务直接
+    "崩溃消失"。这就是本次实测复现出来的根因：本地用一个最小化的 Flask
+    + werkzeug make_server 例子复现过，日志显示 serve_forever() 已返回、
+    主线程已跑到脚本末尾，而这个后台线程的下一行日志永远不会被打印出来。
+
+    修法：不让主线程在 serve_forever() 返回后就直接"跑完脚本"，而是
+    调用 _restart_thread.join() 等这个后台线程真正结束（它最终会用
+    os._exit(0) 把整个进程杀掉，join() 不会主动返回，等的就是进程被杀
+    掉那一刻），从根上消灭这个竞态。
     """
     def _delayed_restart():
         time.sleep(0.5)
@@ -500,8 +554,17 @@ def restart():
 
         os._exit(0)
 
-    threading.Thread(target=_delayed_restart, daemon=True).start()
+    global _restart_thread
+    _restart_thread = threading.Thread(target=_delayed_restart, daemon=True)
+    _restart_thread.start()
     return jsonify({"success": True, "message": "NeMo Forced Aligner 服务正在重启..."})
+
+
+@app.post("/unload")
+def unload():
+    """释放已加载的 NeMo 模型（显存紧张时可手动调用，或由「用完即卸」设置自动触发）。"""
+    n = unload_model()
+    return jsonify({"success": True, "unloaded": n})
 
 
 @app.post("/align")
@@ -719,3 +782,12 @@ if __name__ == "__main__":
     _httpd = make_server("127.0.0.1", 5852, app)
     logger.info("🚀 NeMo Forced Aligner service listening on http://127.0.0.1:5852")
     _httpd.serve_forever()
+
+    # 【2026-09 新增】serve_forever() 只会在 /restart 触发 shutdown() 后
+    # 提前返回，不代表后台的 _delayed_restart 线程已经跑完"释放端口→拉起
+    # 新进程→os._exit(0)"这一整套流程。这里必须 join() 等它，否则主线程
+    # 直接跑完脚本会让 CPython 提前收掉整个进程，把还没执行完的后台线程
+    # 一起掐断，导致重启变成"旧进程和新进程一起消失"——完整原因见
+    # restart() 函数里 2026-09 新增的说明。
+    if _restart_thread is not None:
+        _restart_thread.join()

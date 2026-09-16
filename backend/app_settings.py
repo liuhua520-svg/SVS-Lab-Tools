@@ -97,6 +97,23 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "skip_start_nemo_server": False,
     "skip_start_qwen3tts_server": False,
 
+    # ── 用完即卸（每个模型独立开关，默认 False = 常驻，与改造前行为一致）──
+    # True  → 每次单个任务（一次对齐 / 一次合成请求）处理完毕后，立即把
+    #         该模型从显存/内存中卸载；下一次任务用到时再重新加载。好处
+    #         是空闲时不占用显存，代价是每次任务都要重新走一次加载耗时。
+    # False → 保持常驻（默认），任务结束后模型继续留在显存/内存里，下一次
+    #         任务直接复用，无需重新加载。
+    # 实时生效，无需重启任何进程：
+    #   - qwen3_asr / qwen3_aligner 在 app.py 主进程内直接读取本设置；
+    #   - whisperx / nemo_aligner / qwen3tts 由 app.py（或对应调用方）
+    #     在每次任务结束后读取本设置，决定是否顺带调用对应微服务的
+    #     /unload 接口。
+    "unload_qwen3_asr_after_task": False,
+    "unload_qwen3_aligner_after_task": False,
+    "unload_whisperx_after_task": False,
+    "unload_nemo_aligner_after_task": False,
+    "unload_qwen3tts_after_task": False,
+
     # ── Qwen3-TTS（TTS跟读独立引擎，qwen3tts_server.py，端口 5853）────────
     # 模型规模：1.7B 效果最好但显存需求更高；0.6B 更省显存/更快。
     # VoiceDesign（仅文本描述）目前只有 1.7B 权重，选择 0.6B 时该模式会
@@ -136,7 +153,7 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     # True  → 启用：按 _align_chunked() 里的规则，先按参考文本句末标点
     #         规划分段边界，再逐段独立对齐（详见下面两项 min/max 的说明）。
     #
-    # 该开关与下面【WhisperX 粗测预处理】(qwen3_fa_use_whisperx_prepass)
+    # 该开关与下面【Qwen3-ASR 粗测预处理】(qwen3_fa_use_qwen3_asr_prepass)
     # 是父子关系：粗测预处理只在"按句子分段对齐"这一整套流程内部生效
     # （用于规划分段边界），一旦本开关被设为 False，粗测预处理开关会被
     # save_settings() 强制一并置为 False，避免出现"分段对齐已禁用，但
@@ -159,57 +176,73 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     # 避免整句被硬塞进一个过长的独立片段。
     "qwen3_fa_max_sentence_chunk_sec": 20.0,
 
-    # ── Qwen3-FA 长音频分段：WhisperX 粗测时间戳预处理（可选）──────────────
+    # ── Qwen3-FA 长音频分段：Qwen3-ASR 粗测预处理（可选）────────────────────
     # 仅在 qwen3_fa_enable_sentence_chunking 为 True（即"按句子分段对齐"
     # 总开关已启用）时才有意义——分段对齐本身被禁用时，不存在"规划分段
     # 边界"这一步，本开关会被 save_settings() 强制一并置为 False。
     #
-    # True  → 在 Qwen3-ForcedAligner 做长音频分段对齐之前，先用 WhisperX
-    #         对同一段音频做一次轻量 ASR 转录（只转录，不做 wav2vec2 强制
-    #         对齐），借用 Whisper 自身 VAD 分段给出的真实语音起止时间戳
-    #         规划分段边界，替代原来"假设语速均匀、按参考文本字符数占比
-    #         反推时间"的估算方案——演唱/拖腔/语速不均的素材上，字符占比
-    #         估算的系统性误差可达 1~2 秒，往往导致喂给 Qwen3-FA 的每一段
-    #         物理边界本身就没卡准，进而触发大量"自愈修复/均匀分配"退化
-    #         兜底。需要预先安装 whisperx（pip install whisperx）；未安装
-    #         或识别失败时自动回退到原方案，不影响任务本身是否成功。
-    # False → 保持原来的字符比例估算方案（默认，不引入 WhisperX 依赖）。
-    "qwen3_fa_use_whisperx_prepass": False,
-    # 上面这次"粗测"专用的 Whisper 模型档位——只影响这一步的速度/准确度，
-    # 与"WhisperX"作为独立对齐后端（backend="whisperx"）时使用的模型档位
-    # 互不影响，是两次独立的模型加载/调用。可选值见 alt_aligners.py 里
-    # WhisperXAligner.SUPPORTED_MODELS（"large-v3" / "large-v3-turbo" /
-    # "large-v2" / "medium" / "small" / "base" / "tiny"）；这里只是定位
-    # 分段边界，不追求最高识别精度，可以选比主对齐更小/更快的档位。
-    "qwen3_fa_whisperx_prepass_model": "large-v3",
-
-    # ── WhisperX ASR 转录 batch_size（独立对齐后端 + 上面 Qwen3-FA 粗测
-    # 预处理共用同一个设置）─────────────────────────────────────────────
-    # 默认 16（与 whisperx 官方默认一致）。低显存显卡（例如 6GB 的老款
-    # 矿卡）在 large-v3 + batch_size=16 下容易在 ASR 转录阶段直接 CUDA
-    # 显存不足；alt_aligners.py 已经内置了显存不足时自动腰斩 batch_size
-    # 重试的逻辑（见 WhisperXAligner._transcribe_with_oom_retry），但如果
-    # 已知自己的显卡显存有限，也可以在这里直接调低这个值，跳过重试直接
-    # 一次成功、减少无谓的重试耗时；反之显存充裕的显卡可以调大以提速。
-    "whisperx_batch_size": 16,
-
-    # ── Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner batch_size ──
-    # 三者底层都不像 WhisperX 那样天然支持"多条音频一批推理"（本项目
-    # 每次对齐任务始终只送 1 条音频/1 个分段），因此这个设置的实际含义
-    # 与 whisperx_batch_size 不完全一样，按后端拆成两种用法：
+    # 【2026-09 由 WhisperX 粗测预处理改造而来】原方案是整段丢给 WhisperX
+    # 做一次轻量 ASR 转录，借用它自己划出的句子边界规划分段；现在改为
+    # 两步——先用 VAD（能量阈值法静音检测，与 subtitle_processor.py 字幕
+    # 识别页面同一套思路）把音频按真实静音间隙物理剪切成若干语音块，
+    # 切点必然落在真实的音频空白中间，不会咬断字词；再对每个语音块单独
+    # 调用本地已经常驻加载的 Qwen3-ASR 做一次轻量识别（只识别文字用来
+    # 计算配额，不产出最终文本），按识别字数把参考文本切给对应语音块。
+    # 不再依赖独立的 WhisperX 服务/模型。
     #
-    #   - Qwen3-ASR：直接透传给 qwen_asr.Qwen3ASRModel.from_pretrained(...)
-    #     的 max_inference_batch_size（官方参数，限制模型内部单次推理的
-    #     最大批量，-1 为不限制）。原 qwen3_server.py 对 GPU 硬编码为 8，
-    #     这里把它变成可调项；值越小，显存占用峰值越低。
-    #   - Qwen3-ForcedAligner / NeMo Forced Aligner：两者服务端调用本身
-    #     就是单音频单次前向，没有真正的"批"概念可调；这个值改为用作
-    #     "显存不足时自动降级重试"的起始参考批大小——命中 CUDA OOM 时，
-    #     会从这个值开始按腰斩策略重试（间接影响分块/降精度等自愈路径的
-    #     起始激进程度），不会在正常（不 OOM）情况下影响任何行为。
+    # True  → 启用上述"VAD 切分 + Qwen3-ASR 粗测识别字数"方案，替代原来
+    #         "假设语速均匀、按参考文本字符数占比反推时间"的估算方案——
+    #         演唱/拖腔/语速不均的素材上，字符占比估算的系统性误差可达
+    #         1~2 秒，往往导致喂给 Qwen3-FA 的每一段物理边界本身就没卡
+    #         准，进而触发大量"自愈修复/均匀分配"退化兜底。VAD 未切出
+    #         语音块/识别失败/无法绑定参考文本时自动回退到原方案，不
+    #         影响任务本身是否成功。
+    # False → 保持原来的字符比例估算方案（默认）。
+    "qwen3_fa_use_qwen3_asr_prepass": False,
+
+    # 下面四项 VAD 静音切分参数，仅在 qwen3_fa_use_qwen3_asr_prepass 为
+    # True 时才会用到，含义与 subtitle_processor.py 字幕识别页面的同名
+    # 概念一致（但是各自独立的设置项，互不影响）。
     #
-    # 默认 8，低显存显卡可调小；三个后端共用同一个设置项，与
-    # whisperx_batch_size 是各自独立的两个调优参数，互不影响。
+    # 连续静音时长达到此值（秒）才视为真正的句间停顿，短暂的辅音闭塞
+    # 不会被误判为停顿。
+    "qwen3_fa_vad_min_silence_sec": 0.45,
+    # 短于此值（秒）的语音块视为噪声，直接丢弃。
+    "qwen3_fa_vad_min_speech_sec": 0.25,
+    # 单个语音块超过此值（秒，长时间不停顿，如拖腔）时，在块内部能量
+    # 低谷处强制二次切分，避免出现极长的一段。
+    "qwen3_fa_vad_max_speech_sec": 18.0,
+    # 【VAD 合并间隔】开启后，相邻两个语音块之间只要静音间隔大于下面
+    # qwen3_fa_vad_gap_threshold_sec，就把这段间隙对半分配到中点（前一
+    # 段的结束时间和后一段的开始时间都移到间隙中点），让两段的时间轴
+    # 挨得更近——与字幕识别页面"VAD 合并间隔"效果一致，不合并文本、
+    # 不减少分段数量。默认关闭（保持原有"缝合到刚好无缝覆盖"的行为，
+    # 不做额外的居中调整）。
+    "qwen3_fa_vad_close_gaps": False,
+    # 触发上面合并间隔处理的下限（秒）；间隔小于等于该值视为已经足够
+    # 紧凑，保持原样不动。
+    "qwen3_fa_vad_gap_threshold_sec": 0.6,
+
+    # ── Qwen3-ASR 粗测预处理 batch_size ────────────────────────────────
+    # 【2026-09】设置页面里这一项挂在上面的 qwen3_fa_use_qwen3_asr_prepass
+    # 开关下面，跟着粗测预处理一起显示/隐藏——因为整个后端里只有粗测
+    # 预处理这一条路径会读它（alt_aligners.py
+    # _plan_chunks_via_qwen3_asr_rough_pass() → _get_qwen3_batch_size()）。
+    #
+    # 含义：粗测预处理逐块识别时，直接透传给
+    # qwen_asr.Qwen3ASRModel.from_pretrained(...) 的
+    # max_inference_batch_size（官方参数，限制模型内部单次推理的最大
+    # 批量，-1 为不限制）。原 qwen3_server.py 对 GPU 硬编码为 8，这里把
+    # 它变成可调项；值越小，显存占用峰值越低。
+    #
+    # 默认 8，低显存显卡可调小。alt_aligners.py 已经内置了显存不足时
+    # 自动腰斩这个值重试的逻辑（见 _qwen3_load_asr_model()），但如果已知
+    # 自己的显卡显存有限，也可以在这里直接调低，跳过重试直接一次成功、
+    # 减少无谓的重试耗时；反之显存充裕的显卡可以调大以提速。
+    #
+    # 注：处理页面上各后端（WhisperX / Qwen3 / NeMo）自己的"批处理大小"
+    # 是逐任务参数，随表单一起提交、由 pipeline.py 透传给对应 aligner
+    # 实例，与本设置项各自独立、互不影响。
     "qwen3_batch_size": 8,
 
     # ── tts_processor.py 逐句合成分段长度（字符数）───────────────────────
@@ -345,6 +378,12 @@ def save_settings(new_settings: Dict[str, object]) -> Dict[str, object]:
         current["skip_start_nemo_server"] = bool(current.get("skip_start_nemo_server"))
         current["skip_start_qwen3tts_server"] = bool(current.get("skip_start_qwen3tts_server"))
 
+        current["unload_qwen3_asr_after_task"] = bool(current.get("unload_qwen3_asr_after_task"))
+        current["unload_qwen3_aligner_after_task"] = bool(current.get("unload_qwen3_aligner_after_task"))
+        current["unload_whisperx_after_task"] = bool(current.get("unload_whisperx_after_task"))
+        current["unload_nemo_aligner_after_task"] = bool(current.get("unload_nemo_aligner_after_task"))
+        current["unload_qwen3tts_after_task"] = bool(current.get("unload_qwen3tts_after_task"))
+
         # Qwen3-TTS 模型规模：只允许 "1.7B" / "0.6B"，非法值回退默认值。
         tts_size = str(current.get("qwen3_tts_model_size") or "").strip()
         current["qwen3_tts_model_size"] = (
@@ -355,34 +394,35 @@ def save_settings(new_settings: Dict[str, object]) -> Dict[str, object]:
         current["output_timeline_files"] = bool(current.get("output_timeline_files"))
 
         # Qwen3-FA「按句子分段对齐」总开关，以及与其构成父子关系的
-        # WhisperX 粗测预处理：bool 开关 + 模型档位字符串（非法/空值回退
-        # 为默认档位，逻辑与上面 mirror_url 的兜底一致）。
+        # Qwen3-ASR 粗测预处理：bool 开关 + 一组 VAD 数值参数（非法/缺失
+        # 值各自回退为默认值，逻辑与上面 mirror_url 的兜底一致）。
         current["qwen3_fa_enable_sentence_chunking"] = bool(current.get("qwen3_fa_enable_sentence_chunking"))
-        current["qwen3_fa_use_whisperx_prepass"] = bool(current.get("qwen3_fa_use_whisperx_prepass"))
+        current["qwen3_fa_use_qwen3_asr_prepass"] = bool(current.get("qwen3_fa_use_qwen3_asr_prepass"))
         # 联动：总开关（按句子分段对齐）关闭时，粗测预处理这个子开关
         # 强制一并关闭——不管前端本次提交了什么值，都不允许"分段对齐
         # 已禁用，但粗测预处理仍显示已开启"这种矛盾状态被写入磁盘。
         # 前端已经做了同步的 UI 隐藏 + 置空处理，这里是服务端侧的最终
         # 兜底，防止绕过前端直接调用 /api/settings 写入脏数据。
         if not current["qwen3_fa_enable_sentence_chunking"]:
-            current["qwen3_fa_use_whisperx_prepass"] = False
-        prepass_model = str(current.get("qwen3_fa_whisperx_prepass_model") or "").strip()
-        current["qwen3_fa_whisperx_prepass_model"] = (
-            prepass_model or DEFAULT_SETTINGS["qwen3_fa_whisperx_prepass_model"]
-        )
+            current["qwen3_fa_use_qwen3_asr_prepass"] = False
 
-        # WhisperX batch_size：转 int 并钳制到 [1, 128]，非法/缺失值回退
-        # 为默认值 16，避免 0/负数/非数字导致 transcribe() 抛出难以理解
-        # 的错误。
-        try:
-            wx_bs = int(current.get("whisperx_batch_size", DEFAULT_SETTINGS["whisperx_batch_size"]))
-        except (TypeError, ValueError):
-            wx_bs = int(DEFAULT_SETTINGS["whisperx_batch_size"])
-        current["whisperx_batch_size"] = min(max(wx_bs, 1), 128)
+        current["qwen3_fa_vad_close_gaps"] = bool(current.get("qwen3_fa_vad_close_gaps"))
 
-        # Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner batch_size：
-        # 同样转 int 并钳制到 [1, 128]，非法/缺失值回退为默认值 8，与
-        # whisperx_batch_size 的校验逻辑保持一致。
+        def _fa_vad_float(key: str, lo: float, hi: float) -> float:
+            try:
+                val = float(current.get(key, DEFAULT_SETTINGS[key]))
+            except (TypeError, ValueError):
+                val = float(DEFAULT_SETTINGS[key])
+            return min(max(val, lo), hi)
+
+        current["qwen3_fa_vad_min_silence_sec"] = _fa_vad_float("qwen3_fa_vad_min_silence_sec", 0.05, 10.0)
+        current["qwen3_fa_vad_min_speech_sec"] = _fa_vad_float("qwen3_fa_vad_min_speech_sec", 0.05, 10.0)
+        current["qwen3_fa_vad_max_speech_sec"] = _fa_vad_float("qwen3_fa_vad_max_speech_sec", 1.0, 600.0)
+        current["qwen3_fa_vad_gap_threshold_sec"] = _fa_vad_float("qwen3_fa_vad_gap_threshold_sec", 0.05, 30.0)
+
+        # Qwen3-ASR 粗测预处理 batch_size：转 int 并钳制到 [1, 128]，
+        # 非法/缺失值回退为默认值 8，避免 0/负数/非数字被透传给
+        # max_inference_batch_size 后抛出难以理解的错误。
         try:
             q3_bs = int(current.get("qwen3_batch_size", DEFAULT_SETTINGS["qwen3_batch_size"]))
         except (TypeError, ValueError):
@@ -611,6 +651,37 @@ def get_alignment_tuning() -> Dict[str, float]:
     return tuning
 
 
+_UNLOAD_KEYS = (
+    "unload_qwen3_asr_after_task",
+    "unload_qwen3_aligner_after_task",
+    "unload_whisperx_after_task",
+    "unload_nemo_aligner_after_task",
+    "unload_qwen3tts_after_task",
+)
+
+
+def get_unload_after_task_settings() -> Dict[str, bool]:
+    """
+    供 alt_aligners.py / pipeline.py / tts_processor.py 等调用：实时读取
+    5 个"用完即卸"独立开关的当前值。
+
+    与 get_alignment_tuning() 一样不做 mtime 缓存以外的额外处理——这里
+    调用频率远低于对齐调优参数（每个任务结束时读一次，不是每个分段读
+    一次），直接读盘足够快，没必要引入缓存的复杂度。读取失败时安全回退
+    为全部 False（即保持常驻，不改变现有行为）。
+
+    Returns
+    -------
+    Dict[str, bool]，键固定为 _UNLOAD_KEYS 中的 5 个开关名。
+    """
+    try:
+        settings = load_settings()
+        return {key: bool(settings.get(key, False)) for key in _UNLOAD_KEYS}
+    except Exception as e:
+        logger.debug("读取「用完即卸」开关失败，使用默认值（全部保持常驻）: %s", e)
+        return {key: False for key in _UNLOAD_KEYS}
+
+
 def get_tts_segment_len() -> Dict[str, int]:
     """
     供 tts_processor.py 调用：实时读取逐句合成分段长度设置
@@ -698,17 +769,14 @@ def get_tts_split_options() -> Dict[str, object]:
 
 def get_qwen3_batch_size() -> int:
     """
-    供 alt_aligners.py（主进程内的 Qwen3ASRAligner / Qwen3ForcedAligner，
-    现已在同一进程内本地加载模型）以及 nemo_server.py（独立进程）共用：
-    实时读取 qwen3_batch_size 设置。
+    供 alt_aligners.py 的 Qwen3-ASR 粗测预处理读取（Qwen3-ASR 已在主进程
+    内本地加载模型）：实时读取 qwen3_batch_size 设置。
 
-    与 get_alignment_tuning() 使用的 mtime 缓存不同，这里同 whisperx 的
-    _get_whisperx_batch_size() 一样直接读盘——nemo_server.py 是独立子
-    进程，调用频率远低于主进程的对齐热路径，没有必要为此额外维护一层
-    跨进程都要生效的缓存；直接读盘成本可忽略，且保证"设置页面保存后
-    下一次任务立即生效"（nemo_server.py 每次 /align 请求都会重新调用，
-    不需要重启这个微服务；主进程内的 Qwen3-ASR/Qwen3-FA 同样每次调用时
-    实时读取，不需要重启整个程序）。
+    与 get_alignment_tuning() 使用的 mtime 缓存不同，这里直接读盘——
+    粗测预处理每次任务最多调用一次（用于决定模型加载时的
+    max_inference_batch_size），不在逐帧/逐块的热路径上，没有必要为此
+    额外维护一层缓存；直接读盘成本可忽略，且保证"设置页面保存后下一次
+    任务立即生效"，不需要重启整个程序。
 
     读取失败或配置值非法时安全回退到默认值 8。
 

@@ -25,7 +25,7 @@ import unicodedata
 import warnings
 import requests
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # 【修复】必须在本文件任何地方 import speechbrain / qwen_asr 之前，
 # 先强制真正执行 librosa/core/audio.py 这个子模块（而不是只 import librosa）。
@@ -781,39 +781,6 @@ def _get_alignment_tuning() -> Dict[str, float]:
     return fallback
 
 
-def _get_whisperx_prepass_settings() -> Dict[str, object]:
-    """
-    读取"Qwen3-FA 长音频分段前，先用 WhisperX 做一次粗测时间戳"这一开关
-    及其使用的 Whisper 模型档位（详见 _plan_chunks_via_whisperx_rough_pass
-    顶部说明）。
-
-    与 _get_alignment_tuning() 不同：那边全部是数值型调优参数，走
-    app_settings.get_alignment_tuning() 专用的 float 通道；这里一个是
-    bool 开关、一个是字符串，直接读 app_settings.load_settings() 的
-    原始字典即可，没有必要为此单独扩展 get_alignment_tuning() 的类型
-    约定。本函数只在每次 Qwen3-FA align() 任务开始时调用一次（不是
-    每个分段调用一次），无需像 _get_alignment_tuning() 那样做 mtime
-    缓存，直接读盘即可。
-
-    读取失败（app_settings 不可用、配置文件损坏）时安全回退到"关闭"，
-    与该功能默认不开启保持一致，不影响任何现有行为。
-    """
-    fallback: Dict[str, object] = {
-        "enabled": False,
-        "whisper_model": "large-v3",
-    }
-    try:
-        import app_settings
-        settings = app_settings.load_settings()
-        fallback["enabled"] = bool(settings.get("qwen3_fa_use_whisperx_prepass", False))
-        model = str(settings.get("qwen3_fa_whisperx_prepass_model") or "").strip()
-        if model:
-            fallback["whisper_model"] = model
-    except Exception as e:
-        logger.debug("读取 WhisperX 粗测设置失败，使用默认值（关闭）: %s", e)
-    return fallback
-
-
 def _get_sentence_chunking_enabled() -> bool:
     """
     读取"Qwen3-ForcedAligner 按句子分段对齐"总开关
@@ -822,14 +789,14 @@ def _get_sentence_chunking_enabled() -> bool:
     该开关是 _align_chunked() 这一整套"按句末标点规划分段 + 逐段独立
     对齐"流程的总闸门：为 False 时，Qwen3ForcedAligner.align() 会完全
     跳过 _align_chunked()，直接调用 _align_single_chunk() 做整段单次
-    对齐，行为等同于 v3 分段逻辑引入之前的原始版本；WhisperX 粗测预处理
-    （_get_whisperx_prepass_settings）是分段流程内部的一个子选项，只在
+    对齐，行为等同于 v3 分段逻辑引入之前的原始版本；Qwen3-ASR 粗测预处理
+    （_get_qwen3_asr_prepass_settings）是分段流程内部的一个子选项，只在
     本开关为 True 时才可能被实际用到——两者的父子关系由
     app_settings.save_settings() 在保存时强制维护（总开关关闭时粗测
     预处理会被一并强制置为 False），这里读取到的值已经是校验过的结果，
     不需要再额外处理"父开关关闭但子开关仍为 True"这种矛盾状态。
 
-    与 _get_whisperx_prepass_settings() 一样，只在每次 align() 任务
+    与 _get_qwen3_asr_prepass_settings() 一样，只在每次 align() 任务
     开始时读取一次，不做 mtime 缓存；读取失败时安全回退到"关闭"，
     与该功能默认不开启保持一致，不影响任何现有行为。
     """
@@ -842,42 +809,21 @@ def _get_sentence_chunking_enabled() -> bool:
         return False
 
 
-def _get_whisperx_batch_size() -> int:
-    """
-    读取 WhisperX ASR 转录使用的 batch_size 调优设置（默认 16，与
-    WhisperXAligner.__init__ 原有默认值一致）。
-
-    单独抽出来实时读取（而不是依赖 WhisperXAligner 实例构造时保存的
-    self.batch_size），是因为该实例作为跨任务复用的单例缓存（见
-    get_aligner()），用户在设置页面调完这个值之后，已经创建好的实例
-    不会重新构造——只有每次转录都重新读一次设置，修改才能在下一次
-    任务上立即生效，不需要重启进程，与其余对齐调优参数的约定一致。
-    详见 whisperx_server.py 里 _transcribe_with_oom_retry() 顶部说明。
-
-    读取失败或配置值非法时安全回退到 16。
-    """
-    try:
-        import app_settings
-        settings = app_settings.load_settings()
-        val = int(settings.get("whisperx_batch_size", 16))
-        return max(1, val)
-    except Exception:
-        return 16
-
-
 def _get_qwen3_batch_size() -> int:
     """
-    读取 Qwen3-ASR / Qwen3-ForcedAligner / NeMo Forced Aligner 共用的
-    batch_size 调优设置（默认 8）。
+    读取 Qwen3-ASR 粗测预处理的 batch_size 调优设置（默认 8）。
 
-    与 _get_whisperx_batch_size() 同样的"实时读取、无需重启"约定，见
-    app_settings.get_qwen3_batch_size() 顶部说明。三个后端的具体用法：
-      - Qwen3-ASR：直接传给 _qwen3_load_asr_model() 的 batch_size 参数，
-        本进程内本地设置 max_inference_batch_size。
-      - Qwen3-ForcedAligner：作为 _align_single_chunk() 显存不足时自动
-        降级重试的起始批大小参考值（见该方法内 OOM 重试逻辑）。
-      - NeMo Forced Aligner：通过 HTTP 请求体的 "batch_size" 字段透传给
-        nemo_server.py，服务端据此决定 OOM 重试的起始降级参考值。
+    "实时读取、无需重启"约定见 app_settings.get_qwen3_batch_size() 顶部
+    说明。用法只有一处：_plan_chunks_via_qwen3_asr_rough_pass() 逐块识别
+    前，把它传给 _qwen3_load_asr_model() 的 batch_size 参数，在本进程内
+    设置模型的 max_inference_batch_size。
+
+    【2026-09】设置页面上这一项已挂到"启用 Qwen3-ASR 粗测预处理"开关
+    下面，跟着该开关一起显示/隐藏；同时移除了原来的
+    "WhisperX 独立对齐后端设置"区块及其 whisperx_batch_size 设置项——
+    WhisperX 的批大小改为完全由处理页面的逐任务参数决定（见
+    WhisperXAligner._call_transcribe()），不再有一个全局设置在背后
+    覆盖它。
 
     读取失败或配置值非法时安全回退到 8。
     """
@@ -1579,6 +1525,45 @@ def _fix_ctc_stretch(
     return merged
 
 
+def _wait_for_service_after_restart(base_url: str, service_label: str,
+                                     max_wait_sec: float = 15.0,
+                                     poll_interval_sec: float = 0.5) -> None:
+    """
+    【用完即卸 → 重启子进程】配套的等待逻辑。
+
+    背景：WhisperXAligner / NeMoForcedAligner 的"用完即卸"改为调用
+    /restart（见各自 _call_unload() 顶部的详细说明），子进程会经历
+    "关闭旧进程监听端口 → 拉起全新进程 → 新进程重新监听端口"这一整套
+    流程，中间有大约 0.5～2 秒的空档期（取决于机器负载），端口完全不可
+    连接。如果用户在这个空档期内紧接着发起下一次任务，请求会直接连接
+    失败，即使这个新任务本来跟上一次"用完即卸"毫无关系。
+
+    这里在真正发起对齐请求之前，先用一次轻量的健康检查探测服务是否
+    已经监听；如果暂时探测不到（典型场景就是撞上了重启空档期），就
+    在这里短暂轮询等待，而不是让调用方立刻报错——等新进程重新监听上了
+    再继续往下走。正常情况下（没有撞上重启空档期）这次探测会立刻成功，
+    不引入任何额外等待。
+
+    如果等到 max_wait_sec 超时仍然连不上，直接放行、不抛异常——把"服务
+    到底是不是真的挂了"这件事交给调用方原有的请求逻辑去处理（它自己
+    会因为连接失败而抛出真实的错误信息），这里不重复造一遍错误处理。
+    """
+    import requests
+    deadline = time.time() + max_wait_sec
+    waited = False
+    while time.time() < deadline:
+        try:
+            requests.get(base_url, timeout=2)
+            if waited:
+                logger.info(f"[{service_label}] 独立服务重启完成，端口已恢复监听，继续本次任务")
+            return
+        except Exception:
+            waited = True
+            time.sleep(poll_interval_sec)
+    if waited:
+        logger.warning(f"[{service_label}] 等待独立服务重启完成超时（{max_wait_sec}s），继续尝试本次任务（可能会失败）")
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 4. 基类
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1916,8 +1901,13 @@ class WhisperXAligner(AltAlignerBase):
     音素时长守护（PDG）、LAB 文本组装等后处理全部原样保留在本类里——
     只有"调用模型拿 ASR/对齐原始结果"这一个原语（原来是本地
     whisperx.load_model()/whisperx.align() 调用）改成了 HTTP 请求，
-    返回值形状（entries 列表 / raw_segments）保持一致，上层调用方
-    （_plan_chunks_via_whisperx_rough_pass 等）无需改动。
+    返回值形状（entries 列表 / raw_segments）保持一致。
+
+    【2026-09 变更】本类不再被 Qwen3-ForcedAligner 的长音频分段规划
+    调用——粗测预处理已改为 VAD 静音切分 + 本地 Qwen3-ASR 识别（见
+    _plan_chunks_via_qwen3_asr_prepass），不再依赖 WhisperX。本类现在
+    仅作为用户可在前端独立选择的强制对齐后端（backend="whisperx"）
+    继续存在，与 Qwen3-FA / NeMo 并列。
 
     优势：
       - 不需要参考文本（自动转录模式）
@@ -1988,6 +1978,13 @@ class WhisperXAligner(AltAlignerBase):
             self._session = requests.Session()
 
     def _call_transcribe(self, audio_path: str, wx_lang: str) -> Dict:
+        # 【2026-09】batch_size 改回用实例上的 self.batch_size，即处理页面
+        # 那个逐任务的"批处理大小"表单值（经 pipeline.py → get_aligner()
+        # 透传进来）。此前这里实时读的是设置页面的全局 whisperx_batch_size，
+        # 那个设置项已随"WhisperX 独立对齐后端设置"区块一并移除；而
+        # get_aligner() 的单例缓存 key 里本来就带着 batch_size，用户在处理
+        # 页面改了值就会拿到一个新实例，不存在"旧实例读到旧值"的问题，
+        # 不需要再绕一次磁盘。
         self._ensure_session()
         payload = {
             "audio": audio_path,
@@ -1995,7 +1992,7 @@ class WhisperXAligner(AltAlignerBase):
             "whisper_model": self.whisper_model,
             "device": _safe_device(getattr(self, "_device", "auto")),
             "compute_type": self.compute_type,
-            "batch_size": _get_whisperx_batch_size(),
+            "batch_size": max(1, int(getattr(self, "batch_size", 16) or 16)),
         }
         resp = self._session.post(f"{self.endpoint}/transcribe", json=payload, timeout=1800)
         resp.raise_for_status()
@@ -2013,48 +2010,44 @@ class WhisperXAligner(AltAlignerBase):
         resp.raise_for_status()
         return resp.json()
 
-    # ── 粗测（仅 ASR 转录，不做 wav2vec2 强制对齐）─────────────────────────
-    def _transcribe_rough_segments(self, audio_path: str, language: str) -> Dict:
+    def _call_unload(self) -> None:
         """
-        仅做一次 ASR 转录，拿到 Whisper 自身 VAD 分段给出的句级"粗略"
-        时间戳——不含 align() 后续的逐句裁剪 + wav2vec2 强制对齐 + 静音
-        精修等步骤，因此比完整的 align() 快得多。
+        【用完即卸】通知 whisperx_server.py 释放模型。
 
-        专供 Qwen3ForcedAligner 的长音频分段规划复用（详见模块下方
-        _plan_chunks_via_whisperx_rough_pass 顶部说明）：Qwen3-FA 自己的
-        分段对齐此前完全依赖"假设语速均匀、按参考文本字符数占比反推
-        每句在全曲时间轴上的位置"这一估算方式，在演唱/拖腔/语速不均
-        的素材上系统性误差可达 1~2 秒，导致喂给 Qwen3-FA 的每一段物理
-        边界本身就没卡准，即使 Qwen3-FA 自己对这一段内部再怎么对齐也
-        无法弥补，表现为大量"自愈修复/均匀分配"退化兜底。这里借用
-        WhisperX（真实 ASR，不依赖字符比例假设）的分段结果作为更可靠的
-        边界来源；只用它的 (start, end) 时间戳和"这一段自己识别出多少
-        字"这两个信息，从不使用它识别出的文字内容本身——真正喂给
-        Qwen3-FA 做精细对齐的文本，仍然是原始参考文本按字数配额切出的
-        一个切片（见 _bind_ref_text_by_asr_count），保证不引入 ASR 识别
-        错误。
+        【2026-09 改为重启子进程，而非仅调用 /unload】实测发现：WhisperX
+        底层用的是 CTranslate2（ASR）+ PyTorch（wav2vec2 对齐模型），
+        CTranslate2/cuDNN 这类库一旦被加载，会在 CUDA context 里预留一块
+        "运行时基础开销"显存（kernel 缓存、workspace 等）——这部分显存
+        只有整个进程真正退出、CUDA context 被销毁时才会归还给系统，单纯
+        调用 /unload 清空 Python 侧的模型对象缓存 + torch.cuda.empty_cache()
+        无法回收它，会导致任务管理器/nvidia-smi 里看到的显存占用不下降
+        （尽管模型权重本身已经释放，不会跟着任务反复累积增长）。
 
-        Returns
-        -------
-        {"success": True, "raw_segments": [...]}：每个元素至少含
-        "start"/"end"/"text" 三个键（whisperx transcribe() 原始输出格式；
-        "text" 是 Whisper 自己的识别文本，仅用于计算字数配额，不会被
-        当作最终对齐文本使用）。
-        失败（服务不可访问 / 音频加载失败 / ASR 无输出）时返回
-        {"success": False, "error": "..."}，调用方应无缝回退到旧的按
-        字符比例估算方案，不让整个对齐任务失败。
+        因此这里改为调用 /restart：让 whisperx_server.py 干净退出旧进程、
+        拉起全新进程，新进程里模型是惰性加载的，不会立刻重新占用显存，
+        效果上等价于"卸载"，但能连库的运行时开销一起清零。/restart 的
+        实现见 whisperx_server.py 里 restart() 函数顶部的详细说明（用
+        werkzeug make_server 干净关端口，再 subprocess.Popen 拉新进程，
+        避免 Windows 下 os.execv 的坑）。
+
+        与调用 /unload 一样是 fire-and-forget：本次 HTTP 连接大概率会在
+        旧进程 os._exit(0) 时被直接挂断，拿不到正常响应，这是预期行为，
+        不代表重启失败，因此这里仍然吞掉所有异常，只记日志，不影响本次
+        已经完成的对齐任务结果。
         """
+        self._ensure_session()
         try:
-            wx_lang = _to_whisperx_lang(language)
-            result = self._call_transcribe(audio_path, wx_lang)
-            if not result.get("success"):
-                return {"success": False, "error": result.get("error", "WhisperX 独立服务返回失败")}
-            return result
-        except requests.exceptions.RequestException as e:
-            return {"success": False, "error": f"WhisperX 独立服务不可访问: {e}"}
+            self._session.post(f"{self.endpoint}/restart", json={}, timeout=5)
+            logger.info("[WhisperX] 已按「用完即卸」设置触发独立服务重启（连库运行时开销一起释放）")
         except Exception as e:
-            logger.warning(f"[WhisperX][粗测] ASR 转录失败: {e}")
-            return {"success": False, "error": str(e)}
+            logger.info(f"[WhisperX] 「用完即卸」触发独立服务重启（连接按预期被重启进程挂断，不影响本次任务结果）: {e}")
+
+    # 【2026-09 移除】_transcribe_rough_segments()：此前专供
+    # Qwen3ForcedAligner 长音频分段规划复用的"仅 ASR 转录、不做强制
+    # 对齐"包装方法，随 _plan_chunks_via_whisperx_rough_pass 一起移除
+    # （分段规划已改为 VAD 静音切分 + 本地 Qwen3-ASR，见
+    # _plan_chunks_via_qwen3_asr_prepass 顶部说明）。_call_transcribe()
+    # 本身仍保留、仍被下面 align() 使用，未受影响。
 
     # ── 核心对齐（句子隔离版）────────────────────────────────────────────────
     def align(self, audio_path: str, text: Optional[str], language: str,
@@ -2080,6 +2073,11 @@ class WhisperXAligner(AltAlignerBase):
             wx_lang  = _to_whisperx_lang(language)
             int_lang = _normalize_lang(language)
             _SR      = 16_000   # WhisperX load_audio 固定输出 16kHz
+
+            # 【用完即卸 → 重启子进程】配套等待：见 _wait_for_service_after_restart()
+            # 顶部说明——如果上一次任务触发了 /restart，这里短暂等待新进程
+            # 重新监听端口，避免紧接着的这次任务因为撞上重启空档期而报错。
+            _wait_for_service_after_restart(self.endpoint + "/", "WhisperX")
 
             # ── 1. ASR 转录（仅用于获取句子级时序边界）──────────────────────
             logger.info("[WhisperX] 开始 ASR 转录...")
@@ -2296,6 +2294,13 @@ class WhisperXAligner(AltAlignerBase):
         except Exception as e:
             logger.error(f"[WhisperX] 对齐失败: {e}", exc_info=True)
             return self._err(str(e), t0)
+        finally:
+            # 【用完即卸】若设置页面开启了 unload_whisperx_after_task，
+            # 无论本次任务成功/失败都在这里通知独立服务释放模型——与
+            # Qwen3ASRAligner/Qwen3ForcedAligner 侧的 finally 写法保持
+            # 一致的"每次单个任务处理完就立刻卸载"语义。
+            if _get_unload_after_task_settings().get("unload_whisperx_after_task"):
+                self._call_unload()
 
     # ── 本地音频加载（用于能量法静音边界精修）────────────────────────────────
     @staticmethod
@@ -2813,6 +2818,93 @@ def _qwen3_load_forced_aligner(device_override: str = "auto"):
             return None
 
 
+def _qwen3_unload_asr_model() -> bool:
+    """
+    释放已缓存的 Qwen3-ASR 模型（"用完即卸"设置开启时，在每次
+    Qwen3ASRAligner.align() 任务结束后调用）。
+
+    与 _qwen3_load_asr_model() 里"配置变化时先置空再重新加载"的写法保持
+    一致：先在锁内把模块级缓存变量置空、丢弃对模型对象的最后一个强引用，
+    出锁后再做 torch.cuda.empty_cache()（避免持锁时执行较慢的 CUDA 调用，
+    与文件里其它地方的惯例一致）。
+
+    返回是否真的释放了一个已加载的实例（原本就未加载时返回 False，调用方
+    可据此判断是否需要打日志）。
+    """
+    global _qwen3_asr_model
+    with _qwen3_asr_model_lock:
+        had_model = _qwen3_asr_model is not None
+        _qwen3_asr_model = None
+    if had_model:
+        try:
+            import gc
+            gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("[Qwen3-ASR] 已按「用完即卸」设置释放模型")
+    return had_model
+
+
+def _qwen3_unload_fa_model() -> bool:
+    """释放已缓存的 Qwen3-ForcedAligner 模型，逻辑与 _qwen3_unload_asr_model() 对称。"""
+    global _qwen3_fa_model
+    with _qwen3_fa_model_lock:
+        had_model = _qwen3_fa_model is not None
+        _qwen3_fa_model = None
+    if had_model:
+        try:
+            import gc
+            gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("[Qwen3-FA] 已按「用完即卸」设置释放模型")
+    return had_model
+
+
+def _get_unload_after_task_settings() -> Dict[str, bool]:
+    """
+    读取 5 个「用完即卸」独立开关（qwen3_asr / qwen3_aligner / whisperx /
+    nemo_aligner / qwen3tts），实时读取、无需重启，约定与
+    _get_sentence_chunking_enabled() 等函数一致。读取失败时安全回退为
+    全部 False（保持常驻，不改变现有行为）。
+    """
+    try:
+        import app_settings
+        return app_settings.get_unload_after_task_settings()
+    except Exception as e:
+        logger.debug("读取「用完即卸」开关失败，使用默认值（全部保持常驻）: %s", e)
+        return {
+            "unload_qwen3_asr_after_task": False,
+            "unload_qwen3_aligner_after_task": False,
+            "unload_whisperx_after_task": False,
+            "unload_nemo_aligner_after_task": False,
+            "unload_qwen3tts_after_task": False,
+        }
+
+
+def maybe_unload_qwen3_forced_aligner_after_task() -> None:
+    """
+    供调用方在真正的"一次任务"边界处显式调用（而不是在
+    Qwen3ForcedAligner.align() 内部按调用次数触发，原因见该方法末尾的
+    大段说明）：若 unload_qwen3_aligner_after_task 已开启，释放当前
+    缓存的 Qwen3-ForcedAligner 模型。
+
+    调用方目前有两处：
+      - pipeline._run_alignment()：每次单文件对齐 / 对话框批量处理里
+        每个对话框各调一次；
+      - tts_processor.align_segments()：TTS 跟读整个句子循环结束后
+        统一调一次（不是每句都调）。
+    """
+    if _get_unload_after_task_settings().get("unload_qwen3_aligner_after_task"):
+        _qwen3_unload_fa_model()
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 6. Qwen3ASRAligner
 # ═════════════════════════════════════════════════════════════════════════════
@@ -3115,6 +3207,14 @@ class Qwen3ASRAligner(AltAlignerBase):
                 "error": str(e),
                 "processing_time": int((time.time() - t0) * 1000),
             }
+        finally:
+            # 【用完即卸】若设置页面开启了 unload_qwen3_asr_after_task，
+            # 无论本次任务成功/失败都在这里释放模型——与"每次单个任务
+            # 处理完就立刻卸载"的预期一致，失败任务同样应当放行显存。
+            # 下一次调用 align() 时 _qwen3_load_asr_model() 会重新按需
+            # 加载，用户无需任何额外操作。
+            if _get_unload_after_task_settings().get("unload_qwen3_asr_after_task"):
+                _qwen3_unload_asr_model()
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 6b. Qwen3-ForcedAligner 全局事后偏移校正
@@ -3973,7 +4073,241 @@ def _stitch_spans_to_full_coverage(
     return [tuple(s) for s in stitched]
 
 
-def _plan_chunks_via_whisperx_rough_pass(
+def _vad_split_segments_for_fa(
+    audio,
+    sr: int,
+    rms,
+    hop_sec: float,
+    total_sec: float,
+    min_silence_sec: float = 0.45,
+    min_speech_sec: float = 0.25,
+    max_speech_sec: float = 18.0,
+    padding_sec: float = 0.08,
+) -> List[Tuple[float, float]]:
+    """
+    纯静音感知的 VAD 语音块切分——只负责"哪里是真实停顿、该在哪里切开"，
+    不涉及任何 ASR 识别。与 subtitle_processor.vad_split_segments() 是
+    同一套参数含义、同一种算法思路（自适应能量阈值 → 连续有声/静音 run
+    → 短暂停顿吸收 → 超长语音块内部强制二次切分），但物理上是本文件
+    内独立的一份实现（两个模块保持解耦，互不 import），且底层能量阈值
+    复用本文件已有的 _compute_silence_threshold()，与
+    _plan_sentence_aligned_chunks() / _stitch_spans_to_full_coverage()
+    等函数用的是同一套"何为安静"判定标准，不会出现两套阈值互相打架。
+
+    专供 Qwen3-FA 长音频分段规划的"Qwen3-ASR 粗测预处理"复用（详见
+    _plan_chunks_via_qwen3_asr_prepass() 顶部说明）：先把音频按真实语音
+    停顿切成若干物理块，再对每一块单独跑 Qwen3-ASR + Qwen3-FA，取代
+    "整段丢给 ASR 做转录、按识别出的句子边界分段"的旧思路——语音块之间
+    的静音间隙本身就是天然的物理切点，切在这里不会咬掉任何一个字。
+
+    Parameters
+    ----------
+    audio, sr : 已加载的整段音频采样数组与采样率（调用方已经读好，这里
+        不重复读盘）。
+    rms, hop_sec, total_sec : 调用方已经算好的整曲能量曲线/步长/总时长
+        （与 _align_chunked() 里其余分段逻辑共用同一份，避免重复计算）。
+    min_silence_sec : 连续静音时长达到此值才视为真正的句间停顿（短暂的
+        辅音闭塞不会被误判为停顿）。默认 0.45s，与字幕识别侧一致。
+    min_speech_sec : 短于此值的语音块视为噪声，直接丢弃。
+    max_speech_sec : 单个语音块超过此值（长时间不停顿，如拖腔）时，在
+        块内部能量低谷处强制二次切分。
+    padding_sec : 每个语音块两端各留出的余量（不越过相邻块边界），避免
+        咬字头尾被切掉。
+
+    Returns
+    -------
+    按时间顺序排列、互不重叠的语音块 [(start_sec, end_sec), ...]；
+    静音/空音频/全部块都被判定为噪声时返回 []。
+    """
+    import numpy as np
+
+    n_frames = len(rms)
+    if n_frames == 0 or total_sec <= 0:
+        return []
+
+    silence_threshold = _compute_silence_threshold(rms)
+    is_voiced = np.asarray(rms, dtype=np.float64) > silence_threshold
+    min_silence_frames = max(1, int(round(min_silence_sec / hop_sec)))
+
+    # 找出所有连续"有声"run，再把间隔小于 min_silence_frames 的静音缝隙
+    # 吸收进相邻有声区间（即短促停顿不切分），与 _vad_split_segments()
+    # （字幕模块）算法一致。
+    runs: List[List[int]] = []
+    i = 0
+    while i < n_frames:
+        if not is_voiced[i]:
+            i += 1
+            continue
+        j = i
+        while j < n_frames and is_voiced[j]:
+            j += 1
+        runs.append([i, j])
+        i = j
+
+    if not runs:
+        return []
+
+    merged: List[List[int]] = [runs[0]]
+    for run in runs[1:]:
+        prev = merged[-1]
+        gap = run[0] - prev[1]
+        if gap < min_silence_frames:
+            prev[1] = run[1]
+        else:
+            merged.append(run)
+
+    segments: List[Tuple[float, float]] = []
+    for start_f, end_f in merged:
+        start_sec = max(0.0, start_f * hop_sec - padding_sec)
+        end_sec = min(total_sec, end_f * hop_sec + padding_sec)
+        if end_sec - start_sec >= min_speech_sec:
+            segments.append((start_sec, end_sec))
+
+    if not segments:
+        return []
+
+    # 相邻块之间留出的 padding 可能导致重叠，做一次夹紧处理。
+    segments = [list(s) for s in segments]
+    for k in range(1, len(segments)):
+        prev_start, prev_end = segments[k - 1]
+        cur_start, cur_end = segments[k]
+        if cur_start < prev_end:
+            mid = (prev_end + cur_start) / 2.0
+            segments[k - 1][1] = mid
+            segments[k][0] = mid
+
+    # 超长语音块（长时间无停顿，如唱歌拖腔）在内部能量低谷处强制二次切分。
+    final_segments: List[Tuple[float, float]] = []
+    for start_sec, end_sec in segments:
+        final_segments.extend(
+            _force_split_long_vad_segment(rms, hop_sec, start_sec, end_sec, max_speech_sec)
+        )
+
+    return [(s, e) for s, e in final_segments if e > s]
+
+
+def _force_split_long_vad_segment(
+    rms, hop_sec: float, start_sec: float, end_sec: float, max_speech_sec: float
+) -> List[Tuple[float, float]]:
+    """
+    对超过 max_speech_sec 的 VAD 语音块，在中段（[35%, 65%] 区间，避免切
+    到开头/结尾）能量最低点强制切一刀，递归直至每一块都不超过上限。
+    与 subtitle_processor._force_split_long_segment() 算法一致。
+    """
+    import numpy as np
+
+    duration = end_sec - start_sec
+    if duration <= max_speech_sec:
+        return [(start_sec, end_sec)]
+
+    search_lo = start_sec + duration * 0.35
+    search_hi = start_sec + duration * 0.65
+    lo_frame = int(search_lo / hop_sec)
+    hi_frame = max(lo_frame + 1, int(search_hi / hop_sec))
+    lo_frame = max(0, min(lo_frame, len(rms) - 1))
+    hi_frame = max(0, min(hi_frame, len(rms)))
+
+    if hi_frame <= lo_frame:
+        mid_sec = start_sec + duration / 2.0
+    else:
+        window = np.asarray(rms[lo_frame:hi_frame])
+        split_frame = lo_frame + int(np.argmin(window))
+        mid_sec = split_frame * hop_sec
+
+    left = _force_split_long_vad_segment(rms, hop_sec, start_sec, mid_sec, max_speech_sec)
+    right = _force_split_long_vad_segment(rms, hop_sec, mid_sec, end_sec, max_speech_sec)
+    return left + right
+
+
+def _close_small_gaps_for_fa(
+    spans: List[Tuple[float, float]],
+    texts: List[str],
+    min_gap_sec: float = 0.6,
+) -> Tuple[List[Tuple[float, float]], List[str]]:
+    """
+    "VAD 合并间隔"：与 subtitle_processor._close_small_gaps() 同一算法——
+    相邻两个分段之间只要静音间隙大于 min_gap_sec，就把这段间隙对半分配
+    到中点（前一段的结束时间和后一段的开始时间都移到间隙中点），不论
+    间隙原本有多长，都是直接对半分（不是收紧到贴合）；间隔 <= min_gap_sec
+    视为已经足够紧凑，保持原样不动。
+
+    与 _stitch_spans_to_full_coverage() 的区别：后者是"必须做"的物理
+    缝合步骤，保证 spans 无缝覆盖整段音频（否则间隙对应的音频会被
+    _align_chunked() 完全跳过）；这里是缝合完成之后的"用户可选"处理，
+    只是在缝合已经产生的切点基础上，把过大的静音留白按对半分的规则
+    重新摆放，让两条相邻分段的时间轴挨得更近，与字幕识别页面"VAD 合并
+    间隔"的效果保持一致。不合并文本、不减少分段数量。
+
+    Parameters
+    ----------
+    spans, texts : 长度相同、按时间顺序排列，且已经无缝覆盖
+        [0, total_sec]（即 spans[i][1] == spans[i+1][0]，中间没有空隙）
+        ——这里的"间隙"特指两个分段各自的物理裁剪区间之外、被上一步
+        缝合逻辑判给某一侧的静音部分，不是指 spans 本身有洞。因此这里
+        实际操作的是"缝合切点"本身：如果某个缝合切点两侧看起来仍有
+        明显静音（该切点前一小段/后一小段本身就是静音），效果上等价于
+        把这段静音从紧贴其中一段的位置，挪到更居中的位置。
+
+    Returns
+    -------
+    调整后的 (spans, texts)，长度不变。
+    """
+    if len(spans) < 2:
+        return spans, texts
+    adjusted = [list(s) for s in spans]
+    for i in range(len(adjusted) - 1):
+        cur = adjusted[i]
+        nxt = adjusted[i + 1]
+        gap = nxt[0] - cur[1]
+        if gap > min_gap_sec:
+            mid = (cur[1] + nxt[0]) / 2.0
+            cur[1] = mid
+            nxt[0] = mid
+    return [tuple(s) for s in adjusted], texts
+
+
+def _get_qwen3_asr_prepass_settings() -> Dict[str, object]:
+    """
+    读取"Qwen3-FA 长音频分段前，先用 VAD 静音切分 + Qwen3-ASR 粗测识别
+    字数"这一开关及其相关 VAD 调优参数（详见
+    _plan_chunks_via_qwen3_asr_prepass() 顶部说明）。
+
+    与 _get_alignment_tuning() 不同：这里一部分是 bool 开关、一部分是
+    数值，直接读 app_settings.load_settings() 的原始字典，本函数只在
+    每次 Qwen3-FA align() 任务开始时调用一次，不做 mtime 缓存。
+
+    读取失败时安全回退到"关闭"+ 各 VAD 参数的内置默认值，与该功能默认
+    不开启保持一致，不影响任何现有行为。
+    """
+    fallback: Dict[str, object] = {
+        "enabled": False,
+        "vad_min_silence_sec": 0.45,
+        "vad_min_speech_sec": 0.25,
+        "vad_max_speech_sec": 18.0,
+        "vad_close_gaps": False,
+        "vad_gap_threshold_sec": 0.6,
+    }
+    try:
+        import app_settings
+        settings = app_settings.load_settings()
+        fallback["enabled"] = bool(settings.get("qwen3_fa_use_qwen3_asr_prepass", False))
+        for key in (
+            "vad_min_silence_sec", "vad_min_speech_sec",
+            "vad_max_speech_sec", "vad_gap_threshold_sec",
+        ):
+            setting_key = f"qwen3_fa_{key}"
+            if setting_key in settings:
+                try:
+                    fallback[key] = float(settings[setting_key])
+                except (TypeError, ValueError):
+                    pass
+        fallback["vad_close_gaps"] = bool(settings.get("qwen3_fa_vad_close_gaps", False))
+    except Exception as e:
+        logger.debug("读取 Qwen3-ASR 粗测预处理设置失败，使用默认值（关闭）: %s", e)
+    return fallback
+
+
+def _plan_chunks_via_qwen3_asr_prepass(
     audio_path: str,
     text: str,
     int_lang: str,
@@ -3982,13 +4316,21 @@ def _plan_chunks_via_whisperx_rough_pass(
     hop_sec: float,
     min_chunk_sec: float,
     max_chunk_sec: float,
-    whisper_model: str = "large-v3",
+    audio=None,
+    sr: Optional[int] = None,
     device: str = "auto",
+    vad_min_silence_sec: float = 0.45,
+    vad_min_speech_sec: float = 0.25,
+    vad_max_speech_sec: float = 18.0,
+    vad_close_gaps: bool = False,
+    vad_gap_threshold_sec: float = 0.6,
 ) -> Tuple[Optional[List[Tuple[float, float]]], Optional[List[str]]]:
     """
-    用 WhisperX 的"粗测"ASR 转录结果规划 Qwen3-FA 长音频分段边界，替代
-    _plan_sentence_aligned_chunks() 里"假设语速均匀、按参考文本字符数
-    占比反推每句在全曲时间轴上的位置"这一纯估算方案。
+    用"VAD 静音切分 + 逐块 Qwen3-ASR 粗测识别字数"规划 Qwen3-FA 长音频
+    分段边界，替代 _plan_sentence_aligned_chunks() 里"假设语速均匀、按
+    参考文本字符数占比反推每句在全曲时间轴上的位置"这一纯估算方案。
+    取代此前的 WhisperX 粗测预处理（_plan_chunks_via_whisperx_rough_pass，
+    已移除），不再依赖独立的 WhisperX 服务/模型。
 
     【动机】_plan_sentence_aligned_chunks() 的边界估算本质上仍是"猜"：
     只知道全曲总时长和每句的字符数占比，不知道音频里真实的语音在哪。
@@ -3999,62 +4341,172 @@ def _plan_chunks_via_whisperx_rough_pass(
     边界，这正是长音频对齐日志里大量"自愈修复/均匀分配"退化兜底的
     根本原因，而不是 Qwen3-FA 本身对齐能力的问题。
 
-    【思路】WhisperX 是真正跑一遍语音识别，Whisper 自身的 VAD 分段
-    天然落在真实语音的起止点上（不依赖字符比例假设）。这里只用它的
-    ASR 转录步骤（_transcribe_rough_segments，不做后续 wav2vec2 强制
-    对齐，更快）拿到这些真实分段时间戳，再用 _bind_ref_text_by_asr_count()
-    把原始参考文本（保留标点，不用 WhisperX 自己识别出的文字）按各段
-    自己识别出的字数配额切给对应分段——分段的物理边界来自真实 ASR，
-    分段的对齐文本仍然是用户提供的原始参考文本，两者结合但互不污染。
+    【思路，与 WhisperX 粗测版本的关键区别】不再"整段丢给 ASR 转录、
+    用 ASR 自己划出的句子边界当分段"，而是分两步：
+      1) 先用 _vad_split_segments_for_fa() 做纯粹的静音感知切分——只看
+         能量曲线找真实停顿，不涉及任何识别，物理上把整段音频剪切成
+         若干"语音块"，切点必然落在真实的音频空白（静音）中间，不会
+         咬断任何字词。这一步与 ASR 模型选型完全无关。
+      2) 对每个 VAD 语音块单独调用一次本地 Qwen3-ASR 识别（只识别，
+         不做强制对齐），拿到该块的识别字数；再用
+         _bind_ref_text_by_asr_count() 把原始参考文本（保留标点，不用
+         Qwen3-ASR 自己识别出的文字）按各块自己识别出的字数配额切给
+         对应块——块的物理边界来自真实 VAD，块的对齐文本仍然是用户
+         提供的原始参考文本，两者结合但互不污染，这一点与旧版 WhisperX
+         方案完全一致，只是负责"识别字数"的 ASR 后端从 WhisperX 换成
+         了本进程已经常驻加载的 Qwen3-ASR，不再需要额外启动/调用一个
+         独立的 WhisperX 服务。
 
-    每个 WhisperX 分段内部仍可能包含多句参考文本、或时长仍然超过
-    max_chunk_sec；这里递归复用 _plan_sentence_aligned_chunks() 本身
-    对每个分段单独再做一次精细规划——区别在于这次喂给它的 total_sec
-    是这一个 WhisperX 段自己的真实时长（通常几秒到二十秒量级），而不
-    是整曲总时长，字符比例估算的误差范围从"整首歌"缩小到"这一个
-    真实分段"，句子切分/脚本切换硬边界/句内软停顿再切一刀/组间能量
-    精修等全部逻辑原样复用，不需要重新实现。跨 WhisperX 段之间可能
-    残留的过短分段，最后用 _merge_short_spans() 再合并一次。
+    每个 VAD 语音块内部仍可能包含多句参考文本、或时长仍然超过
+    max_chunk_sec；这里递归复用 _plan_sentence_aligned_chunks() 对每个
+    块单独再做一次精细规划——区别在于这次喂给它的 total_sec 是这一个
+    VAD 块自己的真实时长（通常几秒到二十秒量级），字符比例估算的误差
+    范围从"整首歌"缩小到"这一个真实语音块"。跨块之间可能残留的过短
+    分段，用 _merge_short_spans() 合并；块与块之间的静音间隙用
+    _stitch_spans_to_full_coverage() 缝合（保证 spans 无缝覆盖整段音频，
+    这一步是必须的，与是否开启"VAD 合并间隔"无关）；若用户开启了
+    "VAD 合并间隔"（vad_close_gaps），额外调用 _close_small_gaps_for_fa()
+    把过大的缝合间隙对半分配到中点，与字幕识别页面同名功能行为一致。
 
     Returns
     -------
     (spans, chunk_texts)：格式、约定与 _plan_sentence_aligned_chunks()
-    完全一致，可直接替换其调用处。任何一步失败（WhisperX 未安装/加载
-    失败、ASR 无输出、参考文本或识别内容为空导致无法按字数配额绑定等）
-    都返回 (None, None)，调用方应无缝回退到 _plan_sentence_aligned_
-    chunks()，不让整个对齐任务失败——这条路径纯粹是"锦上添花"，任何
-    环节出问题都不应该影响任务本身能否成功。
+    完全一致，可直接替换其调用处。任何一步失败（音频加载失败、VAD 未
+    切出语音块、Qwen3-ASR 识别失败、参考文本或识别内容为空导致无法
+    按字数配额绑定等）都返回 (None, None)，调用方应无缝回退到
+    _plan_sentence_aligned_chunks()，不让整个对齐任务失败——这条路径
+    纯粹是"锦上添花"，任何环节出问题都不应该影响任务本身能否成功。
     """
     try:
-        wx_ok, wx_msg = WhisperXAligner.check_available()
-        if not wx_ok:
-            logger.warning(
-                f"[Qwen3-FA][WhisperX 粗测] WhisperX 不可用（{wx_msg}），"
-                "回退到按参考文本字符比例估算的分段方案"
-            )
-            return None, None
+        if audio is None or sr is None:
+            try:
+                import soundfile as sf
+                audio, sr = sf.read(audio_path, always_2d=False)
+                if getattr(audio, "ndim", 1) > 1:
+                    import numpy as np
+                    audio = audio.mean(axis=1)
+            except Exception as e:
+                logger.warning(
+                    f"[Qwen3-FA][Qwen3-ASR 粗测] 音频加载失败（{e}），"
+                    "回退到按参考文本字符比例估算的分段方案"
+                )
+                return None, None
 
-        whisperx_aligner = get_aligner("whisperx", device=device, whisper_model=whisper_model)
-        rough = whisperx_aligner._transcribe_rough_segments(audio_path, int_lang)
-        if not rough.get("success"):
-            logger.warning(
-                f"[Qwen3-FA][WhisperX 粗测] ASR 转录失败（{rough.get('error')}），"
-                "回退到按参考文本字符比例估算的分段方案"
-            )
-            return None, None
-
-        raw_segments = sorted(
-            rough["raw_segments"], key=lambda s: float(s.get("start", 0.0))
+        vad_segments = _vad_split_segments_for_fa(
+            audio, sr, rms, hop_sec, total_sec,
+            min_silence_sec=vad_min_silence_sec,
+            min_speech_sec=vad_min_speech_sec,
+            max_speech_sec=vad_max_speech_sec,
         )
+        if not vad_segments:
+            logger.warning(
+                "[Qwen3-FA][Qwen3-ASR 粗测] VAD 未切出任何语音块，"
+                "回退到按参考文本字符比例估算的分段方案"
+            )
+            return None, None
 
-        # 按各段自身识别出的字数为配额，把原始参考文本（保留标点）顺序
-        # 切给对应段——只借用 WhisperX 的时间戳和字数，不使用它识别出
-        # 的文字内容本身（原地修改 raw_segments[i]["text"]，此后就是
-        # 原始参考文本的切片，不再是 WhisperX 自己的识别结果）。
+        asr_lang = {
+            "zh": "Chinese", "yue": "Cantonese", "en": "English",
+            "ja": "Japanese", "ko": "Korean",
+        }.get(int_lang, "Chinese")
+
+        device_override = _safe_device(device)
+        model = _qwen3_load_asr_model(device_override, _get_qwen3_batch_size())
+        if model is None:
+            logger.warning(
+                "[Qwen3-FA][Qwen3-ASR 粗测] Qwen3-ASR 模型加载失败，"
+                "回退到按参考文本字符比例估算的分段方案"
+            )
+            return None, None
+
+        import tempfile as _tempfile
+        import shutil as _shutil
+        import os as _os
+        try:
+            import soundfile as sf
+        except ImportError as e:
+            logger.warning(
+                f"[Qwen3-FA][Qwen3-ASR 粗测] 缺少 soundfile（{e}），"
+                "无法为逐块识别裁剪临时音频，回退到按参考文本字符比例估算的分段方案"
+            )
+            return None, None
+
+        tmp_dir = _tempfile.mkdtemp(prefix="qwen3_asr_prepass_")
+        raw_segments: List[Dict[str, Any]] = []
+        try:
+            for idx, (seg_start, seg_end) in enumerate(vad_segments):
+                st_samp = max(0, int(round(seg_start * sr)))
+                en_samp = min(len(audio), int(round(seg_end * sr)))
+                cropped = audio[st_samp:en_samp]
+                if len(cropped) < int(0.05 * sr):
+                    continue
+
+                chunk_wav = _os.path.join(tmp_dir, f"prepass_{idx:04d}.wav")
+                try:
+                    sf.write(chunk_wav, cropped, sr)
+                    result = model.transcribe(
+                        audio=chunk_wav, language=asr_lang, context="",
+                        return_time_stamps=False,
+                    )
+                except Exception as e:
+                    if not _is_cuda_oom_or_env_error(e):
+                        logger.warning(
+                            f"[Qwen3-FA][Qwen3-ASR 粗测] 第 {idx + 1}/{len(vad_segments)} "
+                            f"块识别失败（{e}），跳过该块"
+                        )
+                        continue
+                    logger.warning(
+                        f"[Qwen3-FA][Qwen3-ASR 粗测] 第 {idx + 1}/{len(vad_segments)} "
+                        f"块识别显存不足（{e}），自动切换到 CPU 重新加载并重试..."
+                    )
+                    try:
+                        import torch as _torch_oom
+                        if _torch_oom.cuda.is_available():
+                            _torch_oom.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    model = _qwen3_load_asr_model("cpu", 1)
+                    if model is None:
+                        logger.warning(
+                            "[Qwen3-FA][Qwen3-ASR 粗测] 显存不足自动降级后模型仍加载失败，"
+                            "回退到按参考文本字符比例估算的分段方案"
+                        )
+                        return None, None
+                    try:
+                        result = model.transcribe(
+                            audio=chunk_wav, language=asr_lang, context="",
+                            return_time_stamps=False,
+                        )
+                    except Exception as e2:
+                        logger.warning(
+                            f"[Qwen3-FA][Qwen3-ASR 粗测] 第 {idx + 1}/{len(vad_segments)} "
+                            f"块重试后仍识别失败（{e2}），跳过该块"
+                        )
+                        continue
+
+                block_segments = _qwen3_normalize_segments(result)
+                block_text = "".join((s.get("text") or "") for s in block_segments).strip()
+                if not block_text:
+                    continue
+                raw_segments.append({"start": seg_start, "end": seg_end, "text": block_text})
+        finally:
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        if not raw_segments:
+            logger.warning(
+                "[Qwen3-FA][Qwen3-ASR 粗测] 所有 VAD 语音块识别结果均为空，"
+                "回退到按参考文本字符比例估算的分段方案"
+            )
+            return None, None
+
+        # 按各块自身识别出的字数为配额，把原始参考文本（保留标点）顺序
+        # 切给对应块——只借用 Qwen3-ASR 的字数，不使用它识别出的文字
+        # 内容本身（原地修改 raw_segments[i]["text"]，此后就是原始参考
+        # 文本的切片，不再是 Qwen3-ASR 自己的识别结果）。
         bound_ok = _bind_ref_text_by_asr_count(text, raw_segments, int_lang)
         if not bound_ok:
             logger.warning(
-                "[Qwen3-FA][WhisperX 粗测] 参考文本或 ASR 识别内容为空，"
+                "[Qwen3-FA][Qwen3-ASR 粗测] 参考文本或识别内容为空，"
                 "无法按字数配额绑定，回退到按参考文本字符比例估算的分段方案"
             )
             return None, None
@@ -4085,29 +4537,37 @@ def _plan_chunks_via_whisperx_rough_pass(
 
         if not spans:
             logger.warning(
-                "[Qwen3-FA][WhisperX 粗测] 所有 ASR 段绑定参考文本后均为空，"
+                "[Qwen3-FA][Qwen3-ASR 粗测] 所有 VAD 语音块绑定参考文本后均为空，"
                 "回退到按参考文本字符比例估算的分段方案"
             )
             return None, None
 
-        # WhisperX 的 ASR 段之间通常留有真实停顿间隙（VAD 判定的静音，
-        # 不计入任何一段）；必须先把这些间隙缝合掉，spans 才能像
-        # _plan_sentence_aligned_chunks() 的输出一样无缝覆盖 [0, total_sec]
-        # ——否则间隙对应的音频会被 _align_chunked() 完全跳过。
+        # VAD 语音块之间通常留有真实停顿间隙，必须先把这些间隙缝合掉，
+        # spans 才能像 _plan_sentence_aligned_chunks() 的输出一样无缝
+        # 覆盖 [0, total_sec]——否则间隙对应的音频会被 _align_chunked()
+        # 完全跳过。这一步是必须的，与下面是否开启"VAD 合并间隔"无关。
         spans = _stitch_spans_to_full_coverage(spans, rms, hop_sec, total_sec)
 
         spans, chunk_texts = _merge_short_spans(spans, chunk_texts, min_chunk_sec)
 
+        # 【VAD 合并间隔，可选】用户开启后，把缝合切点两侧仍然明显的
+        # 静音间隙对半分配到中点，让相邻分段的时间轴挨得更近——与字幕
+        # 识别页面"VAD 合并间隔"效果一致，不合并文本、不减少分段数量。
+        if vad_close_gaps:
+            spans, chunk_texts = _close_small_gaps_for_fa(
+                spans, chunk_texts, min_gap_sec=vad_gap_threshold_sec
+            )
+
         logger.info(
-            f"[Qwen3-FA][WhisperX 粗测] 基于 {len(raw_segments)} 个 WhisperX "
-            f"ASR 段（真实语音边界）规划出 {len(spans)} 个分段，"
+            f"[Qwen3-FA][Qwen3-ASR 粗测] 基于 {len(vad_segments)} 个 VAD "
+            f"语音块（真实静音边界）规划出 {len(spans)} 个分段，"
             "不再依赖字符比例估算"
         )
         return spans, chunk_texts
 
     except Exception as e:
         logger.warning(
-            f"[Qwen3-FA][WhisperX 粗测] 分段规划异常（{e}），"
+            f"[Qwen3-FA][Qwen3-ASR 粗测] 分段规划异常（{e}），"
             "回退到按参考文本字符比例估算的分段方案",
             exc_info=True,
         )
@@ -4361,7 +4821,7 @@ class Qwen3ForcedAligner(AltAlignerBase):
             # 禁用）：为 False 时完全跳过下面 _align_chunked() 的整套
             # "按句末标点规划分段 + 逐段独立对齐"流程，直接整段单次对齐，
             # 行为等同于分段逻辑引入之前的原始版本——不做静音感知分段，
-            # 也不会用到 WhisperX 粗测预处理（该子开关此时已被
+            # 也不会用到 Qwen3-ASR 粗测预处理（该子开关此时已被
             # app_settings.save_settings() 强制置为 False）。
             if not _get_sentence_chunking_enabled():
                 logger.info(
@@ -4442,6 +4902,20 @@ class Qwen3ForcedAligner(AltAlignerBase):
                 "error": str(e),
                 "processing_time": int((time.time() - t0) * 1000),
             }
+        # 【注意：这里刻意不做"用完即卸"】与 Qwen3ASRAligner / WhisperXAligner /
+        # NeMoForcedAligner 不同，本类的 align() 除了被 pipeline._run_alignment()
+        # 按"一次任务=一次 align() 调用"的方式使用外，还会被
+        # tts_processor.align_segments() 在同一个"TTS 跟读"任务内部，对拿到的
+        # 同一个缓存单例连续调用多次（每句字幕/每个分句各调一次）。如果在这里
+        # 按调用次数卸载，会导致同一个 TTS 跟读任务内反复"卸载→重新加载"，
+        # 每句都要重走一次模型加载耗时，明显拖慢速度，且完全违背"用完即卸"
+        # 设置本应以"用户发起的一次任务"为粒度、而不是以"底层调用了多少次
+        # 推理"为粒度的初衷。真正的卸载时机改为在调用方的任务边界处显式触发：
+        #   - pipeline._run_alignment()：单文件处理 / 对话框批量处理（按框）
+        #     每次调用完 get_aligner("qwen3_aligner")... align() 后触发一次；
+        #   - tts_processor.align_segments()：TTS 跟读整个句子循环结束后统一
+        #     触发一次（而不是每句触发一次）。
+        # 两处调用的都是下面的 unload_qwen3_forced_aligner_after_task()。
 
     # ============================================================
     # Qwen3-FA 局部对齐结果的"退化区间"检测与自愈修复
@@ -4928,22 +5402,29 @@ class Qwen3ForcedAligner(AltAlignerBase):
 
         rms, hop_sec = _compute_rms_curve(audio, sr)
 
-        # 【WhisperX 粗测预处理，可选，默认关闭】见设置项
-        # qwen3_fa_use_whisperx_prepass 说明与 _plan_chunks_via_whisperx_
-        # rough_pass() 顶部说明：开启后先用 WhisperX 的 ASR 转录结果（真实
-        # 语音边界）规划分段，只有在 WhisperX 不可用/失败/无法绑定参考
-        # 文本时，才回退到下面 _plan_sentence_aligned_chunks() 这套按
-        # 字符比例估算的旧方案——两条路径的输出格式完全一致，回退过程
-        # 对调用方透明，不影响任务本身是否成功。
+        # 【Qwen3-ASR 粗测预处理，可选，默认关闭】见设置项
+        # qwen3_fa_use_qwen3_asr_prepass 说明与
+        # _plan_chunks_via_qwen3_asr_prepass() 顶部说明：开启后先用 VAD
+        # 静音切分（真实静音边界，物理剪切音频）+ 逐块本地 Qwen3-ASR
+        # 识别字数规划分段，只有在 VAD 未切出语音块/识别失败/无法绑定
+        # 参考文本时，才回退到下面 _plan_sentence_aligned_chunks() 这套
+        # 按字符比例估算的旧方案——两条路径的输出格式完全一致，回退
+        # 过程对调用方透明，不影响任务本身是否成功。音频/采样率复用
+        # 上面已经读好的 audio/sr，不重复读盘。
         spans: Optional[List[Tuple[float, float]]] = None
         chunk_texts: Optional[List[str]] = None
-        prepass = _get_whisperx_prepass_settings()
+        prepass = _get_qwen3_asr_prepass_settings()
         if prepass.get("enabled"):
-            spans, chunk_texts = _plan_chunks_via_whisperx_rough_pass(
+            spans, chunk_texts = _plan_chunks_via_qwen3_asr_prepass(
                 audio_path, text, int_lang, total_sec, rms, hop_sec,
                 min_sentence_chunk_sec, max_sentence_chunk_sec,
-                whisper_model=str(prepass.get("whisper_model", "large-v3")),
+                audio=audio, sr=sr,
                 device=getattr(self, "_device", "auto"),
+                vad_min_silence_sec=float(prepass.get("vad_min_silence_sec", 0.45)),
+                vad_min_speech_sec=float(prepass.get("vad_min_speech_sec", 0.25)),
+                vad_max_speech_sec=float(prepass.get("vad_max_speech_sec", 18.0)),
+                vad_close_gaps=bool(prepass.get("vad_close_gaps", False)),
+                vad_gap_threshold_sec=float(prepass.get("vad_gap_threshold_sec", 0.6)),
             )
 
         if spans is None:
@@ -5266,6 +5747,31 @@ class NeMoForcedAligner(AltAlignerBase):
 
         return data
 
+    def _call_unload(self) -> None:
+        """
+        【用完即卸】通知 nemo_server.py 释放模型。
+
+        【2026-09 改为重启子进程，而非仅调用 /unload】原因与
+        WhisperXAligner._call_unload() 完全一致：NeMo 底层同样依赖
+        cuDNN/PyTorch Lightning 运行时，加载模型后会在 CUDA context 里
+        预留一部分无法通过 API 主动释放的运行时开销显存，只有整个进程
+        退出才会归还。因此改为调用 /restart，让 nemo_server.py 干净退出
+        旧进程、拉起全新进程（模型惰性加载，不会立刻重新占显存），实现
+        上等价于"卸载"但能连运行时开销一起清零。详见 nemo_server.py 里
+        restart() 函数顶部的说明。
+
+        依然是 fire-and-forget：本次连接大概率会在旧进程 os._exit(0) 时
+        被直接挂断，这是预期行为，不代表重启失败，因此吞掉所有异常只记
+        日志，不影响本次已完成的对齐任务结果。
+        """
+        self._load_model()  # 确保 self._session 已创建
+        base = self.endpoint.rsplit("/align", 1)[0] if self.endpoint.endswith("/align") else self.endpoint
+        try:
+            self._session.post(f"{base}/restart", json={}, timeout=5)
+            logger.info("[NeMo-FA] 已按「用完即卸」设置触发独立服务重启（连库运行时开销一起释放）")
+        except Exception as e:
+            logger.info(f"[NeMo-FA] 「用完即卸」触发独立服务重启（连接按预期被重启进程挂断，不影响本次任务结果）: {e}")
+
     # ── 主对齐入口 ────────────────────────────────────────────────────────
     def align(self, audio_path: str, text: Optional[str], language: str,
               english_word_align: bool = False,
@@ -5286,6 +5792,11 @@ class NeMoForcedAligner(AltAlignerBase):
         try:
             int_lang = _normalize_lang(language)
             clean_text = _clean_align_text(text)
+
+            # 【用完即卸 → 重启子进程】配套等待，理由同 WhisperXAligner.align()
+            # 顶部的说明：见 _wait_for_service_after_restart()。
+            base_url = self.endpoint.rsplit("/align", 1)[0] if self.endpoint.endswith("/align") else self.endpoint
+            _wait_for_service_after_restart(base_url + "/", "NeMo-FA")
 
             logger.info(f"[NeMo-FA] 调用独立服务: {self.endpoint}")
             result = self._call_nemo_service(audio_path, clean_text, int_lang)
@@ -5357,6 +5868,13 @@ class NeMoForcedAligner(AltAlignerBase):
                 "error": str(e),
                 "processing_time": int((time.time() - t0) * 1000),
             }
+        finally:
+            # 【用完即卸】若设置页面开启了 unload_nemo_aligner_after_task，
+            # 无论本次任务成功/失败都在这里通知独立服务释放模型（与前面
+            # 提前 return 的"缺少参考文本"分支不同——那时还没有调用过
+            # 服务、不涉及任何已加载的模型，不需要触发卸载）。
+            if text and text.strip() and _get_unload_after_task_settings().get("unload_nemo_aligner_after_task"):
+                self._call_unload()
 
 
 # ═════════════════════════════════════════════════════════════════════════════

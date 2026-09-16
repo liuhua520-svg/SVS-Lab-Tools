@@ -316,6 +316,23 @@ def _run_alignment(
                     os.remove(shifted_path)
                 except OSError:
                     pass
+            # 【用完即卸】仅 qwen3_aligner 后端需要在这里显式触发——
+            # whisperx / qwen3_asr / nemo_aligner 三个后端各自的
+            # "用完即卸"逻辑已经内建在对应 Aligner.align() 方法自身的
+            # finally 块里（它们不存在"同一任务内部被连续调用多次"的
+            # 场景，在 align() 内部按调用次数触发即可）。qwen3_aligner
+            # 是唯一的例外：tts_processor.align_segments() 会在同一个
+            # TTS 跟读任务里对拿到的同一个缓存单例连续调用多次 align()，
+            # 因此该后端的卸载时机改为由调用方在真正的任务边界（这里，
+            # 以及 align_segments() 自己的循环结束处）显式触发，详见
+            # Qwen3ForcedAligner.align() 末尾的说明和
+            # maybe_unload_qwen3_forced_aligner_after_task() 的文档。
+            if backend == "qwen3_aligner":
+                try:
+                    from alt_aligners import maybe_unload_qwen3_forced_aligner_after_task
+                    maybe_unload_qwen3_forced_aligner_after_task()
+                except Exception as _unload_err:
+                    logger.warning(f"[Qwen3-FA] 「用完即卸」释放模型失败（不影响本次对齐结果）: {_unload_err}")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 

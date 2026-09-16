@@ -171,6 +171,34 @@ def _qwen3_tts_check_available() -> Tuple[bool, str]:
         return False, "Qwen3-TTS 独立服务不可访问（请先启动 qwen3tts_server.py）"
 
 
+def _qwen3_tts_wait_after_restart(max_wait_sec: float = 15.0, poll_interval_sec: float = 0.5) -> None:
+    """
+    【用完即卸 → 重启子进程】配套等待，与 alt_aligners.py 里
+    _wait_for_service_after_restart() 的逻辑和理由完全一致：如果上一次
+    合成任务触发了 /restart（见 _maybe_unload_qwen3_tts_after_task()
+    顶部说明），qwen3tts_server.py 会经历"关端口 → 拉起新进程 → 新进程
+    重新监听"的空档期，这里短暂轮询等待，避免紧接着的下一次合成请求
+    因为撞上这个空档期而报错。正常情况下（没有撞上重启空档期）第一次
+    探测就会成功，不引入任何额外等待；等到超时仍连不上时也直接放行，
+    把真实的错误交给调用方原有的请求逻辑去处理。
+    """
+    import requests
+    import time as _time
+    deadline = _time.time() + max_wait_sec
+    waited = False
+    while _time.time() < deadline:
+        try:
+            requests.get(QWEN3_TTS_BASE_URL + "/", timeout=2)
+            if waited:
+                logger.info("[TTS] Qwen3-TTS 独立服务重启完成，端口已恢复监听，继续本次任务")
+            return
+        except Exception:
+            waited = True
+            _time.sleep(poll_interval_sec)
+    if waited:
+        logger.warning(f"[TTS] 等待 Qwen3-TTS 独立服务重启完成超时（{max_wait_sec}s），继续尝试本次任务（可能会失败）")
+
+
 # 引擎注册表。label_zh 供前端"选择 TTS"下拉框直接展示，不需要再单独维护
 # i18n key——新增引擎只需要在这里追加一行即可在前端出现。
 _ENGINES: Dict[str, Dict] = {
@@ -267,7 +295,8 @@ def upsert_narrator(profile: Dict, ref_audio_base64: Optional[str] = None,
     新建或更新一个讲述人档案（语音预设）。
 
     profile: {id?, name, engine?, voice, rate, pitch, volume, language,
-              qwen3_tts_mode?, qwen3_tts_instruct?, qwen3_tts_ref_text?,
+              qwen3_tts_mode?, qwen3_tts_instruct?, qwen3_tts_emotion?,
+              qwen3_tts_seed?, qwen3_tts_ref_text?,
               qwen3_tts_x_vector_only?, qwen3_tts_size?}
       id 为空 / 未提供 → 新建（生成随机 id）；
       id 命中已有档案 → 覆盖更新；否则忽略传入的 id，视为新建。
@@ -321,6 +350,11 @@ def upsert_narrator(profile: Dict, ref_audio_base64: Optional[str] = None,
         "qwen3_tts_size": (profile.get("qwen3_tts_size") or "1.7B").strip() or "1.7B",
         # custom_voice：可选风格指令；voice_design：必填的音色描述文本。
         "qwen3_tts_instruct": (profile.get("qwen3_tts_instruct") or "").strip(),
+        # voice_design 专用：自由文本情绪描述（拼接进 instruct，不限定于
+        # 固定列表）+ 随机种子（可选，便于复现同一次生成结果）。二者都是
+        # "预览/生成时用什么参数"，与 instruct 一起随预设保存/套用。
+        "qwen3_tts_emotion": (profile.get("qwen3_tts_emotion") or "").strip(),
+        "qwen3_tts_seed": _normalize_optional_seed(profile.get("qwen3_tts_seed")),
         # voice_clone：参考音频转录内容 + 是否仅用 x-vector + 参考音频路径。
         "qwen3_tts_ref_text": (profile.get("qwen3_tts_ref_text") or "").strip(),
         "qwen3_tts_x_vector_only": bool(profile.get("qwen3_tts_x_vector_only", False)),
@@ -393,6 +427,23 @@ def _normalize_pitch(value, default: str = "+0Hz") -> str:
         return f"{'+' if n >= 0 else ''}{int(n)}Hz"
     except ValueError:
         return default
+
+
+def _normalize_optional_seed(value) -> Optional[int]:
+    """
+    VoiceDesign 预设里保存的可选随机种子：合法整数（或整数形式的字符串/
+    浮点数，如前端 el-input-number 传来的 12345.0）转成 int 存档；
+    None/空字符串/非法值一律转成 None（代表"未设置随机种子"），与
+    qwen3tts_server.py 的 generate_voice_design 对 seed 的容错方式一致——
+    存档阶段就把脏数据挡在外面，读出来的 qwen3_tts_seed 要么是合法 int，
+    要么是 None，前端和请求转发逻辑都不用再额外判断字符串/NaN 之类的情况。
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _percent_to_number(value: str) -> float:
@@ -828,7 +879,10 @@ def _edge_tts_synth_to_file(text: str, voice: str, rate: str, volume: str,
 #   "size"     : "1.7B" | "0.6B"，缺省 "1.7B"
 #   "device"   : "auto" | "cpu" | "cuda"，缺省 "auto"
 #   custom_voice 专用："instruct"（可选风格指令）
-#   voice_design 专用："instruct"（必填，音色描述文本）
+#   voice_design 专用："instruct"（必填，音色描述文本）、"emotion"（可选，
+#                      自由文本，如 "Happy"/"温柔中带一点委屈"，不限定于
+#                      固定列表，拼接进 instruct，由服务端处理）、
+#                      "seed"（可选，随机种子，便于复现同一次生成结果）
 #   voice_clone  专用："ref_audio_path" / "ref_audio_base64"+"ref_audio_ext"
 #                      （二选一）、"ref_text"、"x_vector_only"(bool)
 #
@@ -836,6 +890,11 @@ def _edge_tts_synth_to_file(text: str, voice: str, rate: str, volume: str,
 # 端；其余两种模式不使用"音色"概念，voice 会被忽略。
 def _qwen3_tts_synth_to_file(text: str, voice: str, out_path: str, options: Dict) -> None:
     import requests
+
+    # 【用完即卸 → 重启子进程】配套等待：见 _qwen3_tts_wait_after_restart()
+    # 顶部说明。放在 check_available() 之前，避免上一次任务触发的重启
+    # 空档期被 check_available() 误判为"服务未启动"而直接报错。
+    _qwen3_tts_wait_after_restart()
 
     ok, msg = _qwen3_tts_check_available()
     if not ok:
@@ -853,6 +912,15 @@ def _qwen3_tts_synth_to_file(text: str, voice: str, out_path: str, options: Dict
         if not instruct:
             raise ValueError("Voice Design 模式需要填写声音描述（instruct）")
         payload = {**common, "instruct": instruct}
+        # emotion / seed 均为可选：emotion 为空或未传时不下发（服务端按
+        # "不附加情绪描述"处理）；seed 同理，未传时服务端不调用
+        # torch.manual_seed，保持每次生成的随机性。
+        emotion = (options.get("emotion") or "").strip()
+        if emotion:
+            payload["emotion"] = emotion
+        seed = options.get("seed")
+        if seed is not None and str(seed).strip() != "":
+            payload["seed"] = seed
         url = QWEN3_TTS_BASE_URL + "/generate/voice_design"
     elif mode == "voice_clone":
         payload = {
@@ -884,6 +952,45 @@ def _qwen3_tts_synth_to_file(text: str, voice: str, out_path: str, options: Dict
 
     audio_bytes = base64.b64decode(data["audio_base64"])
     Path(out_path).write_bytes(audio_bytes)
+
+
+def _maybe_unload_qwen3_tts_after_task() -> None:
+    """
+    【用完即卸】若设置页面开启了 unload_qwen3tts_after_task，通知
+    qwen3tts_server.py 释放模型。供调用方在真正的"一次任务"边界处显式
+    调用：
+      - synthesize_preview()：单次试听，任务边界就是这一次调用本身；
+      - synthesize_segments_only()：整个"逐句合成"循环结束后调一次
+        （不是每句都调，见该函数内部的详细说明）。
+
+    【2026-09 改为重启子进程，而非仅调用 /unload】原因与
+    alt_aligners.py 里 WhisperXAligner._call_unload() /
+    NeMoForcedAligner._call_unload() 完全一致：Qwen3-TTS 底层同样依赖
+    cuDNN/PyTorch 运行时，加载模型后会在 CUDA context 里预留一部分无法
+    通过 API 主动释放的运行时开销显存（实测：仅调用 /unload 时，
+    Python 侧模型权重确实释放了，但任务管理器/nvidia-smi 里的显存占用
+    不会下降，只有进程真正退出才会归还）。因此改为调用 /restart，让
+    qwen3tts_server.py 干净退出旧进程、拉起全新进程（模型惰性加载，
+    不会立刻重新占显存），实现上等价于"卸载"但能连运行时开销一起清零。
+    详见 qwen3tts_server.py 里 restart() 函数顶部的说明。
+
+    依然是 fire-and-forget：本次连接大概率会在旧进程 os._exit(0) 时被
+    直接挂断，这是预期行为，不代表重启失败，因此吞掉所有异常只记日志，
+    不影响本次已完成的任务结果。
+    """
+    try:
+        if not app_settings.get_unload_after_task_settings().get("unload_qwen3tts_after_task"):
+            return
+    except Exception as e:
+        logger.debug(f"[TTS] 读取「用完即卸」设置失败: {e}")
+        return
+
+    import requests
+    try:
+        requests.post(QWEN3_TTS_BASE_URL + "/restart", json={}, timeout=5)
+        logger.info("[TTS] 已按「用完即卸」设置触发 Qwen3-TTS 独立服务重启（连库运行时开销一起释放）")
+    except Exception as e:
+        logger.info(f"[TTS] 「用完即卸」触发 Qwen3-TTS 独立服务重启（连接按预期被重启进程挂断，不影响本次任务结果）: {e}")
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -959,6 +1066,11 @@ def synthesize_preview(text: str, voice: str, rate: str = "+0%",
         return tmp_path.read_bytes()
     finally:
         tmp_path.unlink(missing_ok=True)
+        # 【用完即卸】试听是一次独立的、用户直接触发的小任务，任务边界
+        # 就是这一次调用本身，与 synthesize_segments_only() 的"整个循环
+        # 结束后统一触发一次"是同一套设置在不同任务粒度上的应用。
+        if engine == "qwen3_tts":
+            _maybe_unload_qwen3_tts_after_task()
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -1295,6 +1407,15 @@ def synthesize_segments_only(
         shutil.rmtree(str(segments_dir), ignore_errors=True)
         logger.error(f"[TTS] 分句合成失败: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
+    finally:
+        # 【用完即卸】本函数是"逐句合成"这一整个任务的边界（内部对
+        # engine=="qwen3_tts" 时会连续调用 _qwen3_tts_synth_to_file()
+        # 多次，每句一次）；与 align_segments() 里 Qwen3-FA 的处理方式
+        # 一致，卸载判断放在整个循环结束处统一触发一次，而不是每句都
+        # 触发。只有实际使用了 Qwen3-TTS 引擎时才需要触发，其余引擎
+        # （EdgeTTS / Windows SAPI）不涉及该设置。
+        if engine == "qwen3_tts":
+            _maybe_unload_qwen3_tts_after_task()
 
 
 def _make_alignment_pitch_shifted_copy(src_wav_path: str, semitones: float) -> str:
@@ -1380,7 +1501,7 @@ def align_segments(
       成功: {"success": True, "lab_content": str, "sentence_count": int, "warnings": [str, ...]}
       失败: {"success": False, "error": str}
     """
-    from alt_aligners import get_aligner, _fill_silences_lab
+    from alt_aligners import get_aligner, _fill_silences_lab, maybe_unload_qwen3_forced_aligner_after_task
 
     segments_path = Path(segments_dir)
     total = len(sentences)
@@ -1404,104 +1525,122 @@ def align_segments(
     # I/O 或对齐调用，只是复用已经算好的 local_entries / 偏移量）。
     sentence_timeline: List[Dict] = []
 
-    for i, sentence in enumerate(sentences):
-        if cancel_check and cancel_check():
-            return {"success": False, "stage": "cancelled", "error": "用户已取消"}
+    # 【用完即卸】本函数会对上面拿到的同一个缓存单例 aligner 连续调用
+    # 多次 align()（每句一次），因此不能像单文件对齐那样在每次 align()
+    # 调用后就触发卸载——那样会导致同一个 TTS 跟读任务内反复"卸载→
+    # 重新加载"，每句都要重走一次模型加载耗时。这里用 try/finally 包住
+    # 整个句子循环，保证不管中途正常结束、提前 return（用户取消等）还是
+    # 抛出异常，都在"这一整个 TTS 跟读任务"结束时统一触发一次卸载判断，
+    # 与 pipeline._run_alignment() 里单文件对齐场景的触发粒度一致（都是
+    # "一次任务"级别，只是这里的"一次任务"内部包含多次底层推理调用）。
+    try:
+        for i, sentence in enumerate(sentences):
+            if cancel_check and cancel_check():
+                return {"success": False, "stage": "cancelled", "error": "用户已取消"}
 
-        seg_wav = segments_path / f"seg_{i:04d}.wav"
-        if not seg_wav.exists():
-            warnings.append(f"第 {i + 1} 句音频缺失，已跳过")
+            seg_wav = segments_path / f"seg_{i:04d}.wav"
+            if not seg_wav.exists():
+                warnings.append(f"第 {i + 1} 句音频缺失，已跳过")
+                if progress_cb:
+                    progress_cb(i + 1, total)
+                continue
+
+            # 时长/偏移量计算始终基于原始未移调的 seg_wav，与是否启用对齐辅助
+            # 移调无关——保证最终 LAB 在合并音频里的位置不受该功能影响。
+            seg_duration_100ns = _get_wav_duration_100ns(str(seg_wav))
+
+            align_target = str(seg_wav)
+            shifted_path: Optional[str] = None
+            if align_pitch_shift_semitones:
+                try:
+                    shifted_path = _make_alignment_pitch_shifted_copy(
+                        str(seg_wav), align_pitch_shift_semitones
+                    )
+                    align_target = shifted_path
+                except Exception as e:
+                    logger.warning(f"[TTS] 第 {i + 1}/{total} 句对齐辅助移调失败，回退为原始音频对齐: {e}")
+
+            try:
+                align_result = aligner.align(align_target, sentence, language,
+                                              english_word_align=english_word_align,
+                                              ja_disable_katakana=ja_disable_katakana)
+            except Exception as e:
+                align_result = {"success": False, "error": str(e)}
+            finally:
+                if shifted_path:
+                    try:
+                        os.remove(shifted_path)
+                    except OSError:
+                        pass
+
+            if align_result.get("success"):
+                local_entries = _parse_lab_lines(align_result.get("lab_content", ""))
+            else:
+                logger.warning(
+                    f"[TTS] 第 {i + 1}/{total} 句 Qwen3-FA 对齐失败，"
+                    f"使用均匀分配兜底：{align_result.get('error')}"
+                )
+                warnings.append(f"第 {i + 1} 句对齐失败，已使用均匀时间戳兜底：{align_result.get('error')}")
+                local_entries = _uniform_fallback_entries(sentence, seg_duration_100ns)
+
+            shifted_entries = _shift_entries(local_entries, cumulative_100ns)
+            lab_entries.extend(shifted_entries)
+
+            sentence_start_100ns = cumulative_100ns
+            sentence_timeline.append({
+                "index": i,
+                "text": sentence,
+                "start_sec": round(sentence_start_100ns / 10_000_000.0, 6),
+                "end_sec": round((sentence_start_100ns + seg_duration_100ns) / 10_000_000.0, 6),
+                "duration_sec": round(seg_duration_100ns / 10_000_000.0, 6),
+                "phonemes": [
+                    {
+                        "start_sec": round(s / 10_000_000.0, 6),
+                        "end_sec": round(e / 10_000_000.0, 6),
+                        "phoneme": p,
+                    }
+                    for (s, e, p) in shifted_entries
+                ],
+            })
+
+            cumulative_100ns += seg_duration_100ns
+            if i < total - 1:
+                cumulative_100ns += gap_100ns
+
             if progress_cb:
                 progress_cb(i + 1, total)
-            continue
 
-        # 时长/偏移量计算始终基于原始未移调的 seg_wav，与是否启用对齐辅助
-        # 移调无关——保证最终 LAB 在合并音频里的位置不受该功能影响。
-        seg_duration_100ns = _get_wav_duration_100ns(str(seg_wav))
+        lab_entries.sort(key=lambda t: t[0])
+        raw_lab_text = _entries_to_lab_text(lab_entries)
+        final_lab_text = _fill_silences_lab(raw_lab_text) if raw_lab_text else ""
 
-        align_target = str(seg_wav)
-        shifted_path: Optional[str] = None
-        if align_pitch_shift_semitones:
+        if work_dir and stem:
             try:
-                shifted_path = _make_alignment_pitch_shifted_copy(
-                    str(seg_wav), align_pitch_shift_semitones
-                )
-                align_target = shifted_path
-            except Exception as e:
-                logger.warning(f"[TTS] 第 {i + 1}/{total} 句对齐辅助移调失败，回退为原始音频对齐: {e}")
+                if app_settings.get_output_timeline_files_enabled():
+                    _write_tts_timeline(
+                        work_dir=work_dir,
+                        stem=stem,
+                        sentence_timeline=sentence_timeline,
+                        total_duration_sec=cumulative_100ns / 10_000_000.0,
+                    )
+            except Exception as _tl_err:
+                logger.warning(f"[TTS] 序列时间表调试文件写入失败（不影响合成/对齐结果本身）: {_tl_err}")
 
+        return {
+            "success": True,
+            "lab_content": final_lab_text,
+            "sentence_count": total,
+            "warnings": warnings,
+        }
+    finally:
+        # 【用完即卸】整个句子循环（不管正常结束、用户取消提前 return，
+        # 还是中途抛出未捕获异常）结束后，统一触发一次卸载判断——语义
+        # 上对应"这一次 TTS 跟读任务"，与 pipeline._run_alignment() 里
+        # 单文件对齐的触发粒度一致。
         try:
-            align_result = aligner.align(align_target, sentence, language,
-                                          english_word_align=english_word_align,
-                                          ja_disable_katakana=ja_disable_katakana)
-        except Exception as e:
-            align_result = {"success": False, "error": str(e)}
-        finally:
-            if shifted_path:
-                try:
-                    os.remove(shifted_path)
-                except OSError:
-                    pass
-
-        if align_result.get("success"):
-            local_entries = _parse_lab_lines(align_result.get("lab_content", ""))
-        else:
-            logger.warning(
-                f"[TTS] 第 {i + 1}/{total} 句 Qwen3-FA 对齐失败，"
-                f"使用均匀分配兜底：{align_result.get('error')}"
-            )
-            warnings.append(f"第 {i + 1} 句对齐失败，已使用均匀时间戳兜底：{align_result.get('error')}")
-            local_entries = _uniform_fallback_entries(sentence, seg_duration_100ns)
-
-        shifted_entries = _shift_entries(local_entries, cumulative_100ns)
-        lab_entries.extend(shifted_entries)
-
-        sentence_start_100ns = cumulative_100ns
-        sentence_timeline.append({
-            "index": i,
-            "text": sentence,
-            "start_sec": round(sentence_start_100ns / 10_000_000.0, 6),
-            "end_sec": round((sentence_start_100ns + seg_duration_100ns) / 10_000_000.0, 6),
-            "duration_sec": round(seg_duration_100ns / 10_000_000.0, 6),
-            "phonemes": [
-                {
-                    "start_sec": round(s / 10_000_000.0, 6),
-                    "end_sec": round(e / 10_000_000.0, 6),
-                    "phoneme": p,
-                }
-                for (s, e, p) in shifted_entries
-            ],
-        })
-
-        cumulative_100ns += seg_duration_100ns
-        if i < total - 1:
-            cumulative_100ns += gap_100ns
-
-        if progress_cb:
-            progress_cb(i + 1, total)
-
-    lab_entries.sort(key=lambda t: t[0])
-    raw_lab_text = _entries_to_lab_text(lab_entries)
-    final_lab_text = _fill_silences_lab(raw_lab_text) if raw_lab_text else ""
-
-    if work_dir and stem:
-        try:
-            if app_settings.get_output_timeline_files_enabled():
-                _write_tts_timeline(
-                    work_dir=work_dir,
-                    stem=stem,
-                    sentence_timeline=sentence_timeline,
-                    total_duration_sec=cumulative_100ns / 10_000_000.0,
-                )
-        except Exception as _tl_err:
-            logger.warning(f"[TTS] 序列时间表调试文件写入失败（不影响合成/对齐结果本身）: {_tl_err}")
-
-    return {
-        "success": True,
-        "lab_content": final_lab_text,
-        "sentence_count": total,
-        "warnings": warnings,
-    }
+            maybe_unload_qwen3_forced_aligner_after_task()
+        except Exception as _unload_err:
+            logger.warning(f"[TTS] 「用完即卸」释放 Qwen3-FA 模型失败（不影响本次对齐结果）: {_unload_err}")
 
 
 def synthesize_and_align(

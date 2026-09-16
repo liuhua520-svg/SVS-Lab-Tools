@@ -122,6 +122,38 @@ _model_lock = threading.Lock()
 # /restart 需要拿到它才能在重启前"干净地"关闭监听端口，见 restart() 里的说明。
 _httpd = None
 
+# 【2026-09 新增，修复"重启后旧进程和新进程一起消失"的偶发崩溃】保存
+# _delayed_restart() 所在的后台线程对象，供 __main__ 最后 join()——原因
+# 见 restart() 函数顶部新增的说明。
+_restart_thread: Optional[threading.Thread] = None
+
+
+def unload_model() -> int:
+    """
+    释放已缓存的全部 ASR / 对齐模型（"用完即卸"设置开启时，由 app.py 在
+    每次 WhisperXAligner 任务结束后调用 /unload 触发；也可手动 POST
+    /unload 调用，显存紧张时随时释放）。写法与 qwen3tts_server.py 里同名
+    函数保持一致：先在锁内清空缓存字典、丢弃对模型对象的最后一个强引用，
+    再在锁外做 gc.collect() + torch.cuda.empty_cache()。
+
+    返回释放的模型槽位总数（ASR + 对齐模型合计）。
+    """
+    with _model_lock:
+        n = len(_asr_models) + len(_align_models)
+        _asr_models.clear()
+        _align_models.clear()
+    if n:
+        try:
+            import gc
+            gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info(f"[WhisperX] 已按「用完即卸」设置释放模型（共 {n} 个槽位）")
+    return n
+
 
 def _safe_device(requested: str) -> str:
     """
@@ -314,7 +346,7 @@ def _transcribe_with_oom_retry(model, audio, wx_lang: str, whisper_model: str,
 
     raise RuntimeError(
         f"CUDA 显存不足，即使把 batch_size 降到 1 仍然失败——当前 GPU 剩余显存可能已经不够运行 "
-        f"{whisper_model} 模型本身。建议在设置里把 whisperx_batch_size 调得更小，或把使用的 "
+        f"{whisper_model} 模型本身。建议在处理页面把\"批处理大小\"调得更小，或把使用的 "
         f"Whisper 模型档位换成更小的（medium / small / base），也可以检查一下是否有其他进程占用了显存。"
         f"原始错误: {last_exc}"
     )
@@ -347,6 +379,30 @@ def restart():
          连续不丢失（launcher.py 用 CREATE_NO_WINDOW 拉起时，标准句柄已
          被重定向到 logs/whisperx.log 文件）；
       4) 最后 os._exit(0) 立即结束旧进程。
+
+    【2026-09 修复，重要】上面这套流程本身没问题，但过去遗漏了一个衔接
+    细节，导致"设置页面保存后有时 WhisperX/NeMo 直接消失，Qwen3-TTS 却
+    没事"这种偶发、看起来毫无规律的崩溃：
+
+    _httpd.shutdown() 是从这个后台线程里调用的，但它会让运行在【主线程】
+    里的 _httpd.serve_forever()（见文件末尾 __main__ 块）几乎立刻返回。
+    serve_forever() 一返回，主线程就跑到了整个脚本的末尾——而 CPython 的
+    规则是："一旦所有非 daemon 线程都结束，进程就可以退出"，不会等还在
+    跑的 daemon 线程（这个后台线程被 threading.Thread(daemon=True) 标记）
+    执行完。也就是说，主线程"脚本跑完"和这个后台线程"还没来得及执行
+    server_close() / subprocess.Popen() / os._exit(0)"之间存在竞态：谁先
+    谁后完全看时序，跟机器负载、GIL 调度有关，跟这个服务本身"该不该
+    正常重启成功"没有任何关系。运气不好时，主线程先一步把整个进程收
+    掉，这个后台线程会在执行到一半（可能连 subprocess.Popen() 都还没
+    调用）时被直接掐断——旧进程没了，新进程也没起来，表现就是服务直接
+    "崩溃消失"。这就是本次实测复现出来的根因：本地用一个最小化的 Flask
+    + werkzeug make_server 例子复现过，日志显示 serve_forever() 已返回、
+    主线程已跑到脚本末尾，而这个后台线程的下一行日志永远不会被打印出来。
+
+    修法：不让主线程在 serve_forever() 返回后就直接"跑完脚本"，而是
+    调用 _restart_thread.join() 等这个后台线程真正结束（它最终会用
+    os._exit(0) 把整个进程杀掉，join() 不会主动返回，等的就是进程被杀
+    掉那一刻），从根上消灭这个竞态。
     """
     def _delayed_restart():
         time.sleep(0.5)
@@ -374,8 +430,17 @@ def restart():
 
         os._exit(0)
 
-    threading.Thread(target=_delayed_restart, daemon=True).start()
+    global _restart_thread
+    _restart_thread = threading.Thread(target=_delayed_restart, daemon=True)
+    _restart_thread.start()
     return jsonify({"success": True, "message": "WhisperX 服务正在重启..."})
+
+
+@app.post("/unload")
+def unload():
+    """释放已加载的 ASR/对齐模型（显存紧张时可手动调用，或由「用完即卸」设置自动触发）。"""
+    n = unload_model()
+    return jsonify({"success": True, "unloaded": n})
 
 
 @app.post("/transcribe")
@@ -562,3 +627,12 @@ if __name__ == "__main__":
     _httpd = make_server("127.0.0.1", 5854, app)
     logger.info("🚀 WhisperX service listening on http://127.0.0.1:5854")
     _httpd.serve_forever()
+
+    # 【2026-09 新增】serve_forever() 只会在 /restart 触发 shutdown() 后
+    # 提前返回，不代表后台的 _delayed_restart 线程已经跑完"释放端口→拉起
+    # 新进程→os._exit(0)"这一整套流程。这里必须 join() 等它，否则主线程
+    # 直接跑完脚本会让 CPython 提前收掉整个进程，把还没执行完的后台线程
+    # 一起掐断，导致重启变成"旧进程和新进程一起消失"——完整原因见
+    # restart() 函数里 2026-09 新增的说明。
+    if _restart_thread is not None:
+        _restart_thread.join()

@@ -3125,7 +3125,8 @@ def tts_narrators_list():
 def tts_narrators_upsert():
     """新建 / 更新一个讲述人档案（语音预设）。
     body: {id?, name, engine?, voice, rate, pitch, volume, language,
-           qwen3_tts_mode?, qwen3_tts_instruct?, qwen3_tts_ref_text?,
+           qwen3_tts_mode?, qwen3_tts_instruct?, qwen3_tts_emotion?,
+           qwen3_tts_seed?, qwen3_tts_ref_text?,
            qwen3_tts_x_vector_only?, qwen3_tts_size?,
            qwen3_tts_ref_audio_base64?, qwen3_tts_ref_audio_ext?}
 

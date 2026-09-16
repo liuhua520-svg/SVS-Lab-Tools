@@ -3239,6 +3239,18 @@ class TsubakiProcessor:
                 cursor_sec += float(item.get("duration_sec") or 0.0)
             total_duration_sec = cursor_sec
 
+            # ── 输出文件名注入 6 位随机标识符 ─────────────────────────
+            # 与单文件流程（build_job_paths）里"为文件名注入 6 位随机
+            # 标识符，彻底避免连续点击时发生文件覆盖/锁死冲突"的做法
+            # 保持一致：对话文本框批量处理的最终工程文件此前直接使用
+            # 用户填写的 project_title 作为文件名（例如固定的
+            # "Dialogue Project.vsqx"），连续多次点击"开始处理"会反复
+            # 覆盖同一个文件。这里只影响*磁盘文件名*，写入工程文件内部
+            # 的标题/名称字段（SVP "name"/USTX "name"/VSQX <name>/
+            # <seqName>）仍使用用户原始输入的 project_title，不带后缀。
+            import uuid as _uuid
+            output_stem = f"{project_title}_{_uuid.uuid4().hex[:6]}"
+
             if fmt == "sv":
                 project_text = self._build_svp_project_text_sequenced(
                     project_title=project_title,
@@ -3248,14 +3260,14 @@ class TsubakiProcessor:
                     language=language,
                     dict_source=dict_source,
                 )
-                out_path = self.work_dir / f"{project_title}.svp"
+                out_path = self.work_dir / f"{output_stem}.svp"
             elif fmt == "ustx":
                 project_text = self._build_ustx_project_text_sequenced(
                     project_title=project_title,
                     resolved_tracks=resolved_tracks,
                     config=config,
                 )
-                out_path = self.work_dir / f"{project_title}.ustx"
+                out_path = self.work_dir / f"{output_stem}.ustx"
             else:  # fmt == "vsqx"
                 project_text = self._build_vsqx_project_text_sequenced(
                     project_title=project_title,
@@ -3268,7 +3280,7 @@ class TsubakiProcessor:
                     language=language,
                     dict_source=dict_source,
                 )
-                out_path = self.work_dir / f"{project_title}.vsqx"
+                out_path = self.work_dir / f"{output_stem}.vsqx"
 
             out_path.write_text(project_text, encoding="utf-8")
 
@@ -3286,6 +3298,7 @@ class TsubakiProcessor:
                         project_title=project_title,
                         resolved_tracks=resolved_tracks,
                         total_duration_sec=total_duration_sec,
+                        output_stem=output_stem,
                     )
             except Exception as _tl_err:
                 logger.warning("[顺序合并] 序列时间表调试文件写入失败（不影响工程文件本身）: %s", _tl_err)
@@ -3308,6 +3321,7 @@ class TsubakiProcessor:
         project_title: str,
         resolved_tracks: List[Dict],
         total_duration_sec: float,
+        output_stem: Optional[str] = None,
     ) -> Path:
         """
         写出「对话文本框批量处理」的序列时间表调试文件（.dtslt，JSON，
@@ -3319,9 +3333,10 @@ class TsubakiProcessor:
         由调用方（build_multitrack_project）触发；本方法自身不做开关
         判断，方便单测/手动调用时绕过设置直接生成。
 
-        文件名与工程文件同名（同一个 project_title），扩展名为
-        ".dtslt"，与工程文件写在同一个 work_dir 下，覆盖写入（与工程
-        文件本身"重名即覆盖"的行为一致）。
+        文件名与工程文件同名（同一个 output_stem，即注入了 6 位随机
+        标识符后的文件名主干；未传入时回退为 project_title 本身，
+        兼容旧调用方），扩展名为 ".dtslt"，与工程文件写在同一个
+        work_dir 下。
 
         相邻两个对话框之间若存在间隙（框间静音，通常等于 config.
         box_gap_sec，默认 0.35 秒），会在 "boxes" 数组里对应位置插入一个
@@ -3384,7 +3399,7 @@ class TsubakiProcessor:
             "boxes": boxes_payload,
         }
 
-        out_path = self.work_dir / f"{project_title}.dtslt"
+        out_path = self.work_dir / f"{output_stem or project_title}.dtslt"
         out_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
