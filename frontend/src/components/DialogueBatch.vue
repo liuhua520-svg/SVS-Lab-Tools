@@ -778,6 +778,40 @@
                     :placeholder="t('processor.qwen3TtsInstructVoiceDesignPlaceholder')"
                   />
 
+                  <!-- VoiceDesign 专用：Emotion（自由文本，拼接进声音描述，
+                       不限定于固定选项，filterable + allow-create 下拉框
+                       支持直接输入任意描述）+ Seed（随机种子）。与
+                       MFAProcessor.vue 主面板同款字段，按框独立维护。 -->
+                  <template v-if="box.ttsQwen3Mode === 'voice_design'">
+                    <div class="tts-mini-label" style="margin-top: 6px">{{ t('processor.qwen3TtsEmotion') }}</div>
+                    <el-select
+                      v-model="box.ttsQwen3Emotion"
+                      filterable
+                      allow-create
+                      default-first-option
+                      clearable
+                      size="small"
+                      :disabled="processing"
+                      :placeholder="t('processor.qwen3TtsEmotionNone')"
+                      style="width: 100%"
+                    >
+                      <el-option v-for="e in QWEN3_TTS_EMOTION_SUGGESTIONS" :key="e" :value="e" :label="e" />
+                    </el-select>
+                    <div class="tts-mini-label" style="margin-top: 6px">{{ t('processor.qwen3TtsSeed') }}</div>
+                    <div style="display: flex; align-items: center; gap: 8px">
+                      <el-input-number
+                        v-model="box.ttsQwen3Seed"
+                        :min="0" :step="1" size="small"
+                        controls-position="right"
+                        :disabled="processing"
+                        style="flex: 1"
+                      />
+                      <el-button size="small" :disabled="processing" @click="box.ttsQwen3Seed = randomSeedValue()">
+                        🎲 {{ t('processor.qwen3TtsSeedRandomize') }}
+                      </el-button>
+                    </div>
+                  </template>
+
                   <!-- VoiceClone（Base 模型）：导入参考音频 + 可选参考文本 + x-vector 开关 -->
                   <template v-if="box.ttsQwen3Mode === 'voice_clone'">
                     <div style="margin-top: 6px" class="audio-upload-row">
@@ -1195,12 +1229,52 @@
             <el-form-item v-if="narratorForm.qwen3_tts_mode === 'voice_design' && narratorFormVoiceDesignSubMode === 'desc_only'" :label="t('processor.qwen3TtsInstructRequired')">
               <el-input v-model="narratorForm.qwen3_tts_instruct" type="textarea" :rows="3" :placeholder="t('processor.qwen3TtsInstructVoiceDesignPlaceholder')" />
             </el-form-item>
+            <template v-if="narratorForm.qwen3_tts_mode === 'voice_design' && narratorFormVoiceDesignSubMode === 'desc_only'">
+              <el-form-item :label="t('processor.qwen3TtsEmotion')">
+                <el-select
+                  v-model="narratorForm.qwen3_tts_emotion"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  style="width: 240px"
+                  :placeholder="t('processor.qwen3TtsEmotionNone')"
+                >
+                  <el-option v-for="e in QWEN3_TTS_EMOTION_SUGGESTIONS" :key="e" :value="e" :label="e" />
+                </el-select>
+              </el-form-item>
+              <el-form-item :label="t('processor.qwen3TtsSeed')">
+                <el-input-number v-model="narratorForm.qwen3_tts_seed" :min="0" :step="1" controls-position="right" style="width: 200px" />
+                <el-button style="margin-left: 10px" @click="randomizeNarratorFormSeed">
+                  🎲 {{ t('processor.qwen3TtsSeedRandomize') }}
+                </el-button>
+              </el-form-item>
+            </template>
 
             <!-- Voice Design → 预览并另存为音色克隆：与 MFAProcessor.vue
                  同款功能，见该文件同一位置的注释。 -->
             <template v-if="narratorForm.qwen3_tts_mode === 'voice_design' && narratorFormVoiceDesignSubMode === 'save_clone'">
               <el-form-item :label="t('processor.qwen3TtsInstructRequired')">
                 <el-input v-model="narratorForm.qwen3_tts_instruct" type="textarea" :rows="3" :placeholder="t('processor.qwen3TtsInstructVoiceDesignPlaceholder')" />
+              </el-form-item>
+              <el-form-item :label="t('processor.qwen3TtsEmotion')">
+                <el-select
+                  v-model="narratorForm.qwen3_tts_emotion"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  style="width: 240px"
+                  :placeholder="t('processor.qwen3TtsEmotionNone')"
+                >
+                  <el-option v-for="e in QWEN3_TTS_EMOTION_SUGGESTIONS" :key="e" :value="e" :label="e" />
+                </el-select>
+              </el-form-item>
+              <el-form-item :label="t('processor.qwen3TtsSeed')">
+                <el-input-number v-model="narratorForm.qwen3_tts_seed" :min="0" :step="1" controls-position="right" style="width: 200px" />
+                <el-button style="margin-left: 10px" @click="randomizeNarratorFormSeed">
+                  🎲 {{ t('processor.qwen3TtsSeedRandomize') }}
+                </el-button>
               </el-form-item>
               <el-form-item :label="t('processor.qwen3TtsPreviewAsCloneTitle')">
                 <div style="width: 100%; border: 1px solid var(--el-border-color); border-radius: 6px; padding: 12px; background: var(--el-fill-color-lighter)">
@@ -2053,6 +2127,12 @@ interface DialogueBox {
   ttsQwen3Mode: Qwen3TtsMode
   ttsQwen3Size: '1.7B' | '0.6B'
   ttsQwen3Instruct: string
+  // VoiceDesign 专用：Emotion 为自由文本（不再限定于固定选项列表，模型
+  // 支持的情绪词远不止 Happy/Sad 等几个），空字符串表示不附加；拼接方式
+  // 与后端 qwen3tts_server.py 的 generate_voice_design 一致（"{instruct}，
+  // 情绪：{emotion}"）。Seed 为可选随机种子，null 表示不传（每次随机）。
+  ttsQwen3Emotion: string
+  ttsQwen3Seed: number | null
   ttsQwen3RefText: string
   ttsQwen3XVectorOnly: boolean
   ttsQwen3RefAudioFile: File | null
@@ -2213,11 +2293,23 @@ const downloadingRmvpe = ref<boolean>(false)
 //   voice_clone  ：qwen3RefAudioFile(File) / qwen3RefAudioPath(已保存预设
 //                  自带的参考音频路径，二选一) + qwen3RefText + qwen3XVectorOnly
 type Qwen3TtsMode = 'custom_voice' | 'voice_design' | 'voice_clone'
+// VoiceDesign 专用 Emotion 下拉框的常见建议项（与 MFAProcessor.vue 同款
+// 常量）：仅作为输入建议，不是固定列表——下拉框是 filterable +
+// allow-create，用户可以输入任意自定义情绪/语气描述。
+const QWEN3_TTS_EMOTION_SUGGESTIONS = ['Happy', 'Sad', 'Angry', 'Fear', 'Disgust', 'Surprise', 'Calm']
+// Seed 输入框右边的"随机"按钮共用的取值范围：[0, 2^31 - 1]，对齐 32 位
+// 有符号整数（与 MFAProcessor.vue 同款约定）。按框的 randomizeBoxSeed(box)
+// 和预设弹窗的 randomizeNarratorFormSeed() 都调用这个函数取随机数。
+const randomSeedValue = () => Math.floor(Math.random() * 2147483648)
 type TtsNarrator = {
   id: string; name: string; engine?: string; voice: string; rate: string; pitch: string; volume: string; language?: string
   qwen3_tts_mode?: Qwen3TtsMode
   qwen3_tts_size?: string
   qwen3_tts_instruct?: string
+  // VoiceDesign 专用：自由文本情绪描述 + 随机种子，与 MFAProcessor.vue
+  // 同款语义，随预设一起保存/套用。
+  qwen3_tts_emotion?: string
+  qwen3_tts_seed?: number | null
   qwen3_tts_ref_text?: string
   qwen3_tts_x_vector_only?: boolean
   qwen3_tts_ref_audio_path?: string
@@ -2232,10 +2324,14 @@ const ttsEnginesLoading = ref(false)
 const narratorManagerVisible = ref(false)
 const narratorForm = ref<TtsNarrator>({
   id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%',
-  qwen3_tts_mode: 'custom_voice', qwen3_tts_size: '1.7B', qwen3_tts_instruct: '', qwen3_tts_ref_text: '',
-  qwen3_tts_x_vector_only: false, qwen3_tts_ref_audio_path: '',
+  qwen3_tts_mode: 'custom_voice', qwen3_tts_size: '1.7B', qwen3_tts_instruct: '', qwen3_tts_emotion: '', qwen3_tts_seed: null,
+  qwen3_tts_ref_text: '', qwen3_tts_x_vector_only: false, qwen3_tts_ref_audio_path: '',
 })
 const narratorSaving = ref(false)
+// 语音预设管理弹窗内 Seed 字段专用的"随机"按钮：与 QWEN3_TTS_EMOTION_SUGGESTIONS
+// 同一处声明的 randomSeedValue 共享随机范围，只是写入目标是
+// narratorForm.value.qwen3_tts_seed。
+const randomizeNarratorFormSeed = () => { narratorForm.value.qwen3_tts_seed = randomSeedValue() }
 
 // ── "优化文本"弹窗（与 MFAProcessor.vue 的实现逻辑一致：弹窗内编辑的是
 // draft 副本，点击"应用"才写回打开弹窗时绑定的目标对话框 box.text，取消/
@@ -2984,6 +3080,8 @@ const buildBoxQwen3TtsOptionsForPreview = async (box: DialogueBox): Promise<Reco
     if (box.ttsQwen3Instruct.trim()) opts.instruct = box.ttsQwen3Instruct.trim()
   } else if (box.ttsQwen3Mode === 'voice_design') {
     opts.instruct = box.ttsQwen3Instruct.trim()
+    if (box.ttsQwen3Emotion) opts.emotion = box.ttsQwen3Emotion
+    if (box.ttsQwen3Seed !== null && box.ttsQwen3Seed !== undefined) opts.seed = box.ttsQwen3Seed
   } else if (box.ttsQwen3Mode === 'voice_clone') {
     opts.x_vector_only = box.ttsQwen3XVectorOnly
     if (!box.ttsQwen3XVectorOnly) opts.ref_text = box.ttsQwen3RefText.trim()
@@ -3042,6 +3140,8 @@ const handleBoxNarratorSelect = async (box: DialogueBox, narratorId: string) => 
     box.ttsRate = 0
     box.ttsPitch = 0
     box.ttsVolume = 0
+    box.ttsQwen3Emotion = ''
+    box.ttsQwen3Seed = null
     box.ttsQwen3RefAudioFile = null
     box.ttsQwen3RefAudioPath = ''
     return
@@ -3066,6 +3166,8 @@ const handleBoxNarratorSelect = async (box: DialogueBox, narratorId: string) => 
     box.ttsQwen3Mode = (n.qwen3_tts_mode as Qwen3TtsMode) || 'custom_voice'
     box.ttsQwen3Size = (n.qwen3_tts_size as '1.7B' | '0.6B') || '1.7B'
     box.ttsQwen3Instruct = n.qwen3_tts_instruct || ''
+    box.ttsQwen3Emotion = n.qwen3_tts_emotion || ''
+    box.ttsQwen3Seed = n.qwen3_tts_seed ?? null
     box.ttsQwen3RefText = n.qwen3_tts_ref_text || ''
     box.ttsQwen3XVectorOnly = !!n.qwen3_tts_x_vector_only
     box.ttsQwen3RefAudioFile = null
@@ -3192,7 +3294,7 @@ const _boxSegmentPreviewOtherSignature = (box: DialogueBox, language: string, qw
 const _boxSegmentPreviewSignature = (box: DialogueBox, language: string, sentenceGapSec: number) =>
   JSON.stringify([
     box.text, box.ttsEngine, box.ttsVoice, box.ttsRate, box.ttsPitch, box.ttsVolume, language,
-    box.ttsQwen3Mode, box.ttsQwen3Size, box.ttsQwen3Instruct, box.ttsQwen3RefText,
+    box.ttsQwen3Mode, box.ttsQwen3Size, box.ttsQwen3Instruct, box.ttsQwen3Emotion, box.ttsQwen3Seed, box.ttsQwen3RefText,
     box.ttsQwen3XVectorOnly, box.ttsQwen3RefAudioFile?.name || '', box.ttsQwen3RefAudioPath,
     sentenceGapSec,
   ])
@@ -3311,8 +3413,8 @@ const editNarrator = (n: TtsNarrator) => {
 const resetNarratorForm = () => {
   narratorForm.value = {
     id: '', name: '', engine: 'edge_tts', voice: '', rate: '+0%', pitch: '+0Hz', volume: '+0%',
-    qwen3_tts_mode: 'custom_voice', qwen3_tts_size: '1.7B', qwen3_tts_instruct: '', qwen3_tts_ref_text: '',
-    qwen3_tts_x_vector_only: false, qwen3_tts_ref_audio_path: '',
+    qwen3_tts_mode: 'custom_voice', qwen3_tts_size: '1.7B', qwen3_tts_instruct: '', qwen3_tts_emotion: '', qwen3_tts_seed: null,
+    qwen3_tts_ref_text: '', qwen3_tts_x_vector_only: false, qwen3_tts_ref_audio_path: '',
   }
   narratorFormQwen3RefAudioFile.value = null
   resetNarratorPreviewState()
@@ -3348,13 +3450,16 @@ const generateNarratorPreview = async () => {
   narratorFormPreviewLoading.value = true
   narratorFormPreviewError.value = ''
   try {
+    const qwen3Options: Record<string, any> = { mode: 'voice_design', size: narratorForm.value.qwen3_tts_size || '1.7B', instruct }
+    if (narratorForm.value.qwen3_tts_emotion) qwen3Options.emotion = narratorForm.value.qwen3_tts_emotion
+    if (narratorForm.value.qwen3_tts_seed !== null && narratorForm.value.qwen3_tts_seed !== undefined) qwen3Options.seed = narratorForm.value.qwen3_tts_seed
     const res = await fetch('/api/tts/preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text,
         engine: 'qwen3_tts',
-        qwen3_tts_options: { mode: 'voice_design', size: narratorForm.value.qwen3_tts_size || '1.7B', instruct },
+        qwen3_tts_options: qwen3Options,
       }),
     })
     if (!res.ok) {
@@ -3551,6 +3656,8 @@ const createBox = (): DialogueBox => ({
   ttsQwen3Mode: 'custom_voice',
   ttsQwen3Size: '1.7B',
   ttsQwen3Instruct: '',
+  ttsQwen3Emotion: '',
+  ttsQwen3Seed: null,
   ttsQwen3RefText: '',
   ttsQwen3XVectorOnly: false,
   ttsQwen3RefAudioFile: null,
@@ -3714,7 +3821,7 @@ watch(
   ([currentBoxes]) => {
     for (const box of currentBoxes) {
       const qwen3OptionsSig = JSON.stringify([
-        box.ttsQwen3Mode, box.ttsQwen3Size, box.ttsQwen3Instruct, box.ttsQwen3RefText,
+        box.ttsQwen3Mode, box.ttsQwen3Size, box.ttsQwen3Instruct, box.ttsQwen3Emotion, box.ttsQwen3Seed, box.ttsQwen3RefText,
         box.ttsQwen3XVectorOnly, box.ttsQwen3RefAudioFile?.name || '', box.ttsQwen3RefAudioPath,
       ])
       const effectiveLanguage = boxEffectiveLanguage(box)
@@ -4367,6 +4474,8 @@ const buildFormData = async (): Promise<FormData> => {
             if (box.ttsQwen3Instruct.trim()) qwen3OptionsForSubmit.instruct = box.ttsQwen3Instruct.trim()
           } else if (box.ttsQwen3Mode === 'voice_design') {
             qwen3OptionsForSubmit.instruct = box.ttsQwen3Instruct.trim()
+            if (box.ttsQwen3Emotion) qwen3OptionsForSubmit.emotion = box.ttsQwen3Emotion
+            if (box.ttsQwen3Seed !== null && box.ttsQwen3Seed !== undefined) qwen3OptionsForSubmit.seed = box.ttsQwen3Seed
           } else if (box.ttsQwen3Mode === 'voice_clone') {
             qwen3OptionsForSubmit.x_vector_only = box.ttsQwen3XVectorOnly
             if (!box.ttsQwen3XVectorOnly) qwen3OptionsForSubmit.ref_text = box.ttsQwen3RefText.trim()
@@ -4679,7 +4788,7 @@ const startProcessing = async () => {
       const currentText = (box.text || '').trim()
       const snapshot = box.ttsSegmentPreviewSnapshot
       const qwen3OptionsSig = JSON.stringify([
-        box.ttsQwen3Mode, box.ttsQwen3Size, box.ttsQwen3Instruct, box.ttsQwen3RefText,
+        box.ttsQwen3Mode, box.ttsQwen3Size, box.ttsQwen3Instruct, box.ttsQwen3Emotion, box.ttsQwen3Seed, box.ttsQwen3RefText,
         box.ttsQwen3XVectorOnly, box.ttsQwen3RefAudioFile?.name || '', box.ttsQwen3RefAudioPath,
       ])
       const currentOtherSig = _boxSegmentPreviewOtherSignature(box, boxEffectiveLanguage(box), qwen3OptionsSig, ttsSentenceGapSec.value)
