@@ -75,28 +75,44 @@
         <div class="section-heading">📥 {{ t('subtitleEditor.importTitle') }}</div>
         <p class="section-hint">{{ t('subtitleEditor.importHint') }}</p>
 
-        <el-upload
-          action="#"
-          :auto-upload="false"
-          :limit="1"
-          :show-file-list="false"
-          :disabled="importing"
-          :on-change="handleSubtitleFileSelect"
-          accept=".srt,.lrc,.lab,.txt"
-          class="subtitle-upload"
+        <!-- 拖拽区：整块区域都能接收拖拽的字幕文件，不局限于按钮本身；
+             el-upload 的 :limit="1" 仍然只负责点击选择那条路径，拖拽走
+             的是下面这套原生 dragenter/dragover/drop 处理，两条路径最终
+             都汇入同一个 importSubtitleFile()。 -->
+        <div
+          class="subtitle-import-dropzone"
+          :class="{ 'is-drag-over': isSubtitleDragOver }"
+          @dragenter.prevent="onSubtitleDragEnter"
+          @dragover.prevent="onSubtitleDragEnter"
+          @dragleave.prevent="onSubtitleDragLeave"
+          @drop.prevent="onSubtitleDrop"
         >
-          <el-button :loading="importing" type="primary" plain>
-            📄 {{ t('subtitleEditor.importButton') }}
+          <el-upload
+            ref="subtitleUploadRef"
+            action="#"
+            :auto-upload="false"
+            :limit="1"
+            :show-file-list="false"
+            :disabled="importing"
+            :on-change="handleSubtitleFileSelect"
+            accept=".srt,.lrc,.lab,.txt"
+            class="subtitle-upload"
+          >
+            <el-button :loading="importing" type="primary" plain>
+              📄 {{ t('subtitleEditor.importButton') }}
+            </el-button>
+          </el-upload>
+
+          <el-button plain @click="createBlankSubtitle">
+            ➕ {{ t('subtitleEditor.newSubtitleButton') }}
           </el-button>
-        </el-upload>
 
-        <el-button plain @click="createBlankSubtitle">
-          ➕ {{ t('subtitleEditor.newSubtitleButton') }}
-        </el-button>
+          <span v-if="entries.length" class="import-summary">
+            {{ t('subtitleEditor.importSummary', { count: entries.length }) }}
+          </span>
 
-        <span v-if="entries.length" class="import-summary">
-          {{ t('subtitleEditor.importSummary', { count: entries.length }) }}
-        </span>
+          <span class="import-drop-hint">{{ t('subtitleEditor.importDropHint') }}</span>
+        </div>
 
         <el-alert v-if="importError" type="error" show-icon :closable="true" @close="importError = ''" class="status-alert">
           <template #title>{{ importError }}</template>
@@ -241,6 +257,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import type { UploadInstance } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { useAppLocale } from '../i18n'
 import SubtitleWaveform from './SubtitleWaveform.vue'
@@ -528,11 +545,12 @@ const clearAllEntries = async () => {
 // ─────────────────────────────────────────────────────────────────
 const importing = ref(false)
 const importError = ref('')
+const subtitleUploadRef = ref<UploadInstance | null>(null)
+const SUBTITLE_IMPORT_EXTENSIONS = ['.srt', '.lrc', '.lab', '.txt']
 
-const handleSubtitleFileSelect = async (file: any) => {
-  const raw: File | null = file?.raw || null
-  if (!raw) return
-
+// 实际执行"导入字幕文件"的逻辑，供下面点击选择（handleSubtitleFileSelect）
+// 和拖拽（onSubtitleDrop）两条路径共用。
+const importSubtitleFile = async (raw: File) => {
   if (entries.value.length) {
     try {
       await ElMessageBox.confirm(t('subtitleEditor.importReplaceWarning'), '', { type: 'warning' })
@@ -563,6 +581,57 @@ const handleSubtitleFileSelect = async (file: any) => {
   } finally {
     importing.value = false
   }
+}
+
+// el-upload 在 :limit="1" 下会把已选过的文件一直留在自己内部的 fileList
+// 里；这个"导入字幕"区块只在 mediaInfo 变化时才会被销毁重建（不像顶部
+// 媒体上传那样每次替换都整个重新挂载），所以选过一次文件后，fileList
+// 就已经"满员"——下一次选择文件不会再触发 on-change，而是静默触发
+// on-exceed（这里没有绑定 on-exceed），导致"只能导入一次，必须先重新
+// 上传媒体（强制这个区块重新挂载）才能再导一次"的 Bug。
+// 修复方式：每次处理完一次选择（无论成功/失败/用户取消覆盖确认）后，
+// 都调用 clearFiles() 清空内部 fileList，让组件随时保持"可以再选一次"
+// 的状态。
+const handleSubtitleFileSelect = (file: any) => {
+  const raw: File | null = file?.raw || null
+  subtitleUploadRef.value?.clearFiles()
+  if (!raw) return
+  void importSubtitleFile(raw)
+}
+
+// 拖拽导入：整个"导入字幕"区域都是拖放目标，不依赖 el-upload 自带的
+// drag 模式（那样会把按钮区整个包成一个大号虚线框，和旁边"新建字幕"
+// 按钮的布局不搭），改用原生 dragenter/dragover/dragleave/drop 事件。
+// dragEnterDepth 计数是为了在拖拽经过内部子元素（按钮、文字）时，
+// dragenter/dragleave 交替触发也不会让高亮态闪烁。
+const isSubtitleDragOver = ref(false)
+let dragEnterDepth = 0
+
+const onSubtitleDragEnter = (e: DragEvent) => {
+  if (!e.dataTransfer?.types?.includes('Files')) return
+  dragEnterDepth += 1
+  isSubtitleDragOver.value = true
+}
+
+const onSubtitleDragLeave = () => {
+  dragEnterDepth = Math.max(0, dragEnterDepth - 1)
+  if (dragEnterDepth === 0) isSubtitleDragOver.value = false
+}
+
+const onSubtitleDrop = (e: DragEvent) => {
+  dragEnterDepth = 0
+  isSubtitleDragOver.value = false
+  if (importing.value) return
+
+  const dropped = e.dataTransfer?.files
+  if (!dropped || !dropped.length) return
+  const raw = dropped[0]
+  const ext = raw.name.includes('.') ? `.${raw.name.split('.').pop()!.toLowerCase()}` : ''
+  if (!SUBTITLE_IMPORT_EXTENSIONS.includes(ext)) {
+    ElMessage.error(t('subtitleEditor.importUnsupportedFormat'))
+    return
+  }
+  void importSubtitleFile(raw)
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -997,6 +1066,23 @@ onBeforeUnmount(async () => {
   font-size: 13px;
 }
 
+.subtitle-import-dropzone {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px;
+  margin: -8px;
+  border: 1px dashed transparent;
+  border-radius: 8px;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.subtitle-import-dropzone.is-drag-over {
+  border-color: var(--el-color-primary, #409eff);
+  background-color: rgba(64, 158, 255, 0.06);
+}
+
 .subtitle-upload {
   display: inline-block;
 }
@@ -1005,6 +1091,12 @@ onBeforeUnmount(async () => {
   margin-left: 12px;
   color: #67c23a;
   font-size: 13px;
+}
+
+.import-drop-hint {
+  color: #b0b3bb;
+  font-size: 12px;
+  margin-left: 4px;
 }
 
 .player-layout {

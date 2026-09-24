@@ -87,6 +87,16 @@
           <p class="help-text">{{ t('settings.unloadQwen3TtsHint') }}</p>
         </el-form-item>
 
+        <el-form-item :label="t('settings.unloadRmvpe')">
+          <el-switch v-model="form.unload_rmvpe_after_task" />
+          <p class="help-text">{{ t('settings.unloadRmvpeHint') }}</p>
+        </el-form-item>
+
+        <el-form-item :label="t('settings.unloadCrepe')">
+          <el-switch v-model="form.unload_crepe_after_task" />
+          <p class="help-text">{{ t('settings.unloadCrepeHint') }}</p>
+        </el-form-item>
+
         <el-divider />
 
         <div class="section-heading">
@@ -524,6 +534,8 @@ interface AppSettings {
   unload_whisperx_after_task: boolean
   unload_nemo_aligner_after_task: boolean
   unload_qwen3tts_after_task: boolean
+  unload_rmvpe_after_task: boolean
+  unload_crepe_after_task: boolean
   // ── Qwen3-TTS（TTS跟读独立引擎，qwen3tts_server.py，端口 5003）────────
   // 模型规模需要重启 qwen3tts_server.py 才能生效（决定下次加载模型时用
   // 哪套 checkpoint）；x-vector 默认值只影响"语音预设管理"里新建 Voice
@@ -677,6 +689,8 @@ const form = ref<AppSettings>({
   unload_whisperx_after_task: false,
   unload_nemo_aligner_after_task: false,
   unload_qwen3tts_after_task: false,
+  unload_rmvpe_after_task: false,
+  unload_crepe_after_task: false,
   ...TUNING_DEFAULTS,
   ...SENTENCE_CHUNKING_DEFAULTS,
   ...QWEN3_ASR_PREPASS_DEFAULTS,
@@ -809,6 +823,8 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     unload_whisperx_after_task: !!settings?.unload_whisperx_after_task,
     unload_nemo_aligner_after_task: !!settings?.unload_nemo_aligner_after_task,
     unload_qwen3tts_after_task: !!settings?.unload_qwen3tts_after_task,
+    unload_rmvpe_after_task: !!settings?.unload_rmvpe_after_task,
+    unload_crepe_after_task: !!settings?.unload_crepe_after_task,
     qwen3_tts_model_size: ttsModelSize === '1.7B' || ttsModelSize === '0.6B' ? ttsModelSize : QWEN3_TTS_DEFAULTS.qwen3_tts_model_size,
     qwen3_tts_x_vector_only_default: !!settings?.qwen3_tts_x_vector_only_default,
     qwen3_fa_onset_delay_sec: num('qwen3_fa_onset_delay_sec'),
