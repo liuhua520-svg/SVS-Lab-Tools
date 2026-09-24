@@ -1446,6 +1446,27 @@ class TsubakiProcessor:
         except Exception as e:
             logger.error("F0 提取失败:" + str(e), exc_info=True)
             return {"success": False, "error": str(e)}
+        finally:
+            # 【用完即卸】若设置页面开启了 unload_rmvpe_after_task /
+            # unload_crepe_after_task，无论本次任务成功/失败都在这里释放
+            # 对应模型——与 Qwen3ASRAligner.align() 里的写法保持一致：
+            # 失败任务同样应当放行显存，下一次调用时会按需重新加载。
+            # method 为 dio/harvest 时函数已在更前面 return，不会走到这
+            # 里；method 未知时上面已提前 return，也不会有模型被加载，
+            # 下面两次判断因此都是安全的无操作。
+            try:
+                import app_settings
+                unload_settings = app_settings.get_unload_after_task_settings()
+            except Exception as e:
+                logger.debug("读取「用完即卸」开关失败，跳过 RMVPE/CREPE 卸载检查: %s", e)
+                unload_settings = {}
+
+            if method == "crepe" and unload_settings.get("unload_crepe_after_task"):
+                from f0_extractors import unload_crepe_model
+                unload_crepe_model()
+            elif method == "rmvpe" and unload_settings.get("unload_rmvpe_after_task"):
+                from f0_extractors import unload_rmvpe_model
+                unload_rmvpe_model()
 
     # ----------------------------
     # SVP 生成（完整修复版）

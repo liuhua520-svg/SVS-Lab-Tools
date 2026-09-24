@@ -268,6 +268,55 @@ def extract_f0_crepe(
     return f0, t
 
 
+def unload_crepe_model() -> bool:
+    """
+    释放 torchcrepe 内部缓存的模型权重（"用完即卸"设置开启时，在每次
+    process_audio_f0(method="crepe") 任务结束后调用）。
+
+    torchcrepe 自己不提供官方的 unload/reset API：它把已加载的模型和
+    对应的 capacity（'full'/'tiny'）挂在 torchcrepe.infer 这个函数对象
+    的属性上（见 torchcrepe/core.py 的 infer()：
+        if not hasattr(infer, 'model') or ... : torchcrepe.load.model(...)
+    ），以此实现"只在第一次调用或 capacity 变化时才重新加载"的隐式缓存。
+    因此这里直接 delattr 这两个属性，等价于清空该缓存——下一次调用
+    torchcrepe.predict() 时 infer() 会发现 hasattr(infer, 'model') 为
+    False，自动触发重新加载，用户无需任何额外操作。
+
+    与 _qwen3_unload_asr_model() 保持同样的写法：先丢弃对模型对象的最后
+    一个强引用，再 gc.collect() + torch.cuda.empty_cache()。
+
+    返回是否真的释放了一个已加载的实例（未安装 torchcrepe 或原本就未
+    加载时返回 False）。
+    """
+    if not torchcrepe_available():
+        return False
+
+    import torchcrepe
+
+    had_model = hasattr(torchcrepe.infer, "model")
+    if had_model:
+        try:
+            del torchcrepe.infer.model
+        except AttributeError:
+            pass
+        try:
+            del torchcrepe.infer.capacity
+        except AttributeError:
+            pass
+
+    if had_model:
+        try:
+            import gc
+            gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("[CREPE] 已按「用完即卸」设置释放模型")
+    return had_model
+
+
 # ---------------------------------------------------------------------------
 # RMVPE
 #
@@ -656,3 +705,32 @@ def extract_f0_rmvpe(
     t = np.arange(n_frames, dtype=np.float64) * (RMVPEF0Extractor.HOP_LENGTH / float(target_sr))
 
     return f0, t
+
+
+def unload_rmvpe_model() -> bool:
+    """
+    释放已缓存的全部 RMVPE 模型实例（"用完即卸"设置开启时，在每次
+    process_audio_f0(method="rmvpe") 任务结束后调用）。
+
+    _RMVPE_CACHE 按 (model_path, device) 为 key 缓存，理论上同一进程内
+    可能同时存在多个实例（例如设置里途中切换过 f0_device，cuda 失败又
+    自动回退缓存了一份 cpu 实例，见 _get_rmvpe_extractor 的 CUDA 回退
+    分支）。因此这里清空整个缓存字典，而不是只删某一个 key，逻辑与
+    _qwen3_unload_asr_model() 一致：先丢弃对全部模型对象的最后一个强
+    引用，再统一 gc.collect() + torch.cuda.empty_cache() 一次。
+
+    返回是否真的释放了至少一个已加载的实例（原本就未加载时返回 False）。
+    """
+    had_model = bool(_RMVPE_CACHE)
+    if had_model:
+        _RMVPE_CACHE.clear()
+        try:
+            import gc
+            gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("[RMVPE] 已按「用完即卸」设置释放模型")
+    return had_model

@@ -104,7 +104,10 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     # False → 保持常驻（默认），任务结束后模型继续留在显存/内存里，下一次
     #         任务直接复用，无需重新加载。
     # 实时生效，无需重启任何进程：
-    #   - qwen3_asr / qwen3_aligner 在 app.py 主进程内直接读取本设置；
+    #   - qwen3_asr / qwen3_aligner / rmvpe / crepe 在 app.py 主进程内
+    #     直接读取本设置（RMVPE/CREPE 由 f0_extractors.py 的
+    #     unload_rmvpe_model() / unload_crepe_model() 负责实际释放，
+    #     调用方是 tsubaki_processor.py 的 process_audio_f0()）；
     #   - whisperx / nemo_aligner / qwen3tts 由 app.py（或对应调用方）
     #     在每次任务结束后读取本设置，决定是否顺带调用对应微服务的
     #     /unload 接口。
@@ -113,6 +116,8 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "unload_whisperx_after_task": False,
     "unload_nemo_aligner_after_task": False,
     "unload_qwen3tts_after_task": False,
+    "unload_rmvpe_after_task": False,
+    "unload_crepe_after_task": False,
 
     # ── Qwen3-TTS（TTS跟读独立引擎，qwen3tts_server.py，端口 5853）────────
     # 模型规模：1.7B 效果最好但显存需求更高；0.6B 更省显存/更快。
@@ -383,6 +388,8 @@ def save_settings(new_settings: Dict[str, object]) -> Dict[str, object]:
         current["unload_whisperx_after_task"] = bool(current.get("unload_whisperx_after_task"))
         current["unload_nemo_aligner_after_task"] = bool(current.get("unload_nemo_aligner_after_task"))
         current["unload_qwen3tts_after_task"] = bool(current.get("unload_qwen3tts_after_task"))
+        current["unload_rmvpe_after_task"] = bool(current.get("unload_rmvpe_after_task"))
+        current["unload_crepe_after_task"] = bool(current.get("unload_crepe_after_task"))
 
         # Qwen3-TTS 模型规模：只允许 "1.7B" / "0.6B"，非法值回退默认值。
         tts_size = str(current.get("qwen3_tts_model_size") or "").strip()
@@ -657,13 +664,15 @@ _UNLOAD_KEYS = (
     "unload_whisperx_after_task",
     "unload_nemo_aligner_after_task",
     "unload_qwen3tts_after_task",
+    "unload_rmvpe_after_task",
+    "unload_crepe_after_task",
 )
 
 
 def get_unload_after_task_settings() -> Dict[str, bool]:
     """
-    供 alt_aligners.py / pipeline.py / tts_processor.py 等调用：实时读取
-    5 个"用完即卸"独立开关的当前值。
+    供 alt_aligners.py / pipeline.py / tts_processor.py / f0_extractors.py
+    等调用：实时读取 7 个"用完即卸"独立开关的当前值。
 
     与 get_alignment_tuning() 一样不做 mtime 缓存以外的额外处理——这里
     调用频率远低于对齐调优参数（每个任务结束时读一次，不是每个分段读
@@ -672,7 +681,7 @@ def get_unload_after_task_settings() -> Dict[str, bool]:
 
     Returns
     -------
-    Dict[str, bool]，键固定为 _UNLOAD_KEYS 中的 5 个开关名。
+    Dict[str, bool]，键固定为 _UNLOAD_KEYS 中的 7 个开关名。
     """
     try:
         settings = load_settings()
