@@ -33,6 +33,11 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../components/SubtitleEditor.vue'),
   },
   {
+    path: '/subtitle-align',
+    name: 'subtitleAlign',
+    component: () => import('../components/SubtitleAligner.vue'),
+  },
+  {
     path: '/about',
     name: 'about',
     component: () => import('../components/AboutPage.vue'),

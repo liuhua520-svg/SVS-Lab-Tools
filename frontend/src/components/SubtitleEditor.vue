@@ -248,6 +248,19 @@
           <el-button @click="exportSubtitle('lrc')">📥 {{ t('subtitleEditor.exportLrc') }}</el-button>
           <el-button @click="exportSubtitle('lab')">📥 {{ t('subtitleEditor.exportLab') }}</el-button>
           <el-button @click="exportSubtitle('txt')">📥 {{ t('subtitleEditor.exportTxt') }}</el-button>
+          <el-tooltip v-if="mediaInfo && !mediaInfo.is_video" :content="t('subtitle.embedAudioHint')" placement="top">
+            <el-button type="primary" :loading="embedding === 'soft'" :disabled="embedding === 'burn'" @click="embedSubtitleIntoMedia('soft')">
+              🎵 {{ t('subtitle.embedIntoAudio') }}
+            </el-button>
+          </el-tooltip>
+          <el-button v-else-if="mediaInfo" type="primary" :loading="embedding === 'soft'" :disabled="embedding === 'burn'" @click="embedSubtitleIntoMedia('soft')">
+            🎬 {{ t('subtitle.embedIntoVideo') }}
+          </el-button>
+          <el-tooltip v-if="mediaInfo && !mediaInfo.is_video" :content="t('subtitle.embedVideoHint')" placement="top">
+            <el-button type="success" :loading="embedding === 'burn'" :disabled="embedding === 'soft'" @click="embedSubtitleIntoMedia('burn')">
+              🔥 {{ t('subtitle.embedBurnVideo') }}
+            </el-button>
+          </el-tooltip>
         </div>
       </div>
     </el-card>
@@ -262,6 +275,7 @@ import { UploadFilled } from '@element-plus/icons-vue'
 import { useAppLocale } from '../i18n'
 import SubtitleWaveform from './SubtitleWaveform.vue'
 import { useSubtitleHistory } from './useSubtitleHistory'
+import { useSubtitleEmbed } from './useSubtitleEmbed'
 import AudioRecordPreview from './AudioRecordPreview.vue'
 
 const { t } = useAppLocale()
@@ -878,6 +892,11 @@ const exportSubtitle = async (format: 'srt' | 'lrc' | 'txt' | 'lab') => {
     ElMessage.error(`❌ ${e?.message || String(e)}`)
   }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// 导出带字幕的视频/音频（软字幕封装 / 硬字幕烧录），逻辑见 useSubtitleEmbed.ts
+// ─────────────────────────────────────────────────────────────────
+const { embedding, embedSubtitleIntoMedia } = useSubtitleEmbed(mediaInfo, entries)
 
 // ─────────────────────────────────────────────────────────────────
 // 工具函数

@@ -3,11 +3,9 @@
     <el-card class="subtitle-card" shadow="hover">
       <template #header>
         <div class="card-header">
-          <span class="card-title">🎬 {{ t('subtitle.pageTitle') }}</span>
+          <span class="card-title">🎯 {{ t('subtitleAlign.pageTitle') }}</span>
         </div>
       </template>
-
-      <p class="page-subtitle">{{ t('subtitle.pageSubtitle') }}</p>
 
       <!-- ============== 依赖状态检查 ============== -->
       <el-alert
@@ -18,11 +16,11 @@
         class="status-alert"
       >
         <template #title>
-          <div v-if="!statusInfo.ffmpeg.available">⚠️ {{ statusInfo.ffmpeg.message || t('subtitle.statusFfmpegMissing') }}</div>
-          <div v-if="!statusInfo.qwen3_asr.available">⚠️ {{ statusInfo.qwen3_asr.message || t('subtitle.statusQwenMissing') }}</div>
+          <div v-if="!statusInfo.ffmpeg.available">⚠️ {{ statusInfo.ffmpeg.message || t('subtitleAlign.statusFfmpegMissing') }}</div>
+          <div v-if="!statusInfo.qwen3_fa.available">⚠️ {{ statusInfo.qwen3_fa.message || t('subtitleAlign.statusQwenMissing') }}</div>
         </template>
         <el-button size="small" text @click="checkStatus" :loading="statusLoading">
-          🔄 {{ t('subtitle.statusRecheck') }}
+          🔄 {{ t('subtitleAlign.statusRecheck') }}
         </el-button>
       </el-alert>
       <el-alert
@@ -32,15 +30,15 @@
         :closable="false"
         class="status-alert"
       >
-        <template #title>✓ {{ t('subtitle.statusReady') }}</template>
+        <template #title>✓ {{ t('subtitleAlign.statusReady') }}</template>
       </el-alert>
       <el-alert v-else type="info" show-icon :closable="false" class="status-alert">
-        <template #title>{{ t('subtitle.statusChecking') }}</template>
+        <template #title>{{ t('subtitleAlign.statusChecking') }}</template>
       </el-alert>
 
       <!-- ============== 上传区 ============== -->
       <div class="section-block">
-        <div class="section-heading">📁 {{ t('subtitle.uploadTitle') }}</div>
+        <div class="section-heading">📁 {{ t('subtitleAlign.uploadTitle') }}</div>
 
         <div v-if="!mediaInfo" class="audio-upload-row">
           <el-upload
@@ -54,13 +52,8 @@
             class="media-upload"
           >
             <el-icon class="upload-icon"><UploadFilled /></el-icon>
-            <div class="el-upload__text">{{ t('subtitle.uploadHint') }}</div>
+            <div class="el-upload__text">{{ t('subtitleAlign.uploadHint') }}</div>
           </el-upload>
-          <!-- 录音只产出音频，不涉及视频；识别流程本身对音频/视频一视同仁，
-               因此这里直接复用 handleFileSelect，与手动选择文件走同一条
-               上传路径。上传前尚无 mediaInfo，预览按钮退化为播放"刚录制
-               但还没点击上传/尚在上传中"的本地录音（见 AudioRecordPreview
-               内部 justRecordedBlob 兜底逻辑）。 -->
           <AudioRecordPreview
             :current-file="null"
             :disabled="uploading"
@@ -70,7 +63,7 @@
 
         <div v-if="uploading" class="upload-progress">
           <el-progress :percentage="100" :indeterminate="true" :duration="1.5" />
-          <span>{{ t('subtitle.uploading') }}</span>
+          <span>{{ t('subtitleAlign.uploading') }}</span>
         </div>
 
         <div v-if="mediaInfo" class="media-info-card">
@@ -78,110 +71,82 @@
             <span class="media-icon">{{ mediaInfo.is_video ? '🎞️' : '🎵' }}</span>
             <span class="media-name" :title="mediaInfo.filename">{{ mediaInfo.filename }}</span>
             <el-tag size="small" :type="mediaInfo.is_video ? 'primary' : 'success'">
-              {{ mediaInfo.is_video ? t('subtitle.fileTypeVideo') : t('subtitle.fileTypeAudio') }}
+              {{ mediaInfo.is_video ? t('subtitleAlign.fileTypeVideo') : t('subtitleAlign.fileTypeAudio') }}
             </el-tag>
             <span v-if="mediaInfo.duration" class="media-duration">
-              {{ t('subtitle.fileDuration') }}: {{ formatDuration(mediaInfo.duration) }}
+              {{ t('subtitleAlign.fileDuration') }}: {{ formatDuration(mediaInfo.duration) }}
             </span>
-            <!-- 上传成功后，本地 File 引用已经不在了（handleFileSelect 只
-                 保留服务端返回的 mediaInfo），因此这里改用 sourceUrl 模式
-                 预览/下载，而不是像上传前那样传 currentFile。视频文件的
-                 play_url 同样可以用 <audio> 播放（浏览器只关心资源是否
-                 可解码，不关心标签本身），因此不区分 is_video。录音按钮
-                 在这个状态下隐藏（showRecordButton=false）——重新录音应该
-                 走下面的"重新选择文件"按钮触发完整的替换+重新上传流程，
-                 而不是在已上传状态下静默录一段新音频、却不触发重新上传，
-                 导致预览的是新录音、但实际参与识别的仍是服务端旧文件。 -->
             <AudioRecordPreview
               :current-file="null"
               :source-url="mediaInfo.play_url"
               :download-file-name="mediaInfo.filename"
               :show-record-button="false"
-              :disabled="recognizing"
+              :disabled="running"
             />
           </div>
-          <el-button size="small" :disabled="recognizing" @click="resetMedia">
-            🔁 {{ t('subtitle.uploadReplace') }}
+          <el-button size="small" :disabled="running" @click="resetMedia">
+            🔁 {{ t('subtitleAlign.uploadReplace') }}
           </el-button>
         </div>
       </div>
 
-      <!-- ============== 识别设置 ============== -->
+      <!-- ============== 文本与对齐设置 ============== -->
       <div v-if="mediaInfo" class="section-block">
-        <div class="section-heading">⚙️ {{ t('subtitle.settingsTitle') }}</div>
+        <div class="section-heading">⚙️ {{ t('subtitleAlign.settingsTitle') }}</div>
 
-        <el-form label-width="140px" class="settings-form">
-          <el-form-item :label="t('subtitle.language')">
-            <el-select v-model="recognizeSettings.language" style="width: 240px">
-              <el-option :label="t('subtitle.languageAuto')" value="auto" />
-              <el-option
-                v-for="opt in LANGUAGE_OPTIONS"
-                :key="opt.value"
-                :label="opt.label"
-                :value="opt.value"
-              />
+        <el-form label-width="150px" class="settings-form">
+          <el-form-item :label="t('subtitleAlign.inputText')">
+            <el-input
+              v-model="text"
+              type="textarea"
+              :rows="8"
+              :disabled="running"
+              :placeholder="t('subtitleAlign.inputTextPlaceholder')"
+            />
+          </el-form-item>
+          <el-form-item :label="t('subtitleAlign.language')">
+            <el-select v-model="settings.language" style="width:260px" :disabled="running">
+              <el-option v-for="x in languages" :key="x.value" :label="x.label" :value="x.value" />
             </el-select>
           </el-form-item>
-
-          <el-form-item :label="t('subtitle.device')">
-            <el-radio-group v-model="recognizeSettings.device">
-              <el-radio value="auto">{{ t('subtitle.deviceAuto') }}</el-radio>
-              <el-radio value="cpu">{{ t('subtitle.deviceCpu') }}</el-radio>
-              <el-radio value="cuda">{{ t('subtitle.deviceCuda') }}</el-radio>
+          <el-form-item :label="t('subtitleAlign.device')">
+            <el-radio-group v-model="settings.device" :disabled="running">
+              <el-radio value="auto">{{ t('subtitleAlign.deviceAuto') }}</el-radio>
+              <el-radio value="cpu">{{ t('subtitleAlign.deviceCpu') }}</el-radio>
+              <el-radio value="cuda">{{ t('subtitleAlign.deviceCuda') }}</el-radio>
             </el-radio-group>
           </el-form-item>
-
-          <el-form-item :label="t('subtitle.batchSize')">
-            <el-input-number v-model="recognizeSettings.batchSize" :min="1" :max="64" :step="1" />
-            <el-tooltip :content="t('subtitle.batchSizeHint')" placement="top">
+          <el-form-item :label="t('subtitleAlign.maxChars')">
+            <el-input-number v-model="settings.maxChars" :min="1" :max="500" :disabled="running" />
+          </el-form-item>
+          <el-form-item :label="t('subtitleAlign.splitSentence')">
+            <el-switch v-model="settings.splitSentence" :disabled="running" />
+            <el-tooltip :content="t('subtitleAlign.splitSentenceHint')" placement="top">
               <span class="option-hint-icon">❓</span>
             </el-tooltip>
           </el-form-item>
-
-          <el-form-item :label="t('subtitle.maxChars')">
-            <el-input-number v-model="recognizeSettings.maxChars" :min="8" :max="500" :step="2" />
-            <el-tooltip :content="t('subtitle.maxCharsHint')" placement="top">
+          <el-form-item v-if="settings.splitSentence" :label="t('subtitleAlign.splitComma')">
+            <el-switch v-model="settings.splitComma" :disabled="running" />
+            <el-tooltip :content="t('subtitleAlign.splitCommaHint')" placement="top">
               <span class="option-hint-icon">❓</span>
             </el-tooltip>
           </el-form-item>
-
-          <el-form-item :label="t('subtitle.splitAtSentenceEnd')">
-            <el-switch v-model="recognizeSettings.splitAtSentenceEnd" />
-            <el-tooltip :content="t('subtitle.splitAtSentenceEndHint')" placement="top">
+          <el-form-item :label="t('subtitleAlign.removeSymbols')">
+            <el-switch v-model="settings.removePunctuation" :disabled="running" />
+            <el-tooltip :content="t('subtitleAlign.removeSymbolsHint')" placement="top">
               <span class="option-hint-icon">❓</span>
             </el-tooltip>
           </el-form-item>
-
-          <el-form-item v-if="recognizeSettings.splitAtSentenceEnd" :label="t('subtitle.allowCommaSplit')">
-            <el-switch v-model="recognizeSettings.allowCommaSplit" />
-            <el-tooltip :content="t('subtitle.allowCommaSplitHint')" placement="top">
+          <el-form-item :label="t('subtitleAlign.vadGap')">
+            <el-switch v-model="settings.vadGapEnabled" :disabled="running" />
+            <el-tooltip :content="t('subtitleAlign.vadGapHint')" placement="top">
               <span class="option-hint-icon">❓</span>
             </el-tooltip>
           </el-form-item>
-
-          <el-form-item :label="t('subtitle.removePunctuation')">
-            <el-switch v-model="recognizeSettings.removePunctuation" />
-            <el-tooltip :content="t('subtitle.removePunctuationHint')" placement="top">
-              <span class="option-hint-icon">❓</span>
-            </el-tooltip>
-          </el-form-item>
-
-          <el-form-item :label="t('subtitle.closeVadGaps')">
-            <el-switch v-model="recognizeSettings.closeVadGaps" />
-            <el-tooltip :content="t('subtitle.closeVadGapsHint')" placement="top">
-              <span class="option-hint-icon">❓</span>
-            </el-tooltip>
-          </el-form-item>
-
-          <el-form-item v-if="recognizeSettings.closeVadGaps" :label="t('subtitle.vadGapThreshold')">
-            <el-input-number
-              v-model="recognizeSettings.vadGapThresholdSec"
-              :min="0.05"
-              :max="5"
-              :step="0.1"
-              :precision="2"
-            />
-            <el-tooltip :content="t('subtitle.vadGapThresholdHint')" placement="top">
+          <el-form-item v-if="settings.vadGapEnabled" :label="t('subtitleAlign.vadGapThreshold')">
+            <el-input-number v-model="settings.vadGapThresholdSec" :min="0.05" :max="5" :step="0.1" :precision="2" :disabled="running" />
+            <span class="unit">{{ t('subtitleAlign.vadGapUnit') }}</span>
+            <el-tooltip :content="t('subtitleAlign.vadGapThresholdHint')" placement="top">
               <span class="option-hint-icon">❓</span>
             </el-tooltip>
           </el-form-item>
@@ -190,31 +155,30 @@
         <el-button
           type="primary"
           size="large"
-          :loading="recognizing"
-          :disabled="!statusInfo.ready"
-          @click="startRecognize"
+          :loading="running"
+          :disabled="!statusInfo.ready || !media || !text.trim()"
+          @click="run"
         >
-          {{ recognizing ? t('subtitle.recognizing') : `▶️ ${t('subtitle.startRecognize')}` }}
+          {{ running ? t('subtitleAlign.aligning') : `▶️ ${t('subtitleAlign.start')}` }}
         </el-button>
 
-        <div v-if="recognizing" class="recognize-progress">
-          <el-progress :percentage="recognizeProgressPercent" :status="recognizeProgressPercent >= 100 ? 'success' : undefined" />
-          <span class="progress-label">{{ recognizeStageLabel }}</span>
+        <div v-if="running" class="align-progress">
+          <el-progress :percentage="progress" :indeterminate="progress === 0" />
         </div>
 
-        <el-alert v-if="recognizeError" type="error" show-icon :closable="true" @close="recognizeError = ''" class="status-alert">
-          <template #title>{{ recognizeError }}</template>
+        <el-alert v-if="error" type="error" show-icon :closable="true" @close="error = ''" class="status-alert">
+          <template #title>{{ error }}</template>
         </el-alert>
       </div>
 
-      <!-- ============== 预览播放器 + 字幕列表 ============== -->
-      <div v-if="entries.length || recognizing" class="section-block">
-        <div class="section-heading">🖥️ {{ t('subtitle.playerTitle') }}</div>
+      <!-- ============== 预览播放器 + 波形时间轴 + 字幕列表 ============== -->
+      <div v-if="mediaInfo && entries.length" class="section-block">
+        <div class="section-heading">🖥️ {{ t('subtitleAlign.playerTitle') }}</div>
 
         <div class="player-layout">
           <div class="player-wrap">
             <video
-              v-if="mediaInfo && mediaInfo.is_video"
+              v-if="mediaInfo.is_video"
               ref="videoRef"
               :src="mediaInfo.play_url"
               controls
@@ -222,7 +186,7 @@
               @timeupdate="onTimeUpdate"
             />
             <audio
-              v-else-if="mediaInfo"
+              v-else
               ref="audioRef"
               :src="mediaInfo.play_url"
               controls
@@ -233,11 +197,10 @@
           </div>
         </div>
 
-        <div v-if="mediaInfo && entries.length" class="section-heading waveform-heading">
-          <span>🌊 {{ t('subtitle.waveformTitle') }}</span>
+        <div class="section-heading waveform-heading">
+          <span>🌊 {{ t('subtitleAlign.waveformTitle') }}</span>
         </div>
         <SubtitleWaveform
-          v-if="mediaInfo && entries.length"
           :entries="entries"
           :media-url="mediaInfo.waveform_url || mediaInfo.play_url"
           :duration="mediaInfo.duration || 0"
@@ -259,24 +222,22 @@
         />
 
         <div class="section-heading subtitle-list-heading">
-          <span>📝 {{ t('subtitle.subtitleListTitle') }}</span>
+          <span>📝 {{ t('subtitleAlign.subtitleListTitle') }}</span>
           <div class="list-actions">
-            <el-tooltip :content="t('subtitle.undoHint')" placement="top">
-              <el-button size="small" :disabled="!canUndo" @click="onUndo">↩️ {{ t('subtitle.undo') }}</el-button>
+            <el-tooltip :content="t('subtitleAlign.undoHint')" placement="top">
+              <el-button size="small" :disabled="!canUndo" @click="onUndo">↩️ {{ t('subtitleAlign.undo') }}</el-button>
             </el-tooltip>
-            <el-tooltip :content="t('subtitle.redoHint')" placement="top">
-              <el-button size="small" :disabled="!canRedo" @click="onRedo">↪️ {{ t('subtitle.redo') }}</el-button>
+            <el-tooltip :content="t('subtitleAlign.redoHint')" placement="top">
+              <el-button size="small" :disabled="!canRedo" @click="onRedo">↪️ {{ t('subtitleAlign.redo') }}</el-button>
             </el-tooltip>
-            <el-button size="small" type="danger" plain :disabled="!entries.length" @click="clearAll">
-              🗑️ {{ t('subtitle.clearAll') }}
+            <el-button size="small" @click="insertAtEnd">➕ {{ t('subtitleAlign.addEntry') }}</el-button>
+            <el-button size="small" type="danger" plain :disabled="!entries.length" @click="clearAllEntries">
+              🗑️ {{ t('subtitleAlign.clearAll') }}
             </el-button>
           </div>
         </div>
 
-        <p v-if="!entries.length" class="empty-hint">{{ t('subtitle.subtitleListEmpty') }}</p>
-
         <el-table
-          v-else
           :data="entries"
           size="small"
           max-height="420"
@@ -284,28 +245,20 @@
           row-key="_uid"
           :row-class-name="rowClassName"
         >
-          <el-table-column :label="t('subtitle.columnIndex')" width="50">
+          <el-table-column :label="t('subtitleAlign.columnIndex')" width="50">
             <template #default="{ $index }">{{ $index + 1 }}</template>
           </el-table-column>
-          <el-table-column :label="t('subtitle.columnStart')" width="130">
+          <el-table-column :label="t('subtitleAlign.columnStart')" width="130">
             <template #default="{ row }">
-              <el-input
-                v-model="row._startText"
-                size="small"
-                @change="onTimeEdit(row, 'start')"
-              />
+              <el-input v-model="row._startText" size="small" @change="onTimeEdit(row, 'start')" />
             </template>
           </el-table-column>
-          <el-table-column :label="t('subtitle.columnEnd')" width="130">
+          <el-table-column :label="t('subtitleAlign.columnEnd')" width="130">
             <template #default="{ row }">
-              <el-input
-                v-model="row._endText"
-                size="small"
-                @change="onTimeEdit(row, 'end')"
-              />
+              <el-input v-model="row._endText" size="small" @change="onTimeEdit(row, 'end')" />
             </template>
           </el-table-column>
-          <el-table-column :label="t('subtitle.columnText')">
+          <el-table-column :label="t('subtitleAlign.columnText')">
             <template #default="{ row }">
               <el-input
                 v-model="row.text"
@@ -317,21 +270,21 @@
               />
             </template>
           </el-table-column>
-          <el-table-column :label="t('subtitle.columnAction')" width="230">
+          <el-table-column :label="t('subtitleAlign.columnAction')" width="230">
             <template #default="{ row, $index }">
-              <el-tooltip :content="t('subtitle.jumpToTime')" placement="top">
+              <el-tooltip :content="t('subtitleAlign.jumpToTime')" placement="top">
                 <el-button size="small" circle @click="jumpToEntry(row)">▶</el-button>
               </el-tooltip>
-              <el-tooltip :content="t('subtitle.splitEntry')" placement="top">
+              <el-tooltip :content="t('subtitleAlign.splitEntry')" placement="top">
                 <el-button size="small" circle :loading="row._splitting" @click="splitEntry($index)">✂️</el-button>
               </el-tooltip>
-              <el-tooltip :content="t('subtitle.addAfter')" placement="top">
+              <el-tooltip :content="t('subtitleAlign.addAfter')" placement="top">
                 <el-button size="small" circle @click="insertAfter($index)">➕</el-button>
               </el-tooltip>
-              <el-tooltip v-if="$index < entries.length - 1" :content="t('subtitle.mergeNext')" placement="top">
+              <el-tooltip v-if="$index < entries.length - 1" :content="t('subtitleAlign.mergeNext')" placement="top">
                 <el-button size="small" circle @click="mergeWithNext($index)">🔗</el-button>
               </el-tooltip>
-              <el-tooltip :content="t('subtitle.deleteEntry')" placement="top">
+              <el-tooltip :content="t('subtitleAlign.deleteEntry')" placement="top">
                 <el-button size="small" circle type="danger" @click="deleteEntry($index)">🗑️</el-button>
               </el-tooltip>
             </template>
@@ -341,12 +294,12 @@
 
       <!-- ============== 导出 ============== -->
       <div v-if="entries.length" class="section-block">
-        <div class="section-heading">📤 {{ t('subtitle.exportTitle') }}</div>
+        <div class="section-heading">📤 {{ t('subtitleAlign.exportTitle') }}</div>
         <div class="export-buttons">
-          <el-button @click="exportSubtitle('srt')">📥 {{ t('subtitle.exportSrt') }}</el-button>
-          <el-button @click="exportSubtitle('lrc')">📥 {{ t('subtitle.exportLrc') }}</el-button>
-          <el-button @click="exportSubtitle('lab')">📥 {{ t('subtitle.exportLab') }}</el-button>
-          <el-button @click="exportSubtitle('txt')">📥 {{ t('subtitle.exportTxt') }}</el-button>
+          <el-button @click="exportSubtitle('srt')">📥 {{ t('subtitleAlign.exportSrt') }}</el-button>
+          <el-button @click="exportSubtitle('lrc')">📥 {{ t('subtitleAlign.exportLrc') }}</el-button>
+          <el-button @click="exportSubtitle('lab')">📥 {{ t('subtitleAlign.exportLab') }}</el-button>
+          <el-button @click="exportSubtitle('txt')">📥 {{ t('subtitleAlign.exportText') }}</el-button>
           <el-tooltip v-if="mediaInfo && !mediaInfo.is_video" :content="t('subtitle.embedAudioHint')" placement="top">
             <el-button type="primary" :loading="embedding === 'soft'" :disabled="embedding === 'burn'" @click="embedSubtitleIntoMedia('soft')">
               🎵 {{ t('subtitle.embedIntoAudio') }}
@@ -367,7 +320,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { useAppLocale } from '../i18n'
@@ -378,61 +331,32 @@ import AudioRecordPreview from './AudioRecordPreview.vue'
 
 const { t } = useAppLocale()
 
-// ─────────────────────────────────────────────────────────────────
-// 语言选项：与 qwen3_server / subtitle_processor.py 里的语言代码保持一致
-// ─────────────────────────────────────────────────────────────────
-const LANGUAGE_OPTIONS = [
-  { value: 'zh', label: '中文 (Chinese)' },
-  { value: 'yue', label: '粤语 (Cantonese)' },
-  { value: 'en', label: 'English' },
-  { value: 'ja', label: '日本語 (Japanese)' },
-  { value: 'ko', label: '한국어 (Korean)' },
-  { value: 'ar', label: 'العربية (Arabic)' },
-  { value: 'de', label: 'Deutsch (German)' },
-  { value: 'fr', label: 'Français (French)' },
-  { value: 'es', label: 'Español (Spanish)' },
-  { value: 'pt', label: 'Português (Portuguese)' },
-  { value: 'id', label: 'Indonesia (Indonesian)' },
-  { value: 'it', label: 'Italiano (Italian)' },
-  { value: 'ru', label: 'Русский (Russian)' },
-  { value: 'th', label: 'ไทย (Thai)' },
-  { value: 'vi', label: 'Tiếng Việt (Vietnamese)' },
-  { value: 'tr', label: 'Türkçe (Turkish)' },
-  { value: 'hi', label: 'हिन्दी (Hindi)' },
-  { value: 'ms', label: 'Melayu (Malay)' },
-  { value: 'nl', label: 'Nederlands (Dutch)' },
-  { value: 'sv', label: 'Svenska (Swedish)' },
-  { value: 'da', label: 'Dansk (Danish)' },
-  { value: 'fi', label: 'Suomi (Finnish)' },
-  { value: 'pl', label: 'Polski (Polish)' },
-  { value: 'cs', label: 'Čeština (Czech)' },
-  { value: 'fil', label: 'Filipino' },
-  { value: 'fa', label: 'فارسی (Persian)' },
-  { value: 'el', label: 'Ελληνικά (Greek)' },
-  { value: 'hu', label: 'Magyar (Hungarian)' },
-  { value: 'mk', label: 'Македонски (Macedonian)' },
-  { value: 'ro', label: 'Română (Romanian)' },
-]
+// Qwen3-ForcedAligner 目前只支持这 5 种语言（见 alt_aligners._to_qwen_lang_name），
+// 其余语言传给后端会直接触发 "不支持语言" 报错，因此这里不再列出。
+const languages = [
+  ['Chinese', '中文 (Chinese)'], ['English', 'English'], ['Cantonese', '粤语 (Cantonese)'],
+  ['Japanese', '日本語 (Japanese)'], ['Korean', '한국어 (Korean)'],
+].map(([value, label]) => ({ value, label }))
 
 // ─────────────────────────────────────────────────────────────────
-// 依赖状态检查（ffmpeg + Qwen3-ASR 独立服务）
+// 依赖状态检查（ffmpeg + Qwen3-ForcedAligner），与字幕识别页对称，
+// 但检查的是对齐模型而非识别模型，两者依赖的具体可用性可能不同步。
 // ─────────────────────────────────────────────────────────────────
 interface DepStatus { available: boolean; message: string }
 const statusLoading = ref(true)
-const statusInfo = reactive<{ ffmpeg: DepStatus; qwen3_asr: DepStatus; ready: boolean }>({
+const statusInfo = reactive<{ ffmpeg: DepStatus; qwen3_fa: DepStatus; ready: boolean }>({
   ffmpeg: { available: false, message: '' },
-  qwen3_asr: { available: false, message: '' },
+  qwen3_fa: { available: false, message: '' },
   ready: false,
 })
-
 const checkStatus = async () => {
   statusLoading.value = true
   try {
-    const res = await fetch('/api/subtitle/status')
+    const res = await fetch('/api/subtitle-align/status')
     const data = await res.json()
     if (data.success) {
       statusInfo.ffmpeg = data.ffmpeg
-      statusInfo.qwen3_asr = data.qwen3_asr
+      statusInfo.qwen3_fa = data.qwen3_fa
       statusInfo.ready = data.ready
     }
   } catch (e) {
@@ -444,7 +368,8 @@ const checkStatus = async () => {
 checkStatus()
 
 // ─────────────────────────────────────────────────────────────────
-// 媒体上传
+// 媒体上传（与 SubtitleEditor.vue / SubtitleRecognizer.vue 共用同一套
+// /api/subtitle/* 接口与服务端存储目录）
 // ─────────────────────────────────────────────────────────────────
 interface MediaInfo {
   media_id: string
@@ -455,8 +380,14 @@ interface MediaInfo {
   waveform_url: string | null
 }
 
-const uploading = ref(false)
+const media = ref<any>(null)
 const mediaInfo = ref<MediaInfo | null>(null)
+const uploading = ref(false)
+const text = ref('')
+const running = ref(false)
+const progress = ref(0)
+const error = ref('')
+const settings = reactive({ language: 'Chinese', device: 'auto', maxChars: 34, splitSentence: true, splitComma: false, removePunctuation: false, vadGapEnabled: false, vadGapThresholdSec: 0.1 })
 
 const handleFileSelect = async (file: any) => {
   const raw: File | null = file?.raw || null
@@ -464,23 +395,25 @@ const handleFileSelect = async (file: any) => {
 
   if (mediaInfo.value) {
     try {
-      await ElMessageBox.confirm(t('subtitle.reuploadWarning'), '', { type: 'warning' })
+      await ElMessageBox.confirm(t('subtitleAlign.reuploadWarning'), '', { type: 'warning' })
     } catch {
       return
     }
   }
 
   uploading.value = true
+  error.value = ''
   try {
     const fd = new FormData()
     fd.append('file', raw)
     const res = await fetch('/api/subtitle/upload', { method: 'POST', body: fd })
     const data = await res.json()
-    if (!res.ok || !data.success) throw new Error(data.error || t('subtitle.uploadFailed'))
+    if (!res.ok || !data.success) throw new Error(data.error || t('subtitleAlign.uploadFailed'))
 
-    // 新媒体上传成功后，清空旧的识别结果，避免时间轴与新媒体错位
+    // 新媒体上传成功后，清空旧的对齐结果，避免时间轴与新媒体错位
     entries.value = []
     history.resetHistory()
+    media.value = data
     mediaInfo.value = {
       media_id: data.media_id,
       filename: data.filename,
@@ -489,7 +422,7 @@ const handleFileSelect = async (file: any) => {
       play_url: data.play_url,
       waveform_url: data.waveform_url ?? null,
     }
-    ElMessage.success(`✅ ${t('subtitle.uploadSuccess')}`)
+    ElMessage.success(`✅ ${t('subtitleAlign.uploadSuccess')}`)
   } catch (e: any) {
     ElMessage.error(`❌ ${e?.message || String(e)}`)
   } finally {
@@ -509,154 +442,16 @@ const resetMedia = async () => {
       // 清理失败不影响前端状态重置
     }
   }
+  media.value = null
   mediaInfo.value = null
   entries.value = []
   history.resetHistory()
-  recognizeError.value = ''
+  error.value = ''
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 识别设置 + 启动识别 + 进度轮询
-// ─────────────────────────────────────────────────────────────────
-const recognizeSettings = reactive({
-  language: 'auto',
-  device: 'auto',
-  batchSize: 8,
-  maxChars: 34,
-  splitAtSentenceEnd: false,
-  allowCommaSplit: false,
-  removePunctuation: false,
-  closeVadGaps: false,
-  vadGapThresholdSec: 0.1,
-})
-
-// "允许按句末切分"关闭时，"允许逗号切分"没有意义（逗号切分是在句末切分
-// 基础上的进一步细分），跟随强制关闭，避免出现"句末切分已关闭，但
-// 逗号切分仍勾选"这种界面上看不到、但仍会生效的矛盾状态。
-watch(
-  () => recognizeSettings.splitAtSentenceEnd,
-  (enabled) => {
-    if (!enabled && recognizeSettings.allowCommaSplit) {
-      recognizeSettings.allowCommaSplit = false
-    }
-  },
-)
-
-const recognizing = ref(false)
-const recognizeError = ref('')
-const recognizeProgress = reactive({ done: 0, total: 0, stage: 'extract' as 'extract' | 'recognize' })
-let jobPollTimer: number | null = null
-
-const recognizeProgressPercent = computed(() => {
-  if (recognizeProgress.stage === 'extract') return 5
-  if (!recognizeProgress.total) return 10
-  return Math.min(100, Math.round((recognizeProgress.done / recognizeProgress.total) * 100))
-})
-
-const recognizeStageLabel = computed(() => {
-  if (recognizeProgress.stage === 'extract') return t('subtitle.recognizeStageExtract')
-  return t('subtitle.recognizeStageRecognize', { done: recognizeProgress.done, total: recognizeProgress.total })
-})
-
-const clearJobPolling = () => {
-  if (jobPollTimer !== null) {
-    window.clearTimeout(jobPollTimer)
-    jobPollTimer = null
-  }
-}
-
-const startRecognize = async () => {
-  if (!mediaInfo.value) {
-    ElMessage.warning(t('subtitle.needUploadFirst'))
-    return
-  }
-  if (!statusInfo.ready) {
-    ElMessage.warning(t('subtitle.needReadyFirst'))
-    return
-  }
-
-  recognizeError.value = ''
-  entries.value = []
-  history.resetHistory()
-  recognizing.value = true
-  recognizeProgress.done = 0
-  recognizeProgress.total = 0
-  recognizeProgress.stage = 'extract'
-
-  try {
-    const res = await fetch('/api/subtitle/recognize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        media_id: mediaInfo.value.media_id,
-        language: recognizeSettings.language,
-        device: recognizeSettings.device,
-        batch_size: recognizeSettings.batchSize,
-        max_chars: recognizeSettings.maxChars,
-        split_at_sentence_end: recognizeSettings.splitAtSentenceEnd,
-        allow_comma_split: recognizeSettings.allowCommaSplit,
-        remove_punctuation: recognizeSettings.removePunctuation,
-        close_vad_gaps: recognizeSettings.closeVadGaps,
-        vad_gap_threshold_sec: recognizeSettings.vadGapThresholdSec,
-      }),
-    })
-    const data = await res.json()
-    if (!res.ok || !data.success) throw new Error(data.error || t('subtitle.recognizeFailed'))
-
-    await pollRecognizeJob(data.job_id)
-  } catch (e: any) {
-    recognizeError.value = e?.message || String(e)
-    ElMessage.error(`❌ ${recognizeError.value}`)
-  } finally {
-    recognizing.value = false
-    clearJobPolling()
-  }
-}
-
-const pollRecognizeJob = (jobId: string): Promise<void> => {
-  return new Promise((resolve, reject) => {
-    const tick = async () => {
-      try {
-        const res = await fetch(`/api/subtitle/job/${jobId}`)
-        const data = await res.json()
-        if (!res.ok || !data.success) throw new Error(data.error || t('subtitle.recognizeFailed'))
-
-        const job = data.job || {}
-        if (job.progress) {
-          recognizeProgress.done = job.progress.done ?? recognizeProgress.done
-          recognizeProgress.total = job.progress.total ?? recognizeProgress.total
-          recognizeProgress.stage = job.progress.stage ?? recognizeProgress.stage
-        }
-
-        if (job.status === 'done') {
-          const result = job.result
-          const rawEntries = (result?.entries || []) as Array<{ start: number; end: number; text: string }>
-          entries.value = rawEntries.map(toEditableEntry)
-          if (!entries.value.length) {
-            ElMessage.warning(t('subtitle.recognizeEmptyResult'))
-          } else {
-            ElMessage.success(t('subtitle.recognizeSuccess', { count: entries.value.length }))
-          }
-          resolve()
-          return
-        }
-
-        if (job.status === 'failed') {
-          reject(new Error(job.error || t('subtitle.recognizeFailed')))
-          return
-        }
-
-        jobPollTimer = window.setTimeout(tick, 1200)
-      } catch (e) {
-        reject(e)
-      }
-    }
-    tick()
-  })
-}
-
-// ─────────────────────────────────────────────────────────────────
-// 字幕条目：编辑态数据结构（额外维护可编辑的时间文本 + 唯一 key）
+// 字幕条目：编辑态数据结构（与 SubtitleEditor.vue 保持一致的字段约定，
+// 方便共用 SubtitleWaveform 组件与时间格式化逻辑）
 // ─────────────────────────────────────────────────────────────────
 interface SubtitleEntry {
   _uid: number
@@ -672,9 +467,6 @@ let uidCounter = 0
 const nextUid = () => ++uidCounter
 
 const formatTimeInput = (sec: number): string => {
-  // 先把总毫秒数四舍五入到整数，再统一从毫秒往上进位拆分时/分/秒/毫秒，
-  // 避免"秒的小数部分单独四舍五入到 1000ms"时不进位到秒的问题
-  // （例如 1.9996 秒之前会被格式化成非法的 00:00:01.1000，而不是 00:00:02.000）。
   let totalMs = Math.round(Math.max(0, sec) * 1000)
   const ms = totalMs % 1000
   totalMs = Math.floor(totalMs / 1000)
@@ -709,15 +501,14 @@ const onTimeEdit = (row: SubtitleEntry, field: 'start' | 'end') => {
   const raw = field === 'start' ? row._startText : row._endText
   const parsed = parseTimeInput(raw)
   if (parsed === null) {
-    ElMessage.error(t('subtitle.invalidTimeFormat'))
-    // 恢复为原值的格式化文本，避免残留非法输入
+    ElMessage.error(t('subtitleAlign.invalidTimeFormat'))
     if (field === 'start') row._startText = formatTimeInput(row.start)
     else row._endText = formatTimeInput(row.end)
     return
   }
   if (field === 'start') {
     if (parsed >= row.end) {
-      ElMessage.error(t('subtitle.timeOverlapWarning'))
+      ElMessage.error(t('subtitleAlign.timeOverlapWarning'))
       row._startText = formatTimeInput(row.start)
       return
     }
@@ -725,7 +516,7 @@ const onTimeEdit = (row: SubtitleEntry, field: 'start' | 'end') => {
     row.start = parsed
   } else {
     if (parsed <= row.start) {
-      ElMessage.error(t('subtitle.timeOverlapWarning'))
+      ElMessage.error(t('subtitleAlign.timeOverlapWarning'))
       row._endText = formatTimeInput(row.end)
       return
     }
@@ -743,8 +534,17 @@ const insertAfter = (index: number) => {
   entries.value.splice(index + 1, 0, toEditableEntry({ start, end: Math.max(end, start + 0.3), text: '' }))
 }
 
+const insertAtEnd = () => {
+  const last = entries.value[entries.value.length - 1]
+  const start = last ? last.end : 0
+  const duration = mediaInfo.value?.duration || start + 2
+  const end = Math.min(start + 2, duration)
+  history.recordBeforeChange()
+  entries.value.push(toEditableEntry({ start, end: Math.max(end, start + 0.3), text: '' }))
+}
+
 // 字幕列表行内"删除"按钮：无需二次确认，直接删除（与波形块的删除行为
-// 保持一致）；批量清空所有字幕仍然需要二次确认，见 clearAll()
+// 保持一致）；批量清空所有字幕仍然需要二次确认，见 clearAllEntries()
 const deleteEntry = (index: number) => {
   history.recordBeforeChange()
   entries.value.splice(index, 1)
@@ -761,17 +561,15 @@ const mergeWithNext = (index: number) => {
   entries.value.splice(index + 1, 1)
 }
 
-// 手动"拆分"某一行字幕为两行——字幕列表里的 ✂️ 按钮专用：交给后端按
-// 标点/文本长度比例算出拆分点（这一行此时可能是识别结果，也可能已被
-// 用户编辑/合并过，早就没有逐字时间戳了，所以拆分点只能靠文本本身
-// 重新估算，与 /api/subtitle/export 一样是无状态接口，不依赖 job）。
+// 手动"拆分"某一行字幕为两行——字幕列表里的 ✂️ 按钮专用，调用后端
+// /api/subtitle/split_entry 按标点/文本长度比例把文本也一起拆开。
 // 波形时间轴上的"拆分"按钮不走这个函数，见下方 splitEntryTimeOnly：
 // 那边只想按播放头位置切时间，不想让文本被自动拆分。
 const splitEntry = async (index: number) => {
   const cur = entries.value[index]
   if (!cur || cur._splitting) return
   if (cur.end - cur.start < 0.05) {
-    ElMessage.warning(t('subtitle.splitTooShort'))
+    ElMessage.warning(t('subtitleAlign.splitTooShort'))
     return
   }
 
@@ -783,7 +581,7 @@ const splitEntry = async (index: number) => {
       body: JSON.stringify({ start: cur.start, end: cur.end, text: cur.text }),
     })
     const data = await res.json()
-    if (!res.ok || !data.success) throw new Error(data.error || t('subtitle.splitFailed'))
+    if (!res.ok || !data.success) throw new Error(data.error || t('subtitleAlign.splitFailed'))
 
     const left = toEditableEntry(data.left)
     const right = toEditableEntry(data.right)
@@ -793,8 +591,6 @@ const splitEntry = async (index: number) => {
   } catch (e: any) {
     ElMessage.error(`❌ ${e?.message || String(e)}`)
   } finally {
-    // cur 对应的行可能已经被 splice 替换掉了，这里的 cur._splitting 只是
-    // 让原引用在 splice 之前那一刻的 loading 状态能正确复位，不影响新行
     cur._splitting = false
   }
 }
@@ -808,7 +604,7 @@ const splitEntryTimeOnly = (index: number, at: number, skipHistory = false) => {
   const cur = entries.value[index]
   if (!cur) return
   if (cur.end - cur.start < 0.05) {
-    ElMessage.warning(t('subtitle.splitTooShort'))
+    ElMessage.warning(t('subtitleAlign.splitTooShort'))
     return
   }
 
@@ -822,61 +618,24 @@ const splitEntryTimeOnly = (index: number, at: number, skipHistory = false) => {
   activeUid.value = left._uid
 }
 
-const clearAll = async () => {
+const clearAllEntries = async () => {
   try {
-    await ElMessageBox.confirm(t('subtitle.clearAllConfirm'), '', { type: 'warning' })
+    await ElMessageBox.confirm(t('subtitleAlign.clearAllConfirm'), '', { type: 'warning' })
   } catch {
     return
   }
+  history.recordBeforeChange()
   entries.value = []
   selectedUids.value = new Set()
-  history.resetHistory()
-  if (mediaInfo.value) {
-    try {
-      await fetch('/api/subtitle/cleanup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ media_id: mediaInfo.value.media_id }),
-      })
-    } catch {
-      // 忽略清理失败
-    }
-  }
-  mediaInfo.value = null
+  activeUid.value = null
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 播放器联动：当前时间对应的字幕高亮 + 点击跳转
+// 播放器联动：当前时间对应的字幕高亮 + 点击跳转 + 波形时间轴双向同步
 // ─────────────────────────────────────────────────────────────────
 const videoRef = ref<HTMLVideoElement | null>(null)
 const audioRef = ref<HTMLAudioElement | null>(null)
 const currentTime = ref(0)
-
-const onTimeUpdate = (evt: Event) => {
-  const target = evt.target as HTMLMediaElement
-  currentTime.value = target.currentTime
-}
-
-const currentEntry = computed(() => {
-  const t = currentTime.value
-  return entries.value.find((e) => t >= e.start && t <= e.end) || null
-})
-
-const jumpToEntry = (row: SubtitleEntry) => {
-  activeUid.value = row._uid
-  const el = videoRef.value || audioRef.value
-  if (!el) return
-  el.currentTime = row.start
-  el.play().catch(() => {
-    // 部分浏览器要求用户手势才能自动播放，静默忽略
-  })
-}
-
-// ─────────────────────────────────────────────────────────────────
-// 波形时间轴联动：SubtitleWaveform 组件只负责展示与拖拽交互，具体的
-// 数据变更（时间调整/新增条目）与播放器控制都由父组件这里统一处理，
-// 与表格编辑（onTimeEdit 等）共用同一份 entries，两种编辑方式互相同步。
-// ─────────────────────────────────────────────────────────────────
 const activeUid = ref<number | null>(null)
 
 // ─────────────────────────────────────────────────────────────────
@@ -909,24 +668,36 @@ const onUndoRedoKeydown = (evt: KeyboardEvent) => {
 
 onMounted(() => {
   window.addEventListener('keydown', onUndoRedoKeydown)
+  window.addEventListener('keydown', onSpaceKeydown)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onUndoRedoKeydown)
+  window.removeEventListener('keydown', onSpaceKeydown)
 })
 
-const onWaveformSeek = (time: number) => {
+const onTimeUpdate = (evt: Event) => {
+  const target = evt.target as HTMLMediaElement
+  currentTime.value = target.currentTime
+}
+
+const currentEntry = computed(() => {
+  const t = currentTime.value
+  return entries.value.find((e) => t >= e.start && t <= e.end) || null
+})
+
+const jumpToEntry = (row: SubtitleEntry) => {
+  activeUid.value = row._uid
   const el = videoRef.value || audioRef.value
-  if (el) el.currentTime = time
-  currentTime.value = time
+  if (!el) return
+  el.currentTime = row.start
+  el.play().catch(() => {
+    // 部分浏览器要求用户手势才能自动播放，静默忽略
+  })
 }
 
 // ─────────────────────────────────────────────────────────────────
 // 空格键播放/暂停：编辑文本（波形块内联编辑框、字幕列表里的时间/文本
-// 输入框等）时不响应，避免和"输入空格字符"冲突；其余情况下（包括焦点
-// 停在某个按钮上时）空格键一律用于切换播放/暂停，而不是触发按钮本身
-// 的点击——因此需要 preventDefault 来同时抑制浏览器默认的按钮激活和
-// <video>/<audio> 原生控件自身的空格键处理（否则会和这里的 play/pause
-// 重复触发，导致来回抖动）。
+// 输入框、上方文本框等）时不响应，避免和"输入空格字符"冲突
 // ─────────────────────────────────────────────────────────────────
 const onSpaceKeydown = (evt: KeyboardEvent) => {
   if (evt.code !== 'Space' && evt.key !== ' ') return
@@ -945,12 +716,11 @@ const onSpaceKeydown = (evt: KeyboardEvent) => {
   }
 }
 
-onMounted(() => {
-  window.addEventListener('keydown', onSpaceKeydown)
-})
-onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onSpaceKeydown)
-})
+const onWaveformSeek = (time: number) => {
+  const el = videoRef.value || audioRef.value
+  if (el) el.currentTime = time
+  currentTime.value = time
+}
 
 const onWaveformUpdateEntry = (payload: { uid: number; start?: number; end?: number }) => {
   const row = entries.value.find((e) => e._uid === payload.uid)
@@ -966,9 +736,6 @@ const onWaveformUpdateEntry = (payload: { uid: number; start?: number; end?: num
   activeUid.value = payload.uid
 }
 
-// 在时间轴空白处双击新增一条字幕：找到该时间点前后相邻的条目，夹在
-// 中间插入一条 2 秒（或更短，避免越界侵占相邻条目）默认时长的空白字幕，
-// 与表格里的"➕ 后插一条"（insertAfter）行为保持一致的默认时长策略。
 const onWaveformAddEntry = (time: number) => {
   const sorted = entries.value
   let insertAt = sorted.length
@@ -980,11 +747,11 @@ const onWaveformAddEntry = (time: number) => {
   }
   const prev = sorted[insertAt - 1]
   const next = sorted[insertAt]
-  if (prev && time < prev.end) return // 双击落在已有字幕区块内部，交由拖拽/表格编辑处理，这里不重复插入
+  if (prev && time < prev.end) return
   const start = time
   const maxEnd = next ? next.start : start + 2
   const end = Math.min(start + 2, maxEnd)
-  if (end - start < 0.1) return // 相邻条目间隙太窄，放不下新字幕
+  if (end - start < 0.1) return
   const newEntry = toEditableEntry({ start, end, text: '' })
   history.recordBeforeChange()
   entries.value.splice(insertAt, 0, newEntry)
@@ -1005,7 +772,6 @@ const onWaveformEditText = (payload: { uid: number; text: string }) => {
 }
 
 // 波形块工具栏"删除"按钮 / 选中后按 Delete 键：无需二次确认，直接删除
-// （字幕列表里的 🗑️ 删除按钮同样不再二次确认，见 deleteEntry()）
 const onWaveformDeleteEntry = (uid: number) => {
   const index = entries.value.findIndex((e) => e._uid === uid)
   if (index === -1) return
@@ -1025,7 +791,7 @@ const onWaveformDeleteEntries = (uids: number[]) => {
   selectedUids.value = new Set()
 }
 
-// 波形块工具栏"拆分"按钮：按 uid 定位后复用 splitEntry 的按 index 实现
+// 波形块工具栏"拆分"按钮：按 uid 定位后复用 splitEntryTimeOnly 的按 index 实现
 const onWaveformSplitEntry = (payload: { uid: number; at: number }) => {
   const index = entries.value.findIndex((e) => e._uid === payload.uid)
   if (index === -1) return
@@ -1063,12 +829,56 @@ const rowClassName = ({ row }: { row: SubtitleEntry }) => {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 导出（前端持有完整字幕数据，请求后端仅做格式转换，返回文本后
-// 用 Blob 方式触发浏览器下载，不落盘到工作目录）
+// 运行对齐（/api/subtitle-align/run）
 // ─────────────────────────────────────────────────────────────────
-const exportSubtitle = async (format: 'srt' | 'lrc' | 'lab' | 'txt') => {
+const run = async () => {
+  running.value = true
+  error.value = ''
+  progress.value = 0
+  try {
+    const res = await fetch('/api/subtitle-align/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // VAD 合并间隔：与字幕识别页统一使用 close_vad_gaps / vad_gap_threshold_sec。
+      // 之前直接展开 settings，发出去的是 vadGapEnabled / vadGapThresholdSec，
+      // 后端从不读取，开关等于没接线。
+      body: JSON.stringify({
+        media_id: media.value.media_id,
+        text: text.value,
+        ...settings,
+        close_vad_gaps: settings.vadGapEnabled,
+        vad_gap_threshold_sec: settings.vadGapThresholdSec,
+      }),
+    })
+    const data = await res.json()
+    if (!res.ok || !data.success) throw new Error(data.error || t('subtitleAlign.alignFailed'))
+
+    const rawEntries = (data.entries || []) as Array<{ start: number; end: number; text: string }>
+    entries.value = rawEntries.map(toEditableEntry)
+    history.resetHistory()
+    selectedUids.value = new Set()
+    activeUid.value = null
+    progress.value = 100
+    ElMessage.success(`✅ ${t('subtitleAlign.alignSuccess')}`)
+    // 文本与 FA 结果对不上时，后端会退回按字数均摊——时间不准，必须明确告知，
+    // 而不是让用户对着首尾相接的字幕以为是对齐结果。
+    if (data.align_mode === 'proportional') {
+      ElMessage.warning({ message: t('subtitleAlign.alignFallbackWarning'), duration: 8000, showClose: true })
+    }
+  } catch (e: any) {
+    error.value = e?.message || String(e)
+    ElMessage.error(`❌ ${error.value}`)
+  } finally {
+    running.value = false
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 导出（复用 /api/subtitle/export，已支持 srt/lrc/txt/lab 四种格式）
+// ─────────────────────────────────────────────────────────────────
+const exportSubtitle = async (format: 'srt' | 'lrc' | 'txt' | 'lab') => {
   if (!entries.value.length) {
-    ElMessage.warning(t('subtitle.exportEmpty'))
+    ElMessage.warning(t('subtitleAlign.exportEmpty'))
     return
   }
   try {
@@ -1082,9 +892,9 @@ const exportSubtitle = async (format: 'srt' | 'lrc' | 'lab' | 'txt') => {
       body: JSON.stringify(payload),
     })
     const data = await res.json()
-    if (!res.ok || !data.success) throw new Error(data.error || t('subtitle.exportFailed'))
+    if (!res.ok || !data.success) throw new Error(data.error || t('subtitleAlign.exportFailed'))
 
-    const baseName = mediaInfo.value ? mediaInfo.value.filename.replace(/\.[^.]+$/, '') : 'subtitle'
+    const baseName = mediaInfo.value ? mediaInfo.value.filename.replace(/\.[^.]+$/, '') : 'aligned'
     const blob = new Blob([data.content], { type: 'text/plain;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -1095,15 +905,14 @@ const exportSubtitle = async (format: 'srt' | 'lrc' | 'lab' | 'txt') => {
     document.body.removeChild(link)
     URL.revokeObjectURL(url)
 
-    ElMessage.success(`✅ ${t('subtitle.exportSuccess')}`)
+    ElMessage.success(`✅ ${t('subtitleAlign.exportSuccess')}`)
   } catch (e: any) {
     ElMessage.error(`❌ ${e?.message || String(e)}`)
   }
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 导出带字幕的视频/音频（软字幕封装 / 硬字幕烧录）。
-// 字幕识别 / 编辑 / 对齐三个页面共用同一份实现，见 useSubtitleEmbed.ts
+// 导出带字幕的视频/音频（软字幕封装 / 硬字幕烧录），逻辑见 useSubtitleEmbed.ts
 // ─────────────────────────────────────────────────────────────────
 const { embedding, embedSubtitleIntoMedia } = useSubtitleEmbed(mediaInfo, entries)
 
@@ -1118,8 +927,18 @@ const formatDuration = (sec: number): string => {
   return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`
 }
 
-onBeforeUnmount(() => {
-  clearJobPolling()
+onBeforeUnmount(async () => {
+  if (mediaInfo.value) {
+    try {
+      await fetch('/api/subtitle/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ media_id: mediaInfo.value.media_id }),
+      })
+    } catch {
+      // 组件卸载时的清理失败不影响用户体验，静默忽略
+    }
+  }
 })
 </script>
 
@@ -1145,13 +964,6 @@ onBeforeUnmount(() => {
   font-size: 16px;
   font-weight: bold;
   color: #333;
-}
-
-.page-subtitle {
-  color: #606266;
-  font-size: 13px;
-  line-height: 1.6;
-  margin: 4px 0 16px;
 }
 
 .status-alert {
@@ -1195,6 +1007,26 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.settings-form {
+  margin-bottom: 8px;
+}
+
+.option-hint-icon {
+  margin-left: 8px;
+  color: #94a3b8;
+  cursor: help;
+}
+
+.unit {
+  margin-left: 10px;
+  color: #64748b;
+}
+
+.align-progress {
+  margin-top: 16px;
+  max-width: 480px;
+}
+
 .media-upload {
   width: 100%;
 }
@@ -1208,8 +1040,6 @@ onBeforeUnmount(() => {
   padding: 32px 20px;
 }
 
-/* 拖拽上传框 + 录音/预览按钮并排布局：.media-upload 本身撑满整行宽度，
-   这里让它在 flex 容器里可以收缩，把空间让给右侧的录音/预览按钮。 */
 .audio-upload-row {
   display: flex;
   align-items: center;
@@ -1279,34 +1109,6 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.settings-form {
-  max-width: 560px;
-}
-
-.option-hint-icon {
-  margin-left: 8px;
-  cursor: help;
-  opacity: 0.7;
-}
-
-.recognize-progress {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 14px;
-}
-
-.recognize-progress .el-progress {
-  flex: 1;
-  max-width: 400px;
-}
-
-.progress-label {
-  color: #606266;
-  font-size: 13px;
-  white-space: nowrap;
-}
-
 .player-layout {
   display: flex;
   justify-content: center;
@@ -1343,13 +1145,6 @@ onBeforeUnmount(() => {
   max-width: 90%;
   text-align: center;
   pointer-events: none;
-}
-
-.empty-hint {
-  color: #909399;
-  font-size: 13px;
-  text-align: center;
-  padding: 24px 0;
 }
 
 .subtitle-table :deep(.el-table__cell) {

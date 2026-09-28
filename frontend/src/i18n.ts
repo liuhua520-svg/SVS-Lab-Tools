@@ -457,10 +457,12 @@ const messages = {
       dialogue: '对话文本框',
       subtitle: '字幕识别',
       subtitleEditor: '字幕编辑',
+      subtitleAlign: '字幕对齐',
       help: '帮助',
       about: '关于',
       englishG2P: '英语G2P工具',
     },
+    subtitleAlign: { pageTitle: '字幕对齐（QWEN3-FA，句子级）', uploadTitle: '上传媒体文件', uploadHint: '拖拽视频或音频文件到此处，或点击选择（支持 mp4/mkv/mov/avi/webm 等视频，wav/mp3/flac/m4a 等音频）', uploadReplace: '重新选择文件', uploading: '正在上传...', uploadSuccess: '上传成功', uploadFailed: '上传失败', fileDuration: '时长', fileTypeVideo: '视频', fileTypeAudio: '音频', reuploadWarning: '重新上传将清空当前的对齐结果', settingsTitle: '文本与对齐设置', inputText: '输入文本', inputTextPlaceholder: '请输入与音频内容对应的文本，可按句子换行', language: '识别语言', device: '运行设备', deviceAuto: '自动', deviceCpu: 'CPU', deviceCuda: 'CUDA', maxChars: '单条字幕最大字数', splitSentence: '允许按句末切分', splitSentenceHint: '按句末标点（。！？等）把文本切分成多条字幕', splitComma: '允许逗号切分', splitCommaHint: '在句末切分的基础上，进一步按逗号/顿号切分', removeSymbols: '移除符号', removeSymbolsHint: '导出字幕文本时移除标点符号', vadGap: 'VAD 合并间隔', vadGapHint: '不会把两条字幕合并成一条，而是相邻两条字幕之间的静音间隔大于设定阈值时，把这段间隔对半分配到中点——不论间隔本身有多长，前一条延后结束、后一条提前开始，都移到间隔中点，两条字幕挨得更近。', vadGapThreshold: '合并间隔阈值（秒）', vadGapThresholdHint: '相邻字幕间隔大于该秒数时才会触发对半分配到中点；小于等于该值时视为已经足够紧凑，保持原样不动。', vadGapUnit: '秒', start: '开始对齐', aligning: '对齐中...', alignFailed: '对齐失败', alignSuccess: '对齐完成', alignFallbackWarning: '输入文本与音频对齐结果的字数对不上，已退回按字数均摊时间，字幕的起止时间不准确。请检查输入文本是否与音频内容一致。', playerTitle: '预览与校对', waveformTitle: '波形时间轴', subtitleListTitle: '字幕列表', undo: '撤销', redo: '恢复', undoHint: '撤销上一步操作（Ctrl+Z）', redoHint: '恢复被撤销的操作（Ctrl+Y）', addEntry: '新增字幕', clearAll: '清空全部', clearAllConfirm: '确定清空当前所有字幕吗？此操作不可恢复。', columnIndex: '#', columnStart: '开始时间', columnEnd: '结束时间', columnText: '字幕文本', columnAction: '操作', addAfter: '后插一条', splitEntry: '拆分为两条', splitFailed: '拆分失败', splitTooShort: '这条字幕时长过短，无法再拆分', mergeNext: '与下一条合并', deleteEntry: '删除', jumpToTime: '跳转播放', invalidTimeFormat: '时间格式不正确', timeOverlapWarning: '开始时间不能晚于结束时间', exportTitle: '导出字幕', exportEmpty: '没有可导出的字幕内容', exportFailed: '导出失败', exportSuccess: '导出成功', exportSrt: '导出 SRT', exportLrc: '导出 LRC', exportLab: '导出 LAB', exportText: '导出纯文本', statusChecking: '正在检查依赖状态...', statusReady: 'Qwen3-ForcedAligner 与 ffmpeg 均已就绪', statusFfmpegMissing: '未检测到 ffmpeg，请安装并加入系统 PATH', statusQwenMissing: 'Qwen3-ForcedAligner 依赖未安装，请先在 .mfa_env 中安装 qwen-asr', statusRecheck: '重新检查' },
     about: {
       pageTitle: '关于',
       pageSubtitle: '项目介绍、开源许可证与第三方鸣谢',
@@ -1548,6 +1550,7 @@ const messages = {
       dialogue: '對話文字框',
       subtitle: '字幕辨識',
       subtitleEditor: '字幕編輯',
+      subtitleAlign: '字幕對齊',
       help: '說明',
       about: '關於',
 	  englishG2P: '英語G2P工具',
@@ -2191,6 +2194,7 @@ const messages = {
       stressed: '重音',
       unstressed: '非重音',
     },
+    subtitleAlign: { pageTitle: '字幕對齊（QWEN3-FA，句子級）', uploadTitle: '上傳媒體檔案', uploadHint: '拖曳影片或音訊檔案到此處，或點擊選擇（支援 mp4/mkv/mov/avi/webm 等影片，wav/mp3/flac/m4a 等音訊）', uploadReplace: '重新選擇檔案', uploading: '正在上傳...', uploadSuccess: '上傳成功', uploadFailed: '上傳失敗', fileDuration: '時長', fileTypeVideo: '影片', fileTypeAudio: '音訊', reuploadWarning: '重新上傳將清空目前的對齊結果', settingsTitle: '文字與對齊設定', inputText: '輸入文字', inputTextPlaceholder: '請輸入與音訊內容對應的文字，可按句子換行', language: '辨識語言', device: '執行裝置', deviceAuto: '自動', deviceCpu: 'CPU', deviceCuda: 'CUDA', maxChars: '單條字幕最大字數', splitSentence: '允許按句末切分', splitSentenceHint: '依句末標點（。！？等）把文字切分成多條字幕', splitComma: '允許逗號切分', splitCommaHint: '在句末切分的基礎上，進一步按逗號／頓號切分', removeSymbols: '移除符號', removeSymbolsHint: '匯出字幕文字時移除標點符號', vadGap: 'VAD 合併間隔', vadGapHint: '不會把兩條字幕合併成一條，而是相鄰兩條字幕之間的靜音間隔大於設定閾值時，把這段間隔對半分配到中點——不論間隔本身有多長，前一條延後結束、後一條提前開始，都移到間隔中點，兩條字幕挨得更近。', vadGapThreshold: '合併間隔閾值（秒）', vadGapThresholdHint: '相鄰字幕間隔大於該秒數時才會觸發對半分配到中點；小於等於該值時視為已經足夠緊湊，保持原樣不動。', vadGapUnit: '秒', start: '開始對齊', aligning: '對齊中...', alignFailed: '對齊失敗', alignSuccess: '對齊完成', alignFallbackWarning: '輸入文字與音訊對齊結果的字數對不上，已退回按字數均攤時間，字幕的起訖時間不準確。請檢查輸入文字是否與音訊內容一致。', playerTitle: '預覽與校對', waveformTitle: '波形時間軸', subtitleListTitle: '字幕清單', undo: '復原', redo: '重做', undoHint: '復原上一步操作（Ctrl+Z）', redoHint: '重做被復原的操作（Ctrl+Y）', addEntry: '新增字幕', clearAll: '清空全部', clearAllConfirm: '確定清空目前所有字幕嗎？此操作無法復原。', columnIndex: '#', columnStart: '開始時間', columnEnd: '結束時間', columnText: '字幕文字', columnAction: '操作', addAfter: '後插一條', splitEntry: '拆分為兩條', splitFailed: '拆分失敗', splitTooShort: '這條字幕時長過短，無法再拆分', mergeNext: '與下一條合併', deleteEntry: '刪除', jumpToTime: '跳轉播放', invalidTimeFormat: '時間格式不正確', timeOverlapWarning: '開始時間不能晚於結束時間', exportTitle: '匯出字幕', exportEmpty: '沒有可匯出的字幕內容', exportFailed: '匯出失敗', exportSuccess: '匯出成功', exportSrt: '匯出 SRT', exportLrc: '匯出 LRC', exportLab: '匯出 LAB', exportText: '匯出純文字', statusChecking: '正在檢查依賴狀態...', statusReady: 'Qwen3-ForcedAligner 與 ffmpeg 均已就緒', statusFfmpegMissing: '未偵測到 ffmpeg，請安裝並加入系統 PATH', statusQwenMissing: 'Qwen3-ForcedAligner 依賴未安裝，請先在 .mfa_env 中安裝 qwen-asr', statusRecheck: '重新檢查' },
   },
 	'en': {
 	  app: {
@@ -2639,6 +2643,7 @@ const messages = {
 		dialogue: 'Dialogue Batch',
 		subtitle: 'Subtitle Recognition',
 		subtitleEditor: 'Subtitle Editor',
+      subtitleAlign: 'Subtitle Alignment',
 		help: 'Help',
 		about: 'About',
 		englishG2P: 'English G2P Tool',
@@ -3283,6 +3288,7 @@ const messages = {
 	    stressed: 'Stressed',
 	    unstressed: 'Unstressed',
 	  },
+	  subtitleAlign: { pageTitle: 'Subtitle Alignment (QWEN3-FA, sentence-level)', uploadTitle: 'Upload media file', uploadHint: 'Drag a video or audio file here, or click to select (video: mp4/mkv/mov/avi/webm; audio: wav/mp3/flac/m4a, etc.)', uploadReplace: 'Choose a different file', uploading: 'Uploading...', uploadSuccess: 'Upload successful', uploadFailed: 'Upload failed', fileDuration: 'Duration', fileTypeVideo: 'Video', fileTypeAudio: 'Audio', reuploadWarning: 'Re-uploading will clear the current alignment result', settingsTitle: 'Text & Alignment Settings', inputText: 'Input text', inputTextPlaceholder: 'Enter the text matching the audio content; you can break it into lines by sentence', language: 'Language', device: 'Runtime device', deviceAuto: 'Auto', deviceCpu: 'CPU', deviceCuda: 'CUDA', maxChars: 'Max characters per subtitle', splitSentence: 'Split at sentence end', splitSentenceHint: 'Split the text into multiple subtitles at sentence-ending punctuation', splitComma: 'Split at comma', splitCommaHint: 'On top of sentence-end splitting, further split at commas', removeSymbols: 'Remove symbols', removeSymbolsHint: 'Remove punctuation from the exported subtitle text', vadGap: 'VAD merge interval', vadGapHint: 'This does not merge two subtitle lines into one. Instead, when the silent gap between two adjacent lines is greater than the threshold, the gap is split evenly down the middle — no matter how long the gap is, the earlier line\'s end and the next line\'s start are both moved to the midpoint, so the two lines sit closer together.', vadGapThreshold: 'Merge interval threshold (sec)', vadGapThresholdHint: 'Adjacent lines are pulled to the gap\'s midpoint only when their gap is greater than this many seconds; gaps at or below this value are already tight enough and left untouched.', vadGapUnit: 'sec', start: 'Start Alignment', aligning: 'Aligning...', alignFailed: 'Alignment failed', alignSuccess: 'Alignment complete', alignFallbackWarning: 'The input text does not match the alignment result in length, so timings fell back to a proportional split and are not accurate. Please check that the text matches the audio.', playerTitle: 'Preview & Review', waveformTitle: 'Waveform Timeline', subtitleListTitle: 'Subtitle List', undo: 'Undo', redo: 'Redo', undoHint: 'Undo last action (Ctrl+Z)', redoHint: 'Redo the undone action (Ctrl+Y)', addEntry: 'Add subtitle', clearAll: 'Clear all', clearAllConfirm: 'Clear all current subtitles? This cannot be undone.', columnIndex: '#', columnStart: 'Start Time', columnEnd: 'End Time', columnText: 'Subtitle Text', columnAction: 'Actions', addAfter: 'Insert after', splitEntry: 'Split into two', splitFailed: 'Split failed', splitTooShort: 'This subtitle is too short to split further', mergeNext: 'Merge with next', deleteEntry: 'Delete', jumpToTime: 'Jump to time', invalidTimeFormat: 'Invalid time format', timeOverlapWarning: 'Start time cannot be later than end time', exportTitle: 'Export Subtitles', exportEmpty: 'No subtitles to export', exportFailed: 'Export failed', exportSuccess: 'Export successful', exportSrt: 'Export SRT', exportLrc: 'Export LRC', exportLab: 'Export LAB', exportText: 'Export Plain Text', statusChecking: 'Checking dependency status...', statusReady: 'Qwen3-ForcedAligner and ffmpeg are both ready', statusFfmpegMissing: 'ffmpeg not found. Please install it and add it to your system PATH.', statusQwenMissing: 'The qwen-asr package is not installed. Please install it in .mfa_env first.', statusRecheck: 'Recheck' },
 	},
     'ja': {
     app: {
@@ -3731,6 +3737,7 @@ const messages = {
       dialogue: '対話テキストボックス',
       subtitle: '字幕認識',
       subtitleEditor: '字幕編集',
+      subtitleAlign: '字幕アライメント',
       help: 'ヘルプ',
       about: '概要',
 	  englishG2P: '英語G2Pツール',
@@ -4375,6 +4382,7 @@ const messages = {
       stressed: 'アクセントあり',
       unstressed: 'アクセントなし',
     },
+    subtitleAlign: { pageTitle: '字幕アライメント（QWEN3-FA、文単位）', uploadTitle: 'メディアファイルをアップロード', uploadHint: '動画または音声ファイルをここにドラッグするか、クリックして選択してください（動画：mp4/mkv/mov/avi/webm など、音声：wav/mp3/flac/m4a など）', uploadReplace: '別のファイルを選択', uploading: 'アップロード中...', uploadSuccess: 'アップロード成功', uploadFailed: 'アップロード失敗', fileDuration: '長さ', fileTypeVideo: '動画', fileTypeAudio: '音声', reuploadWarning: '再アップロードすると現在のアライメント結果がクリアされます', settingsTitle: 'テキストとアライメント設定', inputText: 'テキスト入力', inputTextPlaceholder: '音声の内容に対応するテキストを入力してください。文ごとに改行できます', language: '言語', device: '実行デバイス', deviceAuto: '自動', deviceCpu: 'CPU', deviceCuda: 'CUDA', maxChars: '字幕あたりの最大文字数', splitSentence: '文末で分割', splitSentenceHint: '句読点（。！？など）でテキストを複数の字幕に分割します', splitComma: '読点で分割', splitCommaHint: '文末分割に加えて、読点でもさらに分割します', removeSymbols: '記号を削除', removeSymbolsHint: '書き出す字幕テキストから記号を削除します', vadGap: 'VAD 結合間隔', vadGapHint: '2つの字幕を1つに結合するわけではありません。隣り合う字幕の間の無音区間が設定した閾値より長い場合、その区間の長さに関わらず中点で半分ずつ均等に詰めます——前の字幕の終了時刻と次の字幕の開始時刻を両方とも中点に動かし、両者をより近づけます。', vadGapThreshold: '結合間隔の閾値（秒）', vadGapThresholdHint: '隣接する字幕の間隔がこの秒数より長い場合のみ、中点への均等配分が行われます。この値以下の間隔はすでに十分詰まっているとみなされ、そのまま維持されます。', vadGapUnit: '秒', start: 'アライメント開始', aligning: 'アライメント中...', alignFailed: 'アライメントに失敗しました', alignSuccess: 'アライメント完了', alignFallbackWarning: '入力テキストとアライメント結果の文字数が一致しなかったため、文字数比での按分に切り替えました。字幕の開始・終了時刻は正確ではありません。テキストが音声の内容と一致しているか確認してください。', playerTitle: 'プレビューと校正', waveformTitle: '波形タイムライン', subtitleListTitle: '字幕リスト', undo: '元に戻す', redo: 'やり直す', undoHint: '直前の操作を元に戻す（Ctrl+Z）', redoHint: '元に戻した操作をやり直す（Ctrl+Y）', addEntry: '字幕を追加', clearAll: 'すべてクリア', clearAllConfirm: '現在のすべての字幕をクリアしますか？この操作は元に戻せません。', columnIndex: '#', columnStart: '開始時間', columnEnd: '終了時間', columnText: '字幕テキスト', columnAction: '操作', addAfter: '後ろに挿入', splitEntry: '2つに分割', splitFailed: '分割に失敗しました', splitTooShort: 'この字幕は短すぎてこれ以上分割できません', mergeNext: '次と統合', deleteEntry: '削除', jumpToTime: '再生位置へ移動', invalidTimeFormat: '時間の形式が正しくありません', timeOverlapWarning: '開始時間は終了時間より後にできません', exportTitle: '字幕を書き出す', exportEmpty: '書き出せる字幕がありません', exportFailed: '書き出しに失敗しました', exportSuccess: '書き出しに成功しました', exportSrt: 'SRTを書き出す', exportLrc: 'LRCを書き出す', exportLab: 'LABを書き出す', exportText: 'プレーンテキストを書き出す', statusChecking: '依存状態を確認しています...', statusReady: 'Qwen3-ForcedAligner と ffmpeg はいずれも準備完了です', statusFfmpegMissing: 'ffmpeg が見つかりません。インストールしてシステム PATH に追加してください。', statusQwenMissing: 'qwen-asr パッケージがインストールされていません。先に .mfa_env にインストールしてください。', statusRecheck: '再確認' },
   },
     'ko': {
     app: {
@@ -4823,6 +4831,7 @@ const messages = {
       dialogue: '대화 텍스트 박스',
       subtitle: '자막 인식',
       subtitleEditor: '자막 편집',
+      subtitleAlign: '자막 정렬',
       help: '도움말',
       about: '정보',
 	  englishG2P: '영어 G2P 도구',
@@ -5467,6 +5476,7 @@ const messages = {
       stressed: '강세',
       unstressed: '비강세',
     },
+    subtitleAlign: { pageTitle: '자막 정렬(QWEN3-FA, 문장 단위)', uploadTitle: '미디어 파일 업로드', uploadHint: '동영상 또는 오디오 파일을 여기에 드래그하거나 클릭하여 선택하세요 (동영상: mp4/mkv/mov/avi/webm 등, 오디오: wav/mp3/flac/m4a 등)', uploadReplace: '다른 파일 선택', uploading: '업로드 중...', uploadSuccess: '업로드 성공', uploadFailed: '업로드 실패', fileDuration: '길이', fileTypeVideo: '동영상', fileTypeAudio: '오디오', reuploadWarning: '다시 업로드하면 현재 정렬 결과가 초기화됩니다', settingsTitle: '텍스트 및 정렬 설정', inputText: '텍스트 입력', inputTextPlaceholder: '오디오 내용에 맞는 텍스트를 입력하세요. 문장마다 줄바꿈할 수 있습니다', language: '언어', device: '실행 장치', deviceAuto: '자동', deviceCpu: 'CPU', deviceCuda: 'CUDA', maxChars: '자막당 최대 글자 수', splitSentence: '문장 끝에서 분할', splitSentenceHint: '문장 종결 부호(。！？등)를 기준으로 텍스트를 여러 자막으로 분할합니다', splitComma: '쉼표에서 분할', splitCommaHint: '문장 끝 분할에 더해 쉼표 기준으로도 추가 분할합니다', removeSymbols: '기호 제거', removeSymbolsHint: '내보낸 자막 텍스트에서 문장 부호를 제거합니다', vadGap: 'VAD 병합 간격', vadGapHint: '두 자막을 하나로 합치는 것이 아닙니다. 인접한 두 자막 사이의 무음 간격이 설정한 임계값보다 크면, 간격의 길이와 상관없이 그 간격을 중간 지점에서 균등하게 반씩 나눕니다——앞 자막의 종료 시간과 다음 자막의 시작 시간이 모두 중간 지점으로 이동하여 두 자막이 더 가까이 붙습니다.', vadGapThreshold: '병합 간격 임계값(초)', vadGapThresholdHint: '인접한 자막 간격이 이 초 수보다 클 때만 중간 지점으로 균등 배분됩니다. 이 값 이하의 간격은 이미 충분히 촘촘하다고 간주되어 그대로 유지됩니다.', vadGapUnit: '초', start: '정렬 시작', aligning: '정렬 중...', alignFailed: '정렬 실패', alignSuccess: '정렬 완료', alignFallbackWarning: '입력 텍스트와 정렬 결과의 글자 수가 맞지 않아 글자 수 비례 분배로 대체되었으며, 자막 시작·종료 시간이 정확하지 않습니다. 텍스트가 오디오 내용과 일치하는지 확인해 주세요.', playerTitle: '미리보기 및 검토', waveformTitle: '파형 타임라인', subtitleListTitle: '자막 목록', undo: '실행 취소', redo: '다시 실행', undoHint: '이전 작업 실행 취소(Ctrl+Z)', redoHint: '취소한 작업 다시 실행(Ctrl+Y)', addEntry: '자막 추가', clearAll: '전체 지우기', clearAllConfirm: '현재 모든 자막을 지우시겠습니까? 이 작업은 되돌릴 수 없습니다.', columnIndex: '#', columnStart: '시작 시간', columnEnd: '종료 시간', columnText: '자막 텍스트', columnAction: '작업', addAfter: '뒤에 추가', splitEntry: '두 개로 분할', splitFailed: '분할 실패', splitTooShort: '이 자막은 너무 짧아 더 이상 분할할 수 없습니다', mergeNext: '다음과 병합', deleteEntry: '삭제', jumpToTime: '재생 위치로 이동', invalidTimeFormat: '시간 형식이 올바르지 않습니다', timeOverlapWarning: '시작 시간은 종료 시간보다 늦을 수 없습니다', exportTitle: '자막 내보내기', exportEmpty: '내보낼 자막이 없습니다', exportFailed: '내보내기 실패', exportSuccess: '내보내기 성공', exportSrt: 'SRT 내보내기', exportLrc: 'LRC 내보내기', exportLab: 'LAB 내보내기', exportText: '일반 텍스트 내보내기', statusChecking: '의존성 상태를 확인하는 중...', statusReady: 'Qwen3-ForcedAligner와 ffmpeg가 모두 준비되었습니다', statusFfmpegMissing: 'ffmpeg를 찾을 수 없습니다. 설치 후 시스템 PATH에 추가해 주세요.', statusQwenMissing: 'qwen-asr 패키지가 설치되어 있지 않습니다. 먼저 .mfa_env에 설치해 주세요.', statusRecheck: '다시 확인' },
   },
 } as const
 

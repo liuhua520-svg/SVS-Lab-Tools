@@ -146,6 +146,13 @@ const ackGroups: AckGroup[] = [
     ],
   },
   {
+    key: 'main-cum',
+    title: 'CMU License — Backend',
+    items: [
+      { name: 'Pillow', version: '9.0.0', link: 'https://github.com/python-pillow/Pillow' },
+    ],
+  },
+  {
     key: 'main-bsd3',
     title: 'BSD 3-Clause — Backend',
     items: [
