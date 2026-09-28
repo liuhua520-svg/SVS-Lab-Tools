@@ -60,6 +60,11 @@ Copyright (c) 2026 liuhua520-svg (https://github.com/liuhua520-svg/SVS-Lab-Tools
 | ruamel.yaml | 0.19.1 | [PyPI](https://pypi.org/project/ruamel.yaml/) |
 | mido | 1.3.3 | [GitHub](https://github.com/mido/mido) |
 
+#### CUM License
+| 包名 | 版本 | 链接 |
+|------|------|------|
+| Pillow | >9.0.0 | [GitHub](https://github.com/python-pillow/Pillow) |
+
 #### BSD-3-Clause
 | 包名 | 版本 | 链接 |
 |------|------|------|
