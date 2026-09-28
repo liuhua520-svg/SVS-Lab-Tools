@@ -246,6 +246,13 @@ under one of them is not necessarily installed in every deployment.
   License: MIT
   Link: https://github.com/mido/mido
 
+- Pillow>=9.0.0
+  Copyright © 1997-2011 by Secret Labs AB
+  Copyright © 1995-2011 by Fredrik Lundh
+  Copyright © 2010-2019 by Alex Clark and contributors
+  License: MIT-CUM
+  Link: https://github.com/python-pillow/Pillow
+
 --------------------------------------------------------------------
 
 4. LGPL compliance note (num2words, edge-tts)
