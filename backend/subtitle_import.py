@@ -539,7 +539,7 @@ def align_subtitle_audio(
       失败: {"success": False, "error": str}
     """
     import os
-    from alt_aligners import get_aligner, _fill_silences_lab
+    from alt_aligners import get_aligner, _fill_silences_lab, maybe_unload_qwen3_forced_aligner_after_task
     from tts_processor import (
         _parse_lab_lines, _shift_entries, _entries_to_lab_text,
         _uniform_fallback_entries, _get_wav_duration_100ns,
@@ -636,6 +636,17 @@ def align_subtitle_audio(
                 progress_cb(min(cues_done, cue_progress_total), cue_progress_total)
     finally:
         shutil.rmtree(str(tmp_dir), ignore_errors=True)
+        # 【用完即卸】整个 align_groups 循环（不管正常结束、用户取消
+        # 提前 return，还是中途抛出未捕获异常）结束后，统一触发一次
+        # 卸载判断——这里在同一个"字幕跟读"任务内会对同一个缓存单例
+        # 连续调用 aligner.align() 多次（每个对齐块一次），语义上对应
+        # "这一次字幕跟读任务"，与 tts_processor.align_segments() 的
+        # 触发粒度一致。此前这里完全没有调用，导致设置页面开启
+        # 「Qwen3-ForcedAligner 用完即卸」对该功能不生效。
+        try:
+            maybe_unload_qwen3_forced_aligner_after_task()
+        except Exception as _unload_err:
+            logger.warning(f"[字幕导入] 「用完即卸」释放 Qwen3-FA 模型失败（不影响本次对齐结果）: {_unload_err}")
 
     lab_entries.sort(key=lambda t: t[0])
 

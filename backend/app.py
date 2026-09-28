@@ -4470,6 +4470,144 @@ def subtitle_recognize():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route("/api/subtitle-align/status", methods=["GET"])
+def subtitle_align_status():
+    """
+    字幕对齐（Qwen3-ForcedAligner）依赖检查：ffmpeg 是否可用 + qwen-asr
+    包是否已正确安装。与 /api/subtitle/status 对称，但检查的是
+    Qwen3ForcedAligner（而非 Qwen3ASRAligner），因为字幕对齐页走的是
+    对齐模型而不是识别模型，两者依赖的具体可用性可能不同步。
+    """
+    ffmpeg_ok, ffmpeg_msg = subtitle_processor.check_ffmpeg_available()
+    from alt_aligners import Qwen3ForcedAligner
+    qwen_ok, qwen_msg = Qwen3ForcedAligner.check_available()
+    return jsonify({
+        "success": True,
+        "ffmpeg": {"available": ffmpeg_ok, "message": ffmpeg_msg},
+        "qwen3_fa": {"available": qwen_ok, "message": qwen_msg},
+        "ready": ffmpeg_ok and qwen_ok,
+    }), 200
+
+
+@app.route("/api/subtitle-align/run", methods=["POST"])
+def subtitle_align_run():
+    """使用 Qwen3-ForcedAligner 做句子级字幕对齐。
+
+    这里刻意不暴露词级结果：Qwen3-FA 的细粒度输出只作为句子边界
+    对齐依据，接口返回的是可编辑的句子级字幕条目。
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        media_id = (data.get("media_id") or "").strip()
+        text = (data.get("text") or "").strip()
+        language = (data.get("language") or "Chinese").strip()
+        device = (data.get("device") or "auto").strip()
+        if not media_id or not text:
+            return jsonify({"success": False, "error": "请先导入音视频并输入文本"}), 400
+        media_dir = (SUBTITLE_DIR / media_id).resolve()
+        if not str(media_dir).startswith(str(SUBTITLE_DIR)) or not media_dir.is_dir():
+            return jsonify({"success": False, "error": "媒体不存在或已过期，请重新上传"}), 404
+        source = next((p for p in media_dir.iterdir()
+                       if p.is_file() and not p.name.startswith("_")), None)
+        if source is None:
+            return jsonify({"success": False, "error": "媒体文件不存在"}), 404
+        ok, msg = subtitle_processor.check_ffmpeg_available()
+        if not ok:
+            return jsonify({"success": False, "error": msg}), 400
+
+        wav = media_dir / "_align_16k.wav"
+        subtitle_processor.extract_audio(str(source), str(wav))
+        duration = subtitle_processor.probe_duration_sec(str(source)) or subtitle_processor.probe_duration_sec(str(wav))
+        from alt_aligners import get_aligner, maybe_unload_qwen3_forced_aligner_after_task
+        aligner = get_aligner("qwen3_aligner", device=device)
+        try:
+            result = aligner.align(str(wav), text, language)
+        finally:
+            # 【用完即卸】字幕对齐页（本路由）此前直接调用 aligner.align()，
+            # 没有走 pipeline._run_alignment()，也不是 subtitle_import /
+            # tts_processor 的循环任务，因此 unload_qwen3_aligner_after_task
+            # 对它完全不生效。这里是"一次字幕对齐任务"的真正边界：align()
+            # 已返回（其内部局部变量随栈帧销毁），此时卸载才能真正归还显存。
+            # 无论成功/失败都触发，失败任务同样应当放行显存。
+            try:
+                maybe_unload_qwen3_forced_aligner_after_task()
+            except Exception as _unload_err:
+                logger.warning(f"[Qwen3-FA] 「用完即卸」释放模型失败（不影响本次对齐结果）: {_unload_err}")
+        if not result.get("success"):
+            return jsonify({"success": False, "error": result.get("error", "Qwen3-FA 对齐失败")}), 500
+
+        import re as _re
+        split_sentence = bool(data.get("splitSentence", True))
+        split_comma = bool(data.get("splitComma", False)) and split_sentence
+        max_chars = max(1, min(int(data.get("maxChars", 34) or 34), 500))
+        split_re = r"\n+|(?<=[。！？.!?；;])\s*"
+        if split_comma:
+            split_re = r"\n+|(?<=[。！？.!?；;,，、])\s*"
+        parts = [x.strip() for x in _re.split(split_re, text) if x.strip()] if split_sentence else [text]
+        # 长句按最大字数继续切分，优先在空格处断开，保证设置项在
+        # 对齐页和字幕识别页具有一致的直观行为。
+        expanded = []
+        for part in parts:
+            while len(part) > max_chars:
+                cut = part.rfind(" ", 0, max_chars + 1)
+                if cut < max_chars // 2:
+                    cut = max_chars
+                expanded.append(part[:cut].strip())
+                part = part[cut:].strip()
+            if part:
+                expanded.append(part)
+        parts = expanded
+        if data.get("removePunctuation"):
+            parts = [_re.sub(r"[，。！？；：、“”‘’（）()【】\[\],.!?;:'\"()]", "", p).strip() for p in parts]
+            parts = [p for p in parts if p]
+        if not parts:
+            parts = [text]
+        # 句子级输出：用 Qwen3-FA 的字/词级时间戳给每个句子定位——句子起点 =
+        # 该句首个可发音字的起点，终点 = 末个可发音字的终点，句间真实的停顿
+        # （即 LAB 里的 SIL）原样保留为相邻字幕之间的空隙。词级 token 本身不会
+        # 泄漏到字幕编辑界面，这里只取每句的首尾边界。
+        #
+        # 【历史 bug】此前这里完全没有读取 FA 的时间戳，只把 result 当作"能对齐"
+        # 的成功标志，随后按句子字数占比把整段时长均摊——于是字幕首尾相接、
+        # 停顿全部丢失（看起来像被合并了），而且"VAD 合并间隔"开关也因此无处
+        # 生效（均摊结果本来就没有间隙）。
+        from alt_aligners import sentence_spans_from_word_entries
+        spans = sentence_spans_from_word_entries(
+            parts, result.get("word_entries") or [], language,
+        )
+        if spans is None:
+            logger.warning(
+                "[subtitle-align] 文本可发音单元数与 Qwen3-FA 对齐条目数不一致"
+                f"（句子 {len(parts)} 条，对齐条目 {len(result.get('word_entries') or [])} 个），"
+                "无法逐句定位，退回按字数均摊。请检查输入文本是否与音频内容一致。"
+            )
+
+        # VAD 合并间隔：字幕识别页用 close_vad_gaps / vad_gap_threshold_sec，
+        # 对齐页前端历史上发的是 vadGapEnabled / vadGapThresholdSec。两套名字
+        # 都接受，避免前端/其它调用方改名后再次悄悄失效。
+        _raw_close = data.get("close_vad_gaps", data.get("vadGapEnabled", False))
+        close_vad_gaps = _raw_close is True or str(_raw_close).lower() in ("1", "true", "yes")
+        try:
+            vad_gap_threshold_sec = float(
+                data.get("vad_gap_threshold_sec", data.get("vadGapThresholdSec", 0.6))
+            )
+        except (TypeError, ValueError):
+            vad_gap_threshold_sec = 0.6
+        vad_gap_threshold_sec = max(0.05, min(vad_gap_threshold_sec, 5.0))
+
+        entries, align_mode = subtitle_processor.build_aligned_sentence_entries(
+            parts, spans, duration or 0.0,
+            close_vad_gaps=close_vad_gaps,
+            vad_gap_threshold_sec=vad_gap_threshold_sec,
+        )
+        return jsonify({"success": True, "entries": entries, "count": len(entries),
+                        "granularity": "sentence", "backend": "qwen3_aligner",
+                        "align_mode": align_mode}), 200
+    except Exception as e:
+        logger.error(f"字幕句子级对齐失败: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/subtitle/job/<job_id>", methods=["GET"])
 def subtitle_job_status(job_id: str):
     job = _get_subtitle_job(job_id)

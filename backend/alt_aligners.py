@@ -328,6 +328,7 @@ def _to_qwen_lang_name(lang: str) -> Optional[str]:
     """
     return {
         "cmn": "Chinese", "zh": "Chinese", "zh-cn": "Chinese", "mandarin": "Chinese",
+        "chinese": "Chinese",
         "yue": "Cantonese", "cantonese": "Cantonese", "zh-yue": "Cantonese",
         "eng": "English", "en": "English", "english": "English",
         "jpn": "Japanese", "ja": "Japanese", "japanese": "Japanese",
@@ -338,7 +339,7 @@ def _to_qwen_lang_name(lang: str) -> Optional[str]:
 def _normalize_lang(lang: str) -> str:
     """各种语言代码 → 内部短代码 (zh / yue / en / ja / ko)"""
     return {
-        "cmn": "zh", "zh-cn": "zh", "mandarin": "zh",
+        "cmn": "zh", "zh-cn": "zh", "mandarin": "zh", "chinese": "zh",
         "yue": "yue", "cantonese": "yue", "zh-yue": "yue",
         "eng": "en", "english": "en",
         "jpn": "ja", "japanese": "ja",
@@ -349,11 +350,11 @@ def _normalize_lang(lang: str) -> str:
 def _to_whisperx_lang(lang: str) -> str:
     """内部语言代码 → WhisperX / Whisper 语言代码"""
     return {
-        "cmn": "zh", "zh": "zh", "zh-cn": "zh",
-        "yue": "zh",   # 粤语用 zh 近似；WhisperX 暂无独立粤语对齐模型
-        "eng": "en", "en": "en",
-        "jpn": "ja", "ja": "ja",
-        "kor": "ko", "ko": "ko",
+        "cmn": "zh", "zh": "zh", "zh-cn": "zh", "chinese": "zh",
+        "yue": "zh", "cantonese": "zh",   # 粤语用 zh 近似；WhisperX 暂无独立粤语对齐模型
+        "eng": "en", "en": "en", "english": "en",
+        "jpn": "ja", "ja": "ja", "japanese": "ja",
+        "kor": "ko", "ko": "ko", "korean": "ko",
     }.get(lang.lower(), lang.lower())
 
 
@@ -702,6 +703,54 @@ def _count_spoken_chars(text: str, int_lang: str) -> int:
             if ch.strip():
                 count += 1
         return count
+
+
+def sentence_spans_from_word_entries(
+    parts: List[str],
+    word_entries: List[Tuple[float, float, str]],
+    lang: str,
+) -> Optional[List[Tuple[Optional[float], Optional[float]]]]:
+    """
+    把每个句子映射到 [该句首个可发音单元的起点, 末个可发音单元的终点]（秒）。
+
+    用途：字幕对齐页（/api/subtitle-align/run）只需要"句子边界"，但 Qwen3-FA
+    给出的是字/词级时间戳（标点已被过滤，不出现在 entries 里）。这里按每句
+    的"可发音单元数"顺序消费 entries，句间真实的停顿（即 LAB 里的 SIL）自然
+    体现为相邻两句之间 start/end 不相接的空隙。
+
+    计数口径必须与 entries 的产出粒度一致，否则会整体错位：
+      - 中/粤/日/韩：复用 _count_spoken_chars（CJK 按单字/假名，连续拉丁字母串
+        整体计 1 个单元）；
+      - 英文等：Qwen3-FA 按"单词"给 entries，所以按空白切分的词数计。
+
+    返回值：
+      - None：句子可发音单元总数 ≠ entries 数，说明文本与对齐结果对不上（例如
+        模型丢字/拆字）。此时不硬映射——错位的时间戳会让所有字幕整体偏移，比
+        均摊更糟——由调用方退回按字数均摊。
+      - 列表：与 parts 等长；没有任何可发音单元的句子（纯标点如「……」）返回
+        (None, None) 占位，由调用方用相邻句子的边界补齐。
+    """
+    int_lang = _normalize_lang(lang)
+    if int_lang in ("zh", "yue", "ja", "ko"):
+        counts = [_count_spoken_chars(p, int_lang) for p in parts]
+    else:
+        counts = [
+            len([w for w in re.split(r"\s+", p) if re.search(r"\w", w)])
+            for p in parts
+        ]
+    if sum(counts) != len(word_entries):
+        return None
+
+    spans: List[Tuple[Optional[float], Optional[float]]] = []
+    idx = 0
+    for c in counts:
+        if c == 0:
+            spans.append((None, None))
+            continue
+        chunk = word_entries[idx: idx + c]
+        idx += c
+        spans.append((float(chunk[0][0]), float(chunk[-1][1])))
+    return spans
 
 
 # ── 句末/句内标点 → 停顿时长映射 ──────────────────────────────────────────────
@@ -2818,6 +2867,41 @@ def _qwen3_load_forced_aligner(device_override: str = "auto"):
             return None
 
 
+def _release_cuda_memory_thoroughly() -> None:
+    """
+    把"模型对象已被置空"之后的显存真正还给系统。
+
+    只做一次 gc.collect() + empty_cache() 通常不够，原因有两个：
+      1) transformers 模型内部（generation_config、hook、accelerate 的
+         dispatch 信息等）存在循环引用，单次 gc.collect() 回收不完，
+         需要多跑几轮才能让权重张量的引用计数真正归零；
+      2) empty_cache() 只会归还"当前没有任何张量占用"的缓存块，且 CUDA
+         操作是异步的，不先 synchronize() 就调用，仍在飞行中的内核可能
+         还占着块，导致本次 empty_cache() 什么也没释放。
+
+    注意：本函数只能释放"已经没有 Python 引用"的显存。调用方自己作用域内
+    如果还持有模型的局部变量（例如 model = _qwen3_load_asr_model(...)），
+    必须先 del 掉再调用卸载函数，否则这里再怎么清理也释放不掉。
+    """
+    import gc
+    for _ in range(3):
+        gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _qwen3_unload_asr_model() -> bool:
     """
     释放已缓存的 Qwen3-ASR 模型（"用完即卸"设置开启时，在每次
@@ -2836,14 +2920,7 @@ def _qwen3_unload_asr_model() -> bool:
         had_model = _qwen3_asr_model is not None
         _qwen3_asr_model = None
     if had_model:
-        try:
-            import gc
-            gc.collect()
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
+        _release_cuda_memory_thoroughly()
         logger.info("[Qwen3-ASR] 已按「用完即卸」设置释放模型")
     return had_model
 
@@ -2855,14 +2932,7 @@ def _qwen3_unload_fa_model() -> bool:
         had_model = _qwen3_fa_model is not None
         _qwen3_fa_model = None
     if had_model:
-        try:
-            import gc
-            gc.collect()
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
+        _release_cuda_memory_thoroughly()
         logger.info("[Qwen3-FA] 已按「用完即卸」设置释放模型")
     return had_model
 
@@ -4488,6 +4558,10 @@ def _plan_chunks_via_qwen3_asr_prepass(
                 block_text = "".join((s.get("text") or "") for s in block_segments).strip()
                 if not block_text:
                     continue
+                logger.info(
+                    f"📝 [Qwen3-FA][Qwen3-ASR 粗测] 块 {idx + 1}/{len(vad_segments)} "
+                    f"({seg_start:.2f}s-{seg_end:.2f}s) 识别文字: {block_text}"
+                )
                 raw_segments.append({"start": seg_start, "end": seg_end, "text": block_text})
         finally:
             _shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -4498,6 +4572,12 @@ def _plan_chunks_via_qwen3_asr_prepass(
                 "回退到按参考文本字符比例估算的分段方案"
             )
             return None, None
+
+        _prepass_full_text = "".join(seg.get("text") or "" for seg in raw_segments).strip()
+        logger.info(
+            f"✅ [Qwen3-FA][Qwen3-ASR 粗测] 全部 {len(raw_segments)}/{len(vad_segments)} "
+            f"块识别完成 | 拼接识别文字: {_prepass_full_text}"
+        )
 
         # 按各块自身识别出的字数为配额，把原始参考文本（保留标点）顺序
         # 切给对应块——只借用 Qwen3-ASR 的字数，不使用它识别出的文字
@@ -4893,6 +4973,12 @@ class Qwen3ForcedAligner(AltAlignerBase):
                 "audio_duration": self._get_audio_duration_100ns(audio_path),
                 "processing_time": int((time.time() - t0) * 1000),
                 "backend": "qwen3_aligner",
+                # 【追加字段】字/词级时间戳 [(start_sec, end_sec, token), ...]，
+                # 已含分段拼接与 onset 校正，与上面的 lab_content 同源。
+                # 供只需要"句子边界"的调用方（字幕对齐页 /api/subtitle-align/run）
+                # 直接使用——LAB 是音素级 + SIL 的，要从中反推每句的起止时间
+                # 既绕又容易错位。现有调用方都是按 key 取字段，追加字段无影响。
+                "word_entries": [(float(s), float(e), w) for s, e, w in word_entries],
             }
 
         except Exception as e:

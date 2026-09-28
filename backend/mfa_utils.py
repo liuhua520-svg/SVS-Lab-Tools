@@ -839,6 +839,8 @@ class MFAChecker:
                     cmd,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=120,
                     env=subprocess_env,
                 )
@@ -975,7 +977,7 @@ class MFAChecker:
             dict_model,
         ]
         try:
-            result = subprocess.run(cmd_dict, capture_output=True, text=True, timeout=600, env=subprocess_env)
+            result = subprocess.run(cmd_dict, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, env=subprocess_env)
             if result.returncode == 0:
                 results.append(f"Dictionary {dict_model} downloaded")
                 # 模型下载成功后，让缓存自然过期以触发重新检测
@@ -997,7 +999,7 @@ class MFAChecker:
             acoustic_model,
         ]
         try:
-            result = subprocess.run(cmd_acoustic, capture_output=True, text=True, timeout=600, env=subprocess_env)
+            result = subprocess.run(cmd_acoustic, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, env=subprocess_env)
             if result.returncode == 0:
                 results.append(f"Acoustic {acoustic_model} downloaded")
             else:

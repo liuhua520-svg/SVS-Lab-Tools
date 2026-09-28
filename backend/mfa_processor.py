@@ -1698,7 +1698,8 @@ class MFAProcessor:
             # （其它阶段如 F0 提取/WhisperX/Qwen3 是进程内调用，只能走协作式
             # 取消，在阶段边界生效）。
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding="utf-8", errors="replace", env=env
             )
             if on_process_start:
                 try:

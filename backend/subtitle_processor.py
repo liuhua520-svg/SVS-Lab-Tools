@@ -114,7 +114,7 @@ def probe_duration_sec(path: str) -> float:
         "-of", "json",
         str(path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe 读取时长失败: {result.stderr.strip()}")
     data = json.loads(result.stdout or "{}")
@@ -141,7 +141,7 @@ def extract_audio(src_path: str, dst_wav_path: str, sample_rate: int = 16000) ->
         "-c:a", "pcm_s16le",
         str(dst_wav_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg 提取音频失败: {result.stderr.strip()[-800:]}")
     if not Path(dst_wav_path).exists():
@@ -548,7 +548,7 @@ def _slice_wav(wav_path: str, start_sec: float, end_sec: float, out_path: str) -
         "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
         str(out_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg 切片失败: {result.stderr.strip()[-500:]}")
     return out_path
@@ -571,7 +571,7 @@ def resolve_qwen3_language(lang_code: str) -> Optional[str]:
     return _QWEN3_LANG_MAP.get((lang_code or "auto").lower(), None)
 
 
-def transcribe_to_subtitles(
+def _transcribe_to_subtitles_impl(
     wav_path: str,
     language: str = "auto",
     device: str = "auto",
@@ -696,6 +696,14 @@ def transcribe_to_subtitles(
 
             raw_segments = _qwen3_normalize_segments(result)
             block_text = "".join((s.get("text") or "") for s in raw_segments).strip()
+            # 【新增】与 alt_aligners.Qwen3ASRAligner.align() 保持一致，
+            # 把每块的识别结果打到控制台/日志，便于实时观察字幕识别进度
+            # 与内容（此前这里只有 transformers 自身的 checkpoint/生成
+            # 警告输出，识别出的文字完全没有落地到日志）。
+            logger.info(
+                "[Qwen3-ASR] 第 %d/%d 块识别文本: %s",
+                i + 1, total, block_text[:120] if block_text else "(空)",
+            )
             if not block_text:
                 if progress_cb:
                     progress_cb(i + 1, total)
@@ -737,6 +745,56 @@ def transcribe_to_subtitles(
     return entries
 
 
+def transcribe_to_subtitles(
+    wav_path: str,
+    language: str = "auto",
+    device: str = "auto",
+    max_chars: int = MAX_SUBTITLE_CHARS,
+    tmp_dir: Optional[str] = None,
+    progress_cb=None,
+    allow_comma_split: bool = False,
+    split_at_sentence_end: bool = False,
+    remove_punctuation: bool = False,
+    close_vad_gaps: bool = False,
+    vad_gap_threshold_sec: float = 0.6,
+    batch_size: int = 8,
+) -> List[SubtitleEntry]:
+    """
+    对外入口：参数与文档见 _transcribe_to_subtitles_impl()。
+
+    【用完即卸】卸载必须放在 impl 返回之后。impl 内部的局部变量
+    （model / retried_model / result 等）持有 Qwen3-ASR 模型（含其内嵌的
+    forced_aligner 子模型）的强引用；如果在 impl 自己的 finally 里卸载，
+    这些引用仍然存活，模型根本没有被回收，torch.cuda.empty_cache() 也就
+    归还不了显存（表现为日志已打印"已按「用完即卸」设置释放模型"，任务
+    管理器里显存占用却纹丝不动）。impl 返回后其栈帧被销毁，引用归零，
+    此时再卸载才能真正把显存还给系统。
+    """
+    try:
+        return _transcribe_to_subtitles_impl(
+            wav_path,
+            language=language,
+            device=device,
+            max_chars=max_chars,
+            tmp_dir=tmp_dir,
+            progress_cb=progress_cb,
+            allow_comma_split=allow_comma_split,
+            split_at_sentence_end=split_at_sentence_end,
+            remove_punctuation=remove_punctuation,
+            close_vad_gaps=close_vad_gaps,
+            vad_gap_threshold_sec=vad_gap_threshold_sec,
+            batch_size=batch_size,
+        )
+    finally:
+        # 无论成功、失败还是中途异常都要卸载（失败任务同样应当放行显存）。
+        try:
+            from alt_aligners import _get_unload_after_task_settings, _qwen3_unload_asr_model
+            if _get_unload_after_task_settings().get("unload_qwen3_asr_after_task"):
+                _qwen3_unload_asr_model()
+        except Exception as _unload_err:
+            logger.warning(f"[Qwen3-ASR] 「用完即卸」释放模型失败（不影响本次识别结果）: {_unload_err}")
+
+
 def _close_small_gaps(
     entries: List[SubtitleEntry], min_gap_sec: float = 0.6
 ) -> List[SubtitleEntry]:
@@ -760,6 +818,77 @@ def _close_small_gaps(
             cur.end = mid
             nxt.start = mid
     return entries
+
+
+def build_aligned_sentence_entries(
+    parts: List[str],
+    spans: Optional[List[Tuple[Optional[float], Optional[float]]]],
+    duration: float,
+    close_vad_gaps: bool = False,
+    vad_gap_threshold_sec: float = 0.6,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    字幕对齐页：把"句子文本 + 每句的真实起止时间"组装成可编辑字幕条目。
+
+    spans 来自 alt_aligners.sentence_spans_from_word_entries()：
+      - 为 None：文本与对齐结果对不上，退回旧的"按字数占比均摊整段时长"
+        （首尾相接、不含任何真实停顿），并在返回的 mode 里标记为 "proportional"，
+        让调用方能给用户一个明确提示，而不是悄悄给出不准的结果。
+      - 为列表：每句用自己首字起点/末字终点，句间真实的停顿（SIL）原样保留为
+        相邻两条之间的空隙，mode 为 "aligned"。
+
+    close_vad_gaps / vad_gap_threshold_sec 与字幕识别页完全同语义（复用
+    _close_small_gaps）：相邻两条间隔 > 阈值时，把间隙对半分到中点，不合并
+    文本、不减少条目数。仅在 mode == "aligned" 时才有意义——均摊结果本来就
+    没有间隙可收紧。
+    """
+    n = len(parts)
+    if n == 0:
+        return [], "aligned"
+
+    if spans is None:
+        weights = [max(1, len(re.sub(r"\s+", "", p))) for p in parts]
+        total = float(sum(weights)) or 1.0
+        cursor = 0.0
+        out: List[Dict[str, Any]] = []
+        for i, part in enumerate(parts):
+            end = duration if i == n - 1 else cursor + duration * weights[i] / total
+            out.append({
+                "start": round(cursor, 3),
+                "end": round(max(end, cursor + 0.01), 3),
+                "text": part,
+            })
+            cursor = end
+        return out, "proportional"
+
+    # 没有可发音单元的句子（纯标点）：start/end 借相邻句子的边界补齐，
+    # 保证时间轴仍然单调、不出现 None。
+    starts: List[Optional[float]] = [a for a, _ in spans]
+    ends: List[Optional[float]] = [b for _, b in spans]
+    for i in range(n):
+        if starts[i] is None:
+            # 起点 = 前一条的终点（没有前一条则 0）
+            starts[i] = ends[i - 1] if i > 0 and ends[i - 1] is not None else 0.0
+            # 终点 = 起点，先占位，下面统一扩成最小时长
+            ends[i] = starts[i]
+
+    entries: List[SubtitleEntry] = []
+    prev_end = 0.0
+    for i in range(n):
+        st = max(float(starts[i]), prev_end)          # 不允许与前一条重叠
+        en = max(float(ends[i]), st + 0.01)           # 至少 10ms，避免零时长
+        if duration and duration > 0:
+            en = min(en, max(duration, st + 0.01))    # 不超过媒体总时长
+        entries.append(SubtitleEntry(i + 1, st, en, parts[i]))
+        prev_end = en
+
+    if close_vad_gaps:
+        entries = _close_small_gaps(entries, min_gap_sec=vad_gap_threshold_sec)
+
+    return [
+        {"start": round(e.start, 3), "end": round(e.end, 3), "text": e.text}
+        for e in entries
+    ], "aligned"
 
 
 def _merge_short_fragments(
@@ -1033,7 +1162,7 @@ def mux_soft_subtitles(
         str(dst_path),
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg 软字幕封装失败: {result.stderr.strip()[-800:]}")
     if not Path(dst_path).exists():
@@ -1055,14 +1184,236 @@ def _escape_ffmpeg_filter_path(path: str) -> str:
     转义传给 ffmpeg 滤镜参数（如 subtitles=<path>）的文件路径。
 
     ffmpeg 滤镜参数本身用冒号分隔键值对，Windows 路径的盘符冒号
-    （如 "C:\\..."）会被误判成参数分隔符导致解析失败，因此：
-      1) 反斜杠统一换成正斜杠（Windows/Linux 两边 ffmpeg 都认，规避
-         反斜杠自身在滤镜语法里也是转义字符的双重转义问题）；
-      2) 冒号转义成 "\\:"。
+    （如 "C:\\..."）会被误判成参数分隔符导致解析失败。历史上常见的
+    做法是把冒号转义成 "\\:"（同时反斜杠转正斜杠），但不同 ffmpeg
+    版本对"引号内是否还需要再转义冒号"处理不一致，实测在部分版本
+    上会报 "Error parsing a filter description"。
+
+    更稳妥的办法是彻底避开盘符冒号：调用方应优先通过把子进程的
+    cwd 设为字幕文件所在目录、只在滤镜里写不含盘符的文件名来规避
+    这个问题（见 burn_subtitles_to_video）。本函数保留作为兜底/其他
+    调用点的通用转义，仍按惯用写法处理。
     """
     p = path.replace("\\", "/")
     p = p.replace(":", r"\:")
     return p
+
+
+_SRT_TIME_RE = re.compile(
+    r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})"
+)
+
+
+def _parse_srt_timestamp(ts: str) -> float:
+    m = _SRT_TIME_RE.search(ts)
+    if not m:
+        return 0.0
+    h, mi, s, ms = m.groups()
+    ms = ms.ljust(3, "0")[:3]
+    return int(h) * 3600 + int(mi) * 60 + int(s) + int(ms) / 1000.0
+
+
+def _format_ass_timestamp(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    total_cs = round(seconds * 100)  # ASS 时间精度到 1/100 秒
+    h, rem = divmod(total_cs, 360000)
+    m, rem = divmod(rem, 6000)
+    s, cs = divmod(rem, 100)
+    return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def _parse_srt_cues(srt_content: str) -> List[Tuple[float, float, str]]:
+    """
+    把 SRT 文本解析成 (start_sec, end_sec, text) 三元组列表，按出现顺序。
+
+    容错：允许缺失序号行；文本可以跨多行；用空行分隔各条目（允许
+    \\r\\n / \\n 混用、允许多个连续空行）。
+    """
+    blocks = re.split(r"\r?\n\r?\n+", srt_content.strip())
+    cues: List[Tuple[float, float, str]] = []
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        block_lines = block.splitlines()
+        idx = 0
+        if idx < len(block_lines) and block_lines[idx].strip().isdigit():
+            idx += 1
+        if idx >= len(block_lines) or "-->" not in block_lines[idx]:
+            continue
+        start_str, end_str = [p.strip() for p in block_lines[idx].split("-->")[:2]]
+        idx += 1
+        text = "\n".join(block_lines[idx:]).strip()
+        if not text:
+            continue
+        start = _parse_srt_timestamp(start_str)
+        end = _parse_srt_timestamp(end_str)
+        cues.append((start, end, text))
+    return cues
+
+
+def _srt_text_to_ass(text: str) -> str:
+    """把 SRT 单条字幕文本转成 ASS Dialogue 的 Text 字段。"""
+    # SRT 换行 -> ASS 换行符 \N；花括号会被 ASS 当成样式覆写指令，转义掉
+    # 避免字幕正文里偶然出现的 { } 被当成 ASS 标签解析。
+    text = text.replace("{", r"\{").replace("}", r"\}")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return r"\N".join(lines)
+
+
+def _srt_to_ass(srt_content: str, *, font_size: int, margin_v: int) -> str:
+    """
+    把 SRT 字幕转换成内嵌样式的 ASS 字幕文本。
+
+    【历史说明】这是"用 ffmpeg subtitles 滤镜烧录"方案的一部分。后来
+    实测发现用户 Windows 上的 ffmpeg 构建根本没有编译 subtitles 滤镜
+    （报 "No such filter: 'subtitles'"，该滤镜依赖 libass，很多精简/
+    静态编译的 Windows ffmpeg 会直接砍掉），所以 burn_subtitles_to_video
+    已改用完全不依赖任何可选滤镜的"逐帧图片 + concat 拼接"方案（见下方
+    _render_subtitle_frame / burn_subtitles_to_video）。本函数保留
+    不再被调用，只是为了将来如果确认某个部署环境的 ffmpeg 确实带
+    libass、想切回更省资源的滤镜方案时可以直接复用，不必重写。
+    """
+    # PrimaryColour=&H00FFFFFF（白字）/ OutlineColour=&H00000000（黑边）
+    # 是 force_style 惯用写法里的 &HAABBGGRR；ASS 标准样式表里同一个
+    # 字段用的也是这个格式，直接照抄即可。
+    header = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        "WrapStyle: 0\n"
+        "ScaledBorderAndShadow: yes\n"
+        "YCbCr Matrix: None\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00000000,"
+        f"&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,20,20,{margin_v},1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+        "Effect, Text\n"
+    )
+    lines_out: List[str] = []
+    for start_sec, end_sec, text in _parse_srt_cues(srt_content):
+        start = _format_ass_timestamp(start_sec)
+        end = _format_ass_timestamp(end_sec)
+        ass_text = _srt_text_to_ass(text)
+        lines_out.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{ass_text}")
+    return header + "\n".join(lines_out) + "\n"
+
+
+def _hex_bg_to_rgb(bg_color: str) -> Tuple[int, int, int]:
+    """把 ffmpeg 风格的颜色写法（如 "0x1a1a2e"）转成 Pillow 用的 RGB 三元组。"""
+    s = bg_color.strip()
+    if s.startswith(("0x", "0X")):
+        s = s[2:]
+    elif s.startswith("#"):
+        s = s[1:]
+    try:
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except (ValueError, IndexError):
+        return (26, 26, 46)  # 解析失败时退回原默认色 0x1a1a2e
+
+
+_CJK_FONT_CANDIDATES = [
+    # 统一只用一款字体渲染全部字幕（不做逐字符/逐语言的字体回退），
+    # 优先级按"简体中文字符集覆盖面"排列——微软雅黑（msyh.ttc）是
+    # Windows 简体中文系统自带的界面字体，字符集比日语界面字体
+    # （Meiryo/Yu Gothic/MS Gothic）广得多：常用简体汉字、以及绝大多数
+    # 日语汉字（大部分和简体/繁体汉字同源）都能显示，不会出现缺字变
+    # 方块（"tofu"）的问题；代价是个别字形写法会偏"中文手写习惯"而
+    # 非日语标准字形，但这只是风格差异，不影响可读性，优先级远低于
+    # "字能不能显示出来"。
+    r"C:\Windows\Fonts\msyh.ttc",
+    r"C:\Windows\Fonts\msyhbd.ttc",
+    r"C:\Windows\Fonts\simsun.ttc",
+    # 找不到简体中文字体时才退回日文界面字体（能显示假名和日语汉字，
+    # 但会缺一部分简体中文专用字符，如"乐""缓"等）。
+    r"C:\Windows\Fonts\YuGothM.ttc",
+    r"C:\Windows\Fonts\yugothm.ttc",
+    r"C:\Windows\Fonts\meiryo.ttc",
+    r"C:\Windows\Fonts\msgothic.ttc",
+    r"C:\Windows\Fonts\malgun.ttf",
+    # Linux（容器/CI 环境常见路径，方便本地测试，生产是 Windows）：
+    # Noto Sans CJK 的 "Regular.ttc" 本身是多语言变体合集，字符集覆盖
+    # 最广，放在 Linux 候选里第一位。
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+]
+
+_cjk_font_path_cache: Optional[str] = None
+
+
+def _find_cjk_font() -> str:
+    """
+    找一个能显示日/中/韩文字的字体文件路径。
+
+    找不到就抛错——找不到能显示 CJK 的字体，硬编码回退到 Arial 只会
+    把字全部画成方块（"tofu"），对用户来说跟直接报错让他装字体/换路径
+    没有本质区别，不如尽早暴露问题。
+    """
+    global _cjk_font_path_cache
+    if _cjk_font_path_cache and Path(_cjk_font_path_cache).exists():
+        return _cjk_font_path_cache
+    for candidate in _CJK_FONT_CANDIDATES:
+        if Path(candidate).exists():
+            _cjk_font_path_cache = candidate
+            return candidate
+    raise RuntimeError(
+        "找不到可用的中日韩字体文件（已尝试 Windows 系统字体常见路径，"
+        "如 msyh.ttc / meiryo.ttc / msgothic.ttc 等，均不存在）。"
+        "请确认 Windows 已安装东亚语言字体，或联系开发者调整"
+        "_CJK_FONT_CANDIDATES 里的候选路径。"
+    )
+
+
+def _render_subtitle_frame(
+    text: Optional[str],
+    *,
+    width: int,
+    height: int,
+    bg_rgb: Tuple[int, int, int],
+    font_path: str,
+    font_size: int,
+    margin_v: int,
+) -> "Image.Image":
+    """
+    画一帧字幕图：纯色背景 + 底部居中的白字黑边文本（text 为 None/空
+    时只画背景，用于两条字幕之间的空档）。
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGB", (width, height), bg_rgb)
+    if not text:
+        return img
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype(font_path, font_size, index=0)
+    except OSError:
+        font = ImageFont.truetype(font_path, font_size)
+
+    lines = [ln for ln in text.splitlines() if ln.strip()] or [text]
+    # 描边宽度按字号比例给（跟原 force_style 里 Outline=2 对应 28pt 字号
+    # 的比例大致换算），行距用字号的 1.3 倍。
+    stroke_width = max(1, round(font_size * 2 / 28))
+    line_spacing = round(font_size * 1.3)
+    total_text_h = line_spacing * len(lines)
+    y = height - margin_v - total_text_h
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)
+        line_w = bbox[2] - bbox[0]
+        x = (width - line_w) / 2 - bbox[0]
+        draw.text(
+            (x, y), line, font=font, fill=(255, 255, 255),
+            stroke_width=stroke_width, stroke_fill=(0, 0, 0),
+        )
+        y += line_spacing
+    return img
 
 
 def burn_subtitles_to_video(
@@ -1094,36 +1445,119 @@ def burn_subtitles_to_video(
                       "black"）
 
     返回：dst_path。失败抛 RuntimeError，附带 ffmpeg 的 stderr 尾部。
+
+    【实现方式的修复历史】最初用 ffmpeg 的 subtitles 滤镜（-vf
+    "subtitles=..."）实现，中途先后修了盘符冒号转义、force_style 逗号
+    转义两个问题，但最终发现用户 Windows 上的 ffmpeg 构建根本没有编译
+    subtitles 滤镜（ffmpeg 报 "No such filter: 'subtitles'"——该滤镜
+    依赖 libass，是可选编译项，不少精简/静态构建会砍掉），前面两次
+    "修好了语法但还是报错"其实都是这同一个根因在不同参数形态下走了
+    ffmpeg 内部不同的报错分支，并不是真的因为语法本身有问题。
+
+    现在改用完全不依赖任何可选滤镜的方案：字幕文字用 Pillow 在 Python
+    里直接画成一张张静态图片（纯色背景 + 白字黑边），再用 ffmpeg 把
+    每张图片精确重复到该显示的时长、首尾拼接成视频、叠上音轨（具体
+    拼接写法见下方"重要"注释——踩过 concat 拼接器给图片配 duration
+    指令的一个长期未修复的 ffmpeg 上游 bug，最终改用了 concat 滤镜 +
+    每路输入各自 -loop/-t 定长这种写法）。用到的滤镜/解复用功能全部
+    是任何 ffmpeg 构建都必带的核心功能，不存在"这个构建有没有编译
+    某个可选滤镜"的不确定性，从根源上避免再次踩中同一类坑。
     """
     ffmpeg = get_ffmpeg_path()
     Path(dst_path).parent.mkdir(parents=True, exist_ok=True)
 
-    escaped_srt = _escape_ffmpeg_filter_path(str(Path(srt_path).resolve()))
-    # 字号/边距按分辨率简单换算，1280x720 时字号 28，其余分辨率按高度
-    # 等比例缩放，避免超高分辨率背景下字幕小到看不清、或低分辨率下
-    # 字幕占满半个画面。
+    srt_resolved = Path(srt_path).resolve()
+    srt_content = srt_resolved.read_text(encoding="utf-8-sig", errors="replace")
+    cues = _parse_srt_cues(srt_content)
+
     font_size = max(16, round(28 * height / 720))
     margin_v = max(20, round(40 * height / 720))
-    force_style = (
-        f"FontSize={font_size},"
-        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-        f"BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV={margin_v}"
-    )
+    bg_rgb = _hex_bg_to_rgb(bg_color)
+    font_path = _find_cjk_font()
 
+    # 按时间顺序把 [0, duration_sec] 切成连续、不重叠的片段：字幕条目
+    # 本身各占一段，条目之间/首尾的空档各补一段"只有背景、没有文字"的
+    # 片段，保证任意时刻都有画面覆盖。
+    segments: List[Tuple[float, float, Optional[str]]] = []
+    cursor = 0.0
+    for start, end, text in cues:
+        start = max(start, cursor)
+        end = max(end, start)
+        if end <= start:
+            continue  # 时间戳异常（如与前一条完全重叠）时跳过，不产生零长度片段
+        if start > cursor:
+            segments.append((cursor, start, None))
+        segments.append((start, end, text))
+        cursor = end
+    if cursor < duration_sec:
+        segments.append((cursor, duration_sec, None))
+    if not segments:
+        segments = [(0.0, max(duration_sec, 0.1), None)]
+
+    # 相同文本（含"空背景"这种 text=None）只画一次图，多个片段复用同一
+    # 张图片文件，减少 Pillow 渲染次数和磁盘占用。
+    work_dir = srt_resolved.parent
+    frame_paths: Dict[Optional[str], Path] = {}
+    for _, _, text in segments:
+        if text not in frame_paths:
+            img = _render_subtitle_frame(
+                text, width=width, height=height, bg_rgb=bg_rgb,
+                font_path=font_path, font_size=font_size, margin_v=margin_v,
+            )
+            frame_name = f"{srt_resolved.stem}_frame{len(frame_paths):04d}.png"
+            frame_path = work_dir / frame_name
+            img.save(frame_path)
+            frame_paths[text] = frame_path
+
+    # 【重要】这里特意不用 "-f concat" 拼接器给图片配 duration 指令——
+    # 这是 ffmpeg 一个长期存在、未修复的已知 bug（上游 Trac #6128，
+    # 2017 年提出至今仍未解决）：拼接器给静态图片指定 duration 时，
+    # 算出来的总时长经常是错的（实测偏差能到几十%，不是简单的取整
+    # 误差），跟具体平台/构建无关，纯粹是这个功能本身不可靠。
+    #
+    # 改用更精确可靠的写法：每个片段各自作为一路独立输入，用
+    # "-loop 1 -t <该片段时长> -i 图片" 让 ffmpeg 在解复用层面就把
+    # 每张图片精确重复/裁剪到需要的时长，再用 concat 滤镜（不是
+    # 拼接器，是 libavfilter 里的 vf_concat，零外部依赖、任何构建都
+    # 一定带）把这些已经定长的视频流首尾接起来。实测这种写法总时长
+    # 完全精确，不存在上面那个 bug。
+    input_args: List[str] = []
+    concat_filter_parts: List[str] = []
+    for i, (seg_start, seg_end, text) in enumerate(segments):
+        seg_duration = max(0.02, seg_end - seg_start)
+        input_args += [
+            "-loop", "1", "-t", f"{seg_duration:.3f}",
+            "-i", frame_paths[text].name,
+        ]
+        concat_filter_parts.append(f"[{i}:v]fps=24,format=yuv420p[v{i}]")
+    concat_inputs = "".join(f"[v{i}]" for i in range(len(segments)))
+    filter_complex = ";".join(concat_filter_parts)
+    filter_complex += f";{concat_inputs}concat=n={len(segments)}:v=1:a=0[vout]"
+
+    audio_input_index = len(segments)
     cmd = [
         ffmpeg, "-y",
-        "-f", "lavfi", "-i", f"color=c={bg_color}:s={width}x{height}:r=24",
-        "-i", str(audio_path),
-        "-vf", f"subtitles='{escaped_srt}':force_style='{force_style}'",
+        *input_args,
+        "-i", str(Path(audio_path).resolve()),
+        "-filter_complex", filter_complex,
+        "-map", "[vout]", "-map", f"{audio_input_index}:a",
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
         "-t", str(max(0.1, duration_sec)),
         "-shortest",
-        str(dst_path),
+        str(Path(dst_path).resolve()),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=1800, cwd=str(work_dir),
+    )
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg 字幕烧录失败: {result.stderr.strip()[-800:]}")
     if not Path(dst_path).exists():
         raise RuntimeError("ffmpeg 执行完成但未生成输出文件")
+
+    # 清理中间产物（逐帧 PNG），只留最终 mp4。
+    for p in frame_paths.values():
+        p.unlink(missing_ok=True)
+
     return dst_path

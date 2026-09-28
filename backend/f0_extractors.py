@@ -268,6 +268,35 @@ def extract_f0_crepe(
     return f0, t
 
 
+def _release_cuda_memory_thoroughly() -> None:
+    """
+    模型对象被置空/清出缓存之后，把显存真正还给系统。
+
+    单次 gc.collect() + empty_cache() 往往不够：模型内部的循环引用需要多轮
+    gc 才能让权重张量引用计数归零，且 CUDA 操作异步，不先 synchronize()
+    就 empty_cache()，飞行中的内核仍占着缓存块。与
+    alt_aligners._release_cuda_memory_thoroughly() 逻辑一致（此处独立内联，
+    避免 f0_extractors 反向依赖 alt_aligners）。
+    """
+    import gc
+    for _ in range(3):
+        gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def unload_crepe_model() -> bool:
     """
     释放 torchcrepe 内部缓存的模型权重（"用完即卸"设置开启时，在每次
@@ -305,14 +334,7 @@ def unload_crepe_model() -> bool:
             pass
 
     if had_model:
-        try:
-            import gc
-            gc.collect()
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
+        _release_cuda_memory_thoroughly()
         logger.info("[CREPE] 已按「用完即卸」设置释放模型")
     return had_model
 
@@ -724,13 +746,6 @@ def unload_rmvpe_model() -> bool:
     had_model = bool(_RMVPE_CACHE)
     if had_model:
         _RMVPE_CACHE.clear()
-        try:
-            import gc
-            gc.collect()
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
+        _release_cuda_memory_thoroughly()
         logger.info("[RMVPE] 已按「用完即卸」设置释放模型")
     return had_model
