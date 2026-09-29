@@ -300,6 +300,19 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     # 任务立即生效，无需重启任何进程。
     "output_timeline_files": False,
 
+    # ── 中文（普通话 cmn/zh）/ 粤语（yue）对齐结果：不转换拼音 ──────────────
+    # False → 默认：对齐结果（LAB）里每个字用拼音 / 粤拼音节标注
+    #         （如 "ni hao" / "nei hou"），与改造前行为完全一致。
+    # True  → 对齐结果（LAB）里每个字保留原始汉字（如 "你 好"），不再转换
+    #         成拼音 / 粤拼。仅对普通话、粤语两种语言有效，其它语言不受影响。
+    #
+    # 说明：拼音 / 粤拼仍会在内部用于判断声母边界（"-" 辅音起始标记）和
+    # 按音节权重拆分多字词的时长，只是最终写入 LAB 的标签换回汉字。
+    # 所有对齐后端（MFA / WhisperX / Qwen3-FA / Qwen3-ASR / NeMo）最终都经过
+    # mfa_processor 的 _process_zh_words / _process_yue_words，因此一个开关
+    # 全部生效。实时生效，无需重启任何进程。
+    "no_pinyin_after_align": False,
+
     # ── subtitle_import.py 字幕跟读：跳过分割音频 ──────────────────────────
     # 仅影响"字幕跟读"（上传整段音频 + SRT/LRC，按字幕时间轴切分音频固定
     # 交给 Qwen3-ForcedAligner 逐段对齐）这一个功能，不影响其它任何对齐
@@ -399,6 +412,7 @@ def save_settings(new_settings: Dict[str, object]) -> Dict[str, object]:
         current["qwen3_tts_x_vector_only_default"] = bool(current.get("qwen3_tts_x_vector_only_default"))
 
         current["output_timeline_files"] = bool(current.get("output_timeline_files"))
+        current["no_pinyin_after_align"] = bool(current.get("no_pinyin_after_align"))
 
         # Qwen3-FA「按句子分段对齐」总开关，以及与其构成父子关系的
         # Qwen3-ASR 粗测预处理：bool 开关 + 一组 VAD 数值参数（非法/缺失
@@ -844,3 +858,22 @@ def get_output_timeline_files_enabled() -> bool:
         return bool(settings.get("output_timeline_files"))
     except Exception:
         return bool(DEFAULT_SETTINGS["output_timeline_files"])
+
+
+def get_no_pinyin_after_align() -> bool:
+    """
+    供 mfa_processor.py 的 _process_zh_words() / _process_yue_words() 使用：
+    实时读取"中文/粤语对齐后不转换拼音"开关。
+
+    为 True 时，普通话 / 粤语的 LAB 标签保留原始汉字而不是拼音 / 粤拼。
+    与 get_output_timeline_files_enabled() 等同类只读设置一样直接读盘、不做
+    缓存（每次对齐任务只在 _process_*_words 入口读取一次，成本可忽略），
+    保证设置页面保存后下一次对齐任务立即生效，无需重启任何进程。
+
+    读取失败时安全回退到默认值 False（沿用拼音标注）。
+    """
+    try:
+        settings = load_settings()
+        return bool(settings.get("no_pinyin_after_align"))
+    except Exception:
+        return bool(DEFAULT_SETTINGS["no_pinyin_after_align"])

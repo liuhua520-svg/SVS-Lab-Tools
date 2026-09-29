@@ -330,6 +330,44 @@ class MFAProcessor:
         """文本片段 -> 粤拼音节列表"""
         return self._normalize_jyutping(self._text_to_jyutping(segment))
 
+    # ---------------------------------------------------------------------
+    # 「对齐后不转换拼音」开关（仅普通话 zh / 粤语 yue）
+    # ---------------------------------------------------------------------
+    @staticmethod
+    def _no_pinyin_after_align_enabled() -> bool:
+        """实时读取设置页面的「对齐后不转换拼音」开关；读取失败一律视为关闭。"""
+        try:
+            import app_settings
+            return bool(app_settings.get_no_pinyin_after_align())
+        except Exception:
+            return False
+
+    def _hanzi_labels_for_word(self, clean_mark: str, count: int,
+                               lang: str = 'zh') -> Optional[List[str]]:
+        """
+        取出一个词里与 `count` 个音节一一对应的汉字，用来替换 LAB 里的
+        拼音 / 粤拼标签。拿不到（数量对不上）时返回 None，调用方应回退
+        为原来的拼音 / 粤拼标注，保证不会因为这个开关让对齐结果错位。
+
+        zh  ：音节由 pypinyin 生成，只有能转出拼音的字符才占一个音节
+              （字母、数字等会被 errors="ignore" 丢掉），这里用同样的
+              判断筛出对应汉字。
+        yue ：_process_yue_words 按"词内字符数"切分音节序列，因此汉字
+              就是 clean_mark 里逐字对应的字符。
+        """
+        if count <= 0:
+            return None
+        if lang == 'yue':
+            chars = list(clean_mark)
+        else:
+            chars = [c for c in clean_mark
+                     if lazy_pinyin(c, style=Style.NORMAL, errors="ignore")]
+        if len(chars) < count:
+            return None
+        if lang != 'yue' and len(chars) != count:
+            return None
+        return chars[:count]
+
     # =====================================================================
     # 语言/词语类型检测
     # =====================================================================
@@ -730,17 +768,24 @@ class MFAProcessor:
         syl_end: int,
         syl: str,
         phone_items: List[Tuple[int, int, str]],
-        lang: str = 'zh'
+        lang: str = 'zh',
+        label: Optional[str] = None,
     ) -> List[Tuple[int, int, str]]:
-        """生成单个音节的 LAB 条目"""
+        """生成单个音节的 LAB 条目
+
+        label : 可选的显示标签。「对齐后不转换拼音」开启时传入原始汉字——
+            声母边界（"-" 标记）仍按 syl（拼音/粤拼）判断，只是写入 LAB 的
+            标签换成 label。为 None 时沿用 syl，行为与改造前完全一致。
+        """
+        shown = label if label else syl
         if self._has_con_onset(syl, lang):
             con_boundary = self._get_con_boundary(syl_start, syl_end, phone_items)
             return [
                 (syl_start, con_boundary, "-"),
-                (con_boundary, syl_end, syl),
+                (con_boundary, syl_end, shown),
             ]
         else:
-            return [(syl_start, syl_end, syl)]
+            return [(syl_start, syl_end, shown)]
 
     def _syllable_anchor_candidates(self, syl: str) -> List[str]:
         """生成音节的可匹配候选"""
@@ -846,6 +891,8 @@ class MFAProcessor:
         target_syls = self._normalize_no_tone_pinyin(self._text_to_pinyin_notone(text))
         lines: List[str] = []
         syl_index = 0
+        # 「对齐后不转换拼音」：开启时 LAB 标签写回原始汉字（每次调用只读一次设置）
+        keep_hanzi = self._no_pinyin_after_align_enabled()
 
         for interval in word_tier:
             mark = getattr(interval, "mark", getattr(interval, "text", ""))
@@ -887,7 +934,9 @@ class MFAProcessor:
 
             if self._is_digit_char(mark):
                 syl = self.DIGIT_PINYIN.get(mark.strip(), mark)
-                for es, ee, el in self._make_con_entries(start, end, syl, phone_items, 'zh'):
+                for es, ee, el in self._make_con_entries(
+                        start, end, syl, phone_items, 'zh',
+                        label=(mark.strip() if keep_hanzi else None)):
                     lines.append(f"{es} {ee} {el}")
                 syl_index = min(syl_index + 1, len(target_syls))
                 continue
@@ -906,8 +955,17 @@ class MFAProcessor:
                 current_syls = mark_syls
 
             syl_lines = self._distribute_syllables_in_word(start, end, current_syls, None, 'zh')
-            for s, e, syl in syl_lines:
-                for es, ee, el in self._make_con_entries(s, e, syl, phone_items, 'zh'):
+            hanzi = None
+            if keep_hanzi:
+                hanzi = self._hanzi_labels_for_word(clean_mark, len(syl_lines), 'zh')
+                if hanzi is None:
+                    logger.warning(
+                        f"[zh] 「对齐后不转换拼音」：词 '{clean_mark}' 的汉字数与音节数对不上，"
+                        "该词回退为拼音标注。"
+                    )
+            for idx, (s, e, syl) in enumerate(syl_lines):
+                shown = hanzi[idx] if hanzi else None
+                for es, ee, el in self._make_con_entries(s, e, syl, phone_items, 'zh', label=shown):
                     lines.append(f"{es} {ee} {el}")
 
         return lines
@@ -1324,6 +1382,8 @@ class MFAProcessor:
         target_syls = self._normalize_jyutping(self._text_to_jyutping(text))
         lines: List[str] = []
         syl_index = 0
+        # 「对齐后不转换拼音」：开启时 LAB 标签写回原始汉字（每次调用只读一次设置）
+        keep_hanzi = self._no_pinyin_after_align_enabled()
 
         for interval in word_tier:
             mark = getattr(interval, "mark", getattr(interval, "text", ""))
@@ -1361,7 +1421,9 @@ class MFAProcessor:
 
             if self._is_digit_char(mark):
                 syl = self.DIGIT_JYUTPING.get(mark.strip(), mark)
-                for es, ee, el in self._make_con_entries(start, end, syl, phone_items, 'yue'):
+                for es, ee, el in self._make_con_entries(
+                        start, end, syl, phone_items, 'yue',
+                        label=(mark.strip() if keep_hanzi else None)):
                     lines.append(f"{es} {ee} {el}")
                 syl_index = min(syl_index + 1, len(target_syls))
                 continue
@@ -1387,8 +1449,17 @@ class MFAProcessor:
                 continue
 
             syl_lines = self._distribute_syllables_in_word(start, end, current_syls, None, 'yue')
-            for s, e, syl in syl_lines:
-                for es, ee, el in self._make_con_entries(s, e, syl, phone_items, 'yue'):
+            hanzi = None
+            if keep_hanzi:
+                hanzi = self._hanzi_labels_for_word(clean_mark, len(syl_lines), 'yue')
+                if hanzi is None:
+                    logger.warning(
+                        f"[yue] 「对齐后不转换拼音」：词 '{clean_mark}' 的汉字数与音节数对不上，"
+                        "该词回退为粤拼标注。"
+                    )
+            for idx, (s, e, syl) in enumerate(syl_lines):
+                shown = hanzi[idx] if hanzi else None
+                for es, ee, el in self._make_con_entries(s, e, syl, phone_items, 'yue', label=shown):
                     lines.append(f"{es} {ee} {el}")
 
         return lines
