@@ -457,6 +457,22 @@
         <el-divider />
 
         <div class="section-heading">
+          <span>🀄 {{ t('settings.noPinyinSectionTitle') }}</span>
+        </div>
+        <p class="page-subtitle">{{ t('settings.noPinyinSectionSubtitle') }}</p>
+
+        <el-alert type="success" :closable="false" show-icon class="no-restart-hint">
+          <template #title>{{ t('settings.tuningNoRestartHint') }}</template>
+        </el-alert>
+
+        <el-form-item :label="t('settings.noPinyinAfterAlign')">
+          <el-switch v-model="form.no_pinyin_after_align" />
+          <p class="help-text">{{ t('settings.noPinyinAfterAlignHint') }}</p>
+        </el-form-item>
+
+        <el-divider />
+
+        <div class="section-heading">
           <span>🧾 {{ t('settings.timelineFilesSectionTitle') }}</span>
         </div>
         <p class="page-subtitle">{{ t('settings.timelineFilesSectionSubtitle') }}</p>
@@ -610,6 +626,10 @@ interface AppSettings {
   // 起止时间、原始文本、以及最终音标（起止时间 + 音标）。两个功能共用
   // 这一个开关。
   output_timeline_files: boolean
+  // ── 中文（普通话/粤语）对齐后不转换拼音（默认关闭，"实时生效，无需重启"）──
+  // 开启后，普通话 / 粤语的对齐结果（LAB）保留原始汉字，不再转换为拼音 / 粤拼；
+  // 仅对这两种语言有效，其它语言不受影响。
+  no_pinyin_after_align: boolean
 }
 
 type RestartStatus = 'restarted' | 'not_running' | 'failed'
@@ -699,6 +719,7 @@ const form = ref<AppSettings>({
   ...TTS_SPLIT_OPTION_DEFAULTS,
   ...SUBTITLE_IMPORT_SPLIT_DEFAULTS,
   output_timeline_files: false,
+  no_pinyin_after_align: false,
 })
 
 // 「按句子分段对齐」总开关一旦被用户在表单里关闭，立即强制同步关闭
@@ -860,6 +881,7 @@ const applySettingsToForm = (settings: Record<string, any> | undefined) => {
     tts_disable_segment_len_split: !!settings?.tts_disable_segment_len_split,
     subtitle_import_skip_split_every_n: skipSplitN,
     output_timeline_files: !!settings?.output_timeline_files,
+    no_pinyin_after_align: !!settings?.no_pinyin_after_align,
   }
 }
 
