@@ -2283,6 +2283,18 @@ def pipeline_f0_only():
 
 def run_dialogue_batch_job(job_id: str, boxes, input_mode: str = "audio", **kwargs):
     """
+    对话文本框批量处理后台任务入口：把整个任务（含 TTS 跟读模式下逐框调用的
+    tts_processor.align_segments，以及随后的 pipeline.process_dialogue_batch）
+    包进「用完即卸」批量作用域，让对齐模型在整批对齐结束后才卸载一次，
+    而不是每个对话框各卸载/重载一次。详见 unload_scope.py。
+    """
+    from unload_scope import defer_unloads
+    with defer_unloads():
+        return _run_dialogue_batch_job_impl(job_id, boxes, input_mode=input_mode, **kwargs)
+
+
+def _run_dialogue_batch_job_impl(job_id: str, boxes, input_mode: str = "audio", **kwargs):
+    """
     对话文本框批量处理后台任务。
 
     input_mode == "tts" 时，boxes 里标记了 "tts" 信息（讲述人/音色/语速/

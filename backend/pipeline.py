@@ -801,7 +801,23 @@ class AudioProcessingPipeline:
     # 对话文本框批量处理（功能 3）
     # ═════════════════════════════════════════════════════════════════════
 
-    def process_dialogue_batch(
+    def process_dialogue_batch(self, *args, **kwargs) -> Dict:
+        """
+        对话文本框批量处理入口（参数与文档见 _process_dialogue_batch_impl）。
+
+        这里只做一件事：把整个批处理包进 defer_unloads() 作用域。
+        「用完即卸」开启时，批内每个对话框对齐/F0 结束后不再各自卸载模型，
+        而是：
+          - 对齐模型（Qwen3-ASR / Qwen3-FA / WhisperX / NeMo-FA）：全部对话框
+            对齐完成后卸载一次（见 impl 中 F0 阶段开始前的 flush）；
+          - F0 模型（RMVPE / CREPE）：全部音轨 F0 提取完成后卸载一次；
+          - 取消 / 异常 / 提前返回：退出作用域时兜底卸载全部。
+        """
+        from unload_scope import defer_unloads
+        with defer_unloads():
+            return self._process_dialogue_batch_impl(*args, **kwargs)
+
+    def _process_dialogue_batch_impl(
         self,
         boxes: List[Dict],
         language: str = "cmn",
@@ -1236,6 +1252,12 @@ class AudioProcessingPipeline:
         # 模型）已全部结束，build_multitrack_project 内部会对每个音轨做
         # F0 提取（可能是 CREPE/RMVPE，同样需要 CUDA）——紧邻执行前先清理，
         # 避免显存释放/申请窗口重叠。
+        #
+        # 【用完即卸】批量作用域内被推迟的对齐模型卸载，在这里统一执行一次：
+        # 所有对话框的对齐都已结束，模型不会再被用到；必须先于 F0 提取卸载，
+        # 让出显存给 RMVPE / CREPE（小显存显卡上两者不能同时驻留）。
+        from unload_scope import flush_deferred_unloads, GROUP_ALIGNER
+        flush_deferred_unloads(GROUP_ALIGNER)
         _release_gpu_resources_before_f0()
 
         _stage("f0", "start")

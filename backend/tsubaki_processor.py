@@ -1461,12 +1461,15 @@ class TsubakiProcessor:
                 logger.debug("读取「用完即卸」开关失败，跳过 RMVPE/CREPE 卸载检查: %s", e)
                 unload_settings = {}
 
+            # 批量作用域（对话文本框批量处理）内推迟到整批 F0 提取结束后统一
+            # 卸载一次；作用域外立即卸载，行为与改造前一致。
+            from unload_scope import unload_or_defer, GROUP_F0
             if method == "crepe" and unload_settings.get("unload_crepe_after_task"):
                 from f0_extractors import unload_crepe_model
-                unload_crepe_model()
+                unload_or_defer(GROUP_F0, "crepe", unload_crepe_model)
             elif method == "rmvpe" and unload_settings.get("unload_rmvpe_after_task"):
                 from f0_extractors import unload_rmvpe_model
-                unload_rmvpe_model()
+                unload_or_defer(GROUP_F0, "rmvpe", unload_rmvpe_model)
 
     # ----------------------------
     # SVP 生成（完整修复版）

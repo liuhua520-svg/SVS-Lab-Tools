@@ -2349,7 +2349,8 @@ class WhisperXAligner(AltAlignerBase):
             # Qwen3ASRAligner/Qwen3ForcedAligner 侧的 finally 写法保持
             # 一致的"每次单个任务处理完就立刻卸载"语义。
             if _get_unload_after_task_settings().get("unload_whisperx_after_task"):
-                self._call_unload()
+                from unload_scope import unload_or_defer, GROUP_ALIGNER
+                unload_or_defer(GROUP_ALIGNER, "whisperx", self._call_unload)
 
     # ── 本地音频加载（用于能量法静音边界精修）────────────────────────────────
     @staticmethod
@@ -2972,7 +2973,10 @@ def maybe_unload_qwen3_forced_aligner_after_task() -> None:
         统一调一次（不是每句都调）。
     """
     if _get_unload_after_task_settings().get("unload_qwen3_aligner_after_task"):
-        _qwen3_unload_fa_model()
+        # 批量作用域（对话文本框批量处理）内：推迟到整批对齐结束后统一卸载一次；
+        # 作用域外：立即卸载，行为与改造前一致。
+        from unload_scope import unload_or_defer, GROUP_ALIGNER
+        unload_or_defer(GROUP_ALIGNER, "qwen3_fa", _qwen3_unload_fa_model)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -3284,7 +3288,8 @@ class Qwen3ASRAligner(AltAlignerBase):
             # 下一次调用 align() 时 _qwen3_load_asr_model() 会重新按需
             # 加载，用户无需任何额外操作。
             if _get_unload_after_task_settings().get("unload_qwen3_asr_after_task"):
-                _qwen3_unload_asr_model()
+                from unload_scope import unload_or_defer, GROUP_ALIGNER
+                unload_or_defer(GROUP_ALIGNER, "qwen3_asr", _qwen3_unload_asr_model)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 6b. Qwen3-ForcedAligner 全局事后偏移校正
@@ -5960,7 +5965,8 @@ class NeMoForcedAligner(AltAlignerBase):
             # 提前 return 的"缺少参考文本"分支不同——那时还没有调用过
             # 服务、不涉及任何已加载的模型，不需要触发卸载）。
             if text and text.strip() and _get_unload_after_task_settings().get("unload_nemo_aligner_after_task"):
-                self._call_unload()
+                from unload_scope import unload_or_defer, GROUP_ALIGNER
+                unload_or_defer(GROUP_ALIGNER, "nemo_aligner", self._call_unload)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
