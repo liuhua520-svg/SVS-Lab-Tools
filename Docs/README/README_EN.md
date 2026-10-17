@@ -1,95 +1,88 @@
-# SVS Lab Aligner
+# SVS Lab Tools
 
-**Singing Voice Synthesis Lab Aligner**
+**Singing Voice Synthesis Lab Tools**
 
-A completely standalone web application for Singing Voice Synthesis (SVS) workflows, used to convert input audio + text into project files usable in singing voice synthesis software.
+A standalone web application for singing voice synthesis (SVS) workflows. It converts “input audio + text” into project files that can be used in singing voice synthesis software.
 
-Its goal isn't to create TTS (Text-to-Speech) or replace the vocal synthesis engine itself, but rather to act as a bridge, helping singers "pretend to be good at speaking":
+The goal is not to perform SVS or replace the singing voice synthesis engine itself. Instead, the app acts as a bridge that helps singing voicebanks “pretend to be good at speaking”:
 
-- First, use **[MFA](https://github.com/MontrealCorpusTools/Montreal-Forced-Aligner)** to automatically align audio and text, generating a `.lab` file.
-
-- Then, use **[PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)** to extract the F0 pitch.
-
-- Finally, output the vocal synthesis project file for further editing and playback within the software.
+- First, use **[Qwen3-FA](https://github.com/QwenLM/Qwen3-ASR)** to automatically align the audio and text and generate a `.lab` file.
+- Next, use **[PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)** to extract F0 pitch data.
+- Finally, export a singing voice synthesis project file so it can be further edited and played in the target software.
 
 ---
 
-## Language
+## Languages
 
-[**简体中文**](../../README.md) | [**繁體中文**](./README_ZH_TW.md) | [**English**](./README_EN.md) | [**日本語**](./README_JP.md) | [**한국어**](./README_KR.md) 
+[**简体中文**](../../README.md) | [**繁體中文**](./README_ZH_TW.md) | [**English**](./README_EN.md) | [**日本語**](./README_JP.md) | [**한국어**](./README_KR.md)
 
----
-
-## ✨ Main Functions
-
-* **Annotation Only (Fast)**
-Performs only MFA automatic alignment, quickly generating `.lab` files.
-
-* **Complete Processing (Annotation + F0 + Project File)**
-Automatically completes annotation, pitch extraction, and outputs a vocal synthesis project file.
-
-* **Project Generation Only (WAV + LAB)**
-Directly generates project files based on existing `WAV + LAB` files, eliminating the need for re-annotation.
-
-* **Supports Multiple Pitch Extraction Algorithms**
-Built-in **PyWORLD, CREPE, RMVPE** three F0 extraction methods, allowing selection of different algorithms based on specific needs.
-
-* **Supports Continuous Pitch Writing**
-Allows the option to generate only pure notes or write continuous F0 curves into the project, preserving more realistic pitch variations.
-
-* **Supports Long Audio Processing**
-Capable of processing long audio files, suitable for complete songs, long speech sequences, and other scenarios.
-
-* **Supports multiple text conversion methods**
-In "Generate Project Only (WAV + LAB)" mode, you can choose:
-
-* No conversion
-
-* Merge consonants
-
-* Hiragana
-
-* Katakana
-
-* **Supports multiple audio formats**
-`WAV / MP3 / FLAC / M4A / AAC`
-
-* **Supports multilingual text alignment**
-
-* **Supports LAB file export**
-
-* **Supports Multiple Alignment Algorithms**
-It includes four built-in alignment methods: MFA, WhisperX, Qwen3-ASR, and Qwen3-FA, allowing users to choose the appropriate algorithm based on their specific needs.
-
-* **Provides a simple and easy-to-use web interface**
+📐 Want to learn how the code is organized internally, including the microservices architecture, module responsibilities, core algorithms, and known technical debt?
+See [**ARCHITECTURE.md — Technical Architecture and Code Analysis Report**](../ARCHITECTURE.md).
 
 ---
 
-## 📌 Applicable Scenarios
+## ✨ Key Features
 
-- You already have vocal synthesis or TTS audio and want to quickly generate annotations.
+* **Annotation Only (Fast)**  
+  Runs only Qwen3-FA automatic alignment to quickly generate `.lab` files.
 
-- You want to import your speech project into vocal synthesis software for further editing.
+* **Full Processing (Annotation + F0 + Project File)**  
+  Automatically performs annotation and pitch extraction, then outputs a singing voice synthesis project file.
 
-- You want to batch generate `.lab`, F0, and project files.
+* **Generate Project Only (WAV + LAB)**  
+  Generates a project file directly from existing `WAV + LAB/MIDI` files without repeating the annotation process.
 
-- You want to create an editable intermediate layer between "speaking" and "singing".
+* **Multiple Pitch Extraction Algorithms**  
+  Includes three F0 extraction methods: **PyWORLD, CREPE, and RMVPE**, allowing you to choose an algorithm for your needs.
+
+* **Continuous Pitch Data Support**  
+  Choose to generate clean, discrete notes only, or write a continuous F0 curve into the project to preserve more natural pitch variation.
+
+* **Long Audio Support**  
+  Processes long audio files, making it suitable for full songs, long-form speech, and similar use cases.
+
+* **Multiple Text Conversion Options**  
+  In **Generate Project Only (WAV + LAB/MIDI)** mode, you can choose:
+
+  * No conversion
+  * Merge consonants
+  * Hiragana
+  * Katakana
+
+* **Multiple Audio Formats**  
+  `WAV / MP3 / FLAC / M4A / AAC / OGG`
+
+* **Multilingual Text Alignment**
+
+* **LAB File Export**
+
+* **Multiple Alignment Algorithms**  
+  Includes five alignment options: **Montreal Forced Aligner, WhisperX, Qwen3-ASR-1.7B, Qwen3-ForcedAligner-0.6B, and NeMo Forced Aligner**. Choose the method that best fits your needs.
+
+* **A Simple, Easy-to-Use Web Interface**
+
+* **Batch Project Generation**  
+  Convert multiple LAB / MIDI / text + WAV inputs into project files in batches.
+
+---
+
+## 📌 Use Cases
+
+- You already have singing voice synthesis or TTS audio and want to generate annotations quickly.
+- You want to import a speech project into singing voice synthesis software for further editing.
+- You want to batch-generate `.lab` files, F0 data, and project files.
+- You want to create an editable intermediate layer between “speaking” and “singing.”
 
 ---
 
 ## 🛠️ How It Works
 
-1. Input audio file and text.
-
-2. Use **[MFA](https://github.com/MontrealCorpusTools/Montreal-Forced-Aligner)** for automatic time alignment.
-
-3. Generate `.lab` files. Annotation Files
-
-4. Extract F0 pitch using **[PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)**
-
-5. Output project file according to processing mode
-
-6. Import the result into vocal synthesis software for further use
+1. Provide an audio file and its text.
+2. Use **[Qwen3-FA](https://github.com/QwenLM/Qwen3-ASR)** for automatic time alignment.
+3. Generate a `.lab` annotation file.
+4. Use **[PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)** to extract F0 pitch data.
+5. Output a project file according to the selected processing mode.
+6. Import the result into singing voice synthesis software for further use.
 
 ---
 
@@ -100,182 +93,155 @@ It includes four built-in alignment methods: MFA, WhisperX, Qwen3-ASR, and Qwen3
 ```batch
 setup.bat
 run.bat
-
 ```
 
 ### Linux / Mac
 
-```Linux / Mac
+```bash
 chmod +x setup.sh run.sh
 ./setup.sh
 ./run.sh
 ```
 
-Access after startup:
+After launching, open:
 
+```text
+http://127.0.0.1:5850
 ```
-http://localhost:5000
 
-```
 ## 🔧 Processing Modes
 
-### 1. Annotation Only (Quick)
+### 1. Annotation Only (Fast)
 
-Performs only automatic MFA annotation, generating .lab files.
+Runs Qwen3-FA automatic annotation only and generates a `.lab` file.
 
-### 2. Complete Processing (Annotations + F0 + Project File)
+### 2. Full Processing (Annotation + F0 + Project File)
 
-Perform MFA alignment, F0 extraction, and generate the project file.
+Runs Qwen3-FA alignment and F0 extraction, then generates a project file.
 
 ### 3. Generate Project Only (WAV + LAB)
 
-Use existing WAV + LAB files to generate the project file; the complete annotation process is not repeated.
+Generates a project file from existing WAV + LAB files without repeating the full annotation process.
 
 ### 📋 System Requirements
 
-Python 3.8+
+- Python 3.8+
+- Node.js 16+
+- 4 GB RAM
+- 1 GB of available disk space
 
-Node.js 16+
+## 📖 Workflow
 
-4GB RAM
+### Annotation Only (Fast)
 
-1GB Available Disk Space
+1. Open the application.
+2. Upload an audio file.
+3. Enter the text.
+4. Select the language.
+5. Click **Start Annotation**.
+6. Download the generated `.lab` file.
 
-### 🔧 Install MFA
+### Full Processing (Annotation + F0 + Project File)
 
-```
-pip install montreal-forced-aligner
-
-```
-# Download Language Models
-
-```
-mfa model download acoustic cmn # Chinese
-mfa model download acoustic eng # English
-mfa model download acoustic jpn # Japanese
-mfa model download acoustic kor # Korean
-mfa model download acoustic yue # Cantonese
-
-```
-
-## 📖 Usage Flow
-
-### Annotation Only (Quick)
-
-1. Open this application
-
-2. Upload audio file
-
-3. Enter text
-
-4. Select language
-
-5. Click Start Annotation
-
-6. Download the generated .lab file
-
-### Complete Processing (Annotation + F0 + Project Files)
-
-1. Upload audio file
-
-2. 1. Input Text
-
-2. Select Language
-
-3. Select Processing Mode as "Full Processing"
-
-4. Click Start Processing
-
-5. Download the Generated Project File
+1. Upload an audio file.
+2. Enter the text.
+3. Select the language.
+4. Set the processing mode to **Full Processing**.
+5. Click **Start Processing**.
+6. Download the generated project file.
 
 ### Generate Project Only (WAV + LAB)
 
-1. Prepare WAV and the corresponding LAB file
+1. Prepare a WAV file and its corresponding LAB file.
+2. Select **Generate Project Only**.
+3. Upload the WAV + LAB files.
+4. Click **Generate**.
+5. Download the project file.
 
-2. Select "Generate Project Only"
+### 📝 Output
 
-3. Upload WAV + LAB
-
-4. Click Generate
-
-5. Download Project File
-
-### 📝 Output Content
 Depending on the processing mode, the application can output:
 
-- .lab Time-aligned file
-
-- F0 Pitch Information
-
-- Vocal Synthesis Project File
+- `.lab` time-alignment files
+- F0 pitch data
+- Singing voice synthesis project files
 
 ### 📁 Directory Structure
 
+```text
+backend/                 Backend: four Flask processes (main service app.py :5850,
+                         qwen3_server.py :5851, nemo_server.py :5852,
+                         qwen3tts_server.py :5853). Each runs in its own virtual
+                         environment and communicates over local HTTP to avoid
+                         dependency conflicts.
+frontend/                Frontend UI (Vue 3 + Element Plus + TypeScript)
+launcher.py              Process orchestration, system tray, and native window
+                         for packaged releases
+setup.bat / run.bat       Windows environment setup / launch scripts
+setup.sh / run.sh         Linux / Mac environment setup / launch scripts
+Docs/ARCHITECTURE.md      Detailed technical architecture and code analysis report
 ```
-backend/    Backend services
-frontend/   Front-end interface
-setup.bat   Windows environment installation script
-run.bat     Windows startup scripts
-setup.sh    Linux / Mac environment installation script
-run.sh      Linux / Mac startup scripts
 
-```
+> For a more detailed module-by-module directory guide, including what each file does and how the files interact, see
+> [ARCHITECTURE.md](../ARCHITECTURE.md#3-目录结构详解).
 
 ## ⚠️ Disclaimer
 
-This project is intended for the following purposes:
+This project is intended for:
 
-- Automatic Audio Alignment (MFA)
-
-- Pitch Extraction (PyWORLD / F0)
-
-- Generation of Vocal Synthesis Project Files
+- Automatic audio alignment (Qwen3-FA)
+- Pitch extraction (PyWORLD / F0)
+- Singing voice synthesis project-file generation
 
 ---
 
-### 📌 Functional Limitations
+### 📌 Limitations
 
-This tool is only intended as an "SVS Workflow Auxiliary Tool" and does not have the following capabilities:
+This tool is only an **SVS workflow assistant**. It does not:
 
-- It does not perform speech synthesis (TTS / SVS)
-
-- It does not train or modify voicebank models
-
-- It does not replace any vocal synthesis software
+- Perform singing voice synthesis (SVS)
+- Train or modify voicebank models
+- Replace any singing voice synthesis software
 
 ---
 
-### 📁 Responsibility for Use
+### 📁 User Responsibility
 
-The results generated using this tool (including `.lab`, F0 data, and project files):
+Users are responsible for the results generated by this tool, including `.lab` files, F0 data, and project files:
 
-- The user is solely responsible for the legality and intended use of the results.
-
-- Please confirm the license scope of the audio and voicebank used before use.
-
-- If third-party voicebanks are involved, please comply with their official terms of use.
+- Users are responsible for ensuring their use of the results is lawful and appropriate.
+- Before use, confirm the licensing scope of the audio and voicebanks involved.
+- If third-party voicebanks are involved, follow their official terms of use.
 
 ---
 
-### 🎭 Voicebank and Annotation Notes
+### 🎭 Voicebank and Attribution Notes
 
-If the voicebank or synthesis system requires attribution, please annotate according to the corresponding license (whether to indicate acting guidance depends on whether the sound in the converted voicebank file is identified as having the characteristics of the original sample; if it is, please annotate according to the corresponding license). For example:
+If a voicebank or synthesis system requires attribution, provide it according to the applicable terms. Whether credit for voice direction is required depends on whether the voice in the voicebank used in the generated project file is recognized as retaining characteristics of the original sample. If those characteristics are identifiable, provide attribution as required by the applicable terms. Examples:
 
-- "Voicebank used: XXX"
-
-- "Acting guidance: XXX"
+- “Voicebank used: XXX”
+- “Voice direction: XXX”
 
 ---
 
-### 📌 Copyright Notice
+### 📌 Copyright
 
-This project does not claim ownership of user-input data or generated content.
+This project does not claim ownership of user-provided input data or generated content.
 
-Data copyright belongs to the user, depending on whether the original sample used (referring to the sound in the converted voicebank file) is identified as having the characteristics of the original sample. If a third-party original sample is identified as having the characteristics of the original sample, it may be considered a derivative work of that third party.
+Copyright in the data belongs to the user, subject to whether the voice in the voicebank used after converting the original sample into a project file is recognized as retaining characteristics of that original sample. If a third-party original sample is identifiable in the result, the result may be considered a derivative work of that third party.
 
 ---
 
 ## 📝 License
-MIT License
 
-Including files that are not "software" (only the original parts are valid).
+The software portion of this project, including source code and other files that form part of the software, is licensed under the **MIT License**.
+
+Unless otherwise stated, author-created non-software content in this project—such as original documentation, examples, explanatory text, and other non-software works—is dedicated to the public domain under **CC0 1.0 Universal**.
+
+Third-party models, dictionaries, voicebanks, datasets, third-party software, and derivative files remain subject to their respective licenses or authorization terms. The MIT License and CC0 1.0 Universal used by this project do not change the original licensing terms of such third-party content.
+
+**License scope:**
+
+* Software and source code: MIT License
+* Author-created non-software content: CC0 1.0 Universal
+* Third-party content: governed by its own license or authorization terms
