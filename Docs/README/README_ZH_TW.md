@@ -1,82 +1,87 @@
-# SVS Lab Aligner
+  # SVS Lab Tools
 
-**Singing Voice Synthesis Lab Aligner**
+**Singing Voice Synthesis Lab Tools**
 
-一個完全獨立的 Web 應用程序，面向歌聲合成（SVS）工作流程，用於將「輸入音訊 + 文字」轉換為可在歌聲合成軟體中使用的工程檔案。
+一個完全獨立的 Web 應用程式，面向歌聲合成（SVS）工作流，用於把“輸入音訊 + 文本”轉換為可在歌聲合成軟體中使用的工程檔案。
 
-它的目標不是做 TTS，也不是替代歌聲合成引擎本身，而是作為一座橋樑，幫助歌姬「假裝擅長說話」：
+它的目標不是做 SVS，也不是替代歌聲合成引擎本身，而是作為一座橋梁，幫助歌姬“假裝擅長說話”：
 
-- 先用 **[MFA](https://github.com/MontrealCorpusTools/Montreal-Forced-Aligner)** 將音訊與文字自動對齊，產生 `.lab`
-- 再用 **[PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)** 擷取 F0 音高
-- 最後輸出歌聲合成工程文件，方便在軟體中繼續編輯播放
+- 先用 **[Qwen3-FA](https://github.com/QwenLM/Qwen3-ASR)** 將音訊與文本自動對齊，生成 `.lab`
+- 再用 **[PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)** 提取 F0 音高
+- 最後輸出歌聲合成工程檔案，便於在軟體中繼續編輯和播放
 
 ---
 
 ## 語言（Language）
 
-[**简体中文**](../../README.md) | [**繁體中文**](./README_ZH_TW.md) | [**English**](./README_EN.md) | [**日本語**](./README_JP.md) | [**한국어**](./README_KR.md) 
+[**簡體中文**](./README.md) | [**繁體中文**](./Docs/README/README_ZH_TW.md) | [**English**](./Docs/README/README_EN.md) | [**日本語**](./Docs/README/README_JP.md) | [**한국어**](./Docs/README/README_KR.md) 
+
+📐 想了解程式碼內部是怎麼組織的（微服務架構、模組職責、核心演算法、已知技術債）？
+請看 [**Docs/ARCHITECTURE.md — 技術架構與程式碼剖析報告**](./Docs/ARCHITECTURE.md)。
 
 ---
 
 ## ✨ 主要功能
 
 * **僅標註（快速）**
- 只執行 MFA 自動對齊，快速產生 `.lab`。
+  只執行 Qwen3-FA 自動對齊，快速生成 `.lab`。
 
-* **完整處理（標註 + F0 + 工程文件）**
- 自動完成標註、音高提取，並輸出歌聲合成工程檔。
+* **完整處理（標註 + F0 + 工程檔案）**
+  自動完成標註、音高提取，並輸出歌聲合成工程檔案。
 
-* **僅產生工程（WAV + LAB）**
- 基於已有的 `WAV + LAB` 直接產生工程文件，無需重新標註。
+* **僅生成工程（WAV + LAB）**
+  基於已有的 `WAV + LAB/MIDI` 直接生成工程檔案，無需重新標註。
 
-* **支援多種音高擷取演算法**
- 內建 **PyWORLD、CREPE、RMVPE** 三種 F0 擷取方式，可依不同需求選擇不同演算法。
+* **支援多種音高提取演算法**
+  內建 **PyWORLD、CREPE、RMVPE** 三種 F0 提取方式，可根據不同需求選擇不同演算法。
 
 * **支援連續音高寫入**
- 可選擇僅產生純淨音符，也可將連續 F0 曲線寫入工程，保留更真實的音高變化。
+  可選擇僅生成純淨音符，也可將連續 F0 曲線寫入工程，保留更加真實的音高變化。
 
-* **支援長音頻處理**
- 能夠處理長時間音頻，適用於完整歌曲、長篇語音等場景。
+* **支援長音訊處理**
+  能夠處理長時間音訊，適用於完整歌曲、長篇語音等場景。
 
-* **支援多種文字轉換方式**
- 在「僅產生工程（WAV + LAB）」模式下，可選擇：
+* **支援多種文本轉換方式**
+  在「僅生成工程（WAV+LAB/MIDI）」模式下，可選擇：
 
- * 不轉換
- * 合併輔音
- * 平假名
- * 片假名
+  * 不轉換
+  * 合併子音
+  * 平假名
+  * 片假名
 
 * **支援多種音訊格式**
- `WAV / MP3 / FLAC / M4A / AAC`
+  `WAV / MP3 / FLAC / M4A / AAC / OGG`
 
-* **支援多語文字對齊**
+* **支援多語言文本對齊**
 
 * **支援 LAB 檔案匯出**
 
-* **支援多種對其演算法**
- 內建 **MFA、WhisperX、Qwen3-ASR、Qwen3-FA** 四種對其方式，可依不同需求選擇不同演算法。
-
+* **支援多種對齊演算法**
+  內建 **Montreal Forced Aligner、WhisperX、Qwen3-ASR-1.7B、Qwen3-ForcedAligner-0.6B、NeMo Forced Aligner** 五種對齊方式，可根據不同需求選擇不同演算法。
+  
 * **提供簡潔易用的 Web 介面**
+
+* **支援批次處理多個 LAB / MIDI / 文本 + WAV 轉換成工程檔案**
 
 ---
 
 ## 📌 適用場景
 
-- 已經有歌聲合成或 TTS 音頻，希望快速產生標註
-- 想把語音工程導入歌聲合成軟體繼續編輯
-- 想批量產生 `.lab`、F0 和工程文件
-- 想在「說話」和「唱歌」之間建立可編輯的中間層
+- 已經有歌聲合成或 TTS 音訊，希望快速生成標註
+- 想把語音工程匯入歌聲合成軟體繼續編輯
+- 想批次生成 `.lab`、F0 和工程檔案
+- 想在“說話”和“唱歌”之間建立可編輯的中間層
 
 ---
 
-## 🛠️ 運作原理
+## 🛠️ 工作原理
 
-1. 輸入音訊檔案與文字
-2. 使用 **[MFA](https://github.com/MontrealCorpusTools/Montreal-Forced-Aligner)** 進行自動時間對齊
-3. 產生 `.lab` 標註文件
-4. 使用 **[PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)** 擷取 F0 音高
-5. 根據處理模式輸出工程文件
-6. 將結果導入歌聲合成軟體繼續使用
+1. 輸入音訊檔案與文本
+2. 使用 **[Qwen3-FA](https://github.com/QwenLM/Qwen3-ASR)** 進行自動時間對齊
+3. 生成 `.lab` 標註檔案
+4. 使用 **[PyWORLD](https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder)** 提取 F0 音高
+5. 根據處理模式輸出工程檔案
+6. 將結果匯入歌聲合成軟體繼續使用
 
 ---
 
@@ -99,22 +104,22 @@ chmod +x setup.sh run.sh
 
 啟動後訪問：
 ```
-http://localhost:5000
+http://127.0.0.1:5850
 ```
 ## 🔧 處理模式
 ### 1. 僅標註（快速）
 
-只進行 MFA 自動標註，產生 .lab 檔。
+只進行 Qwen3-FA 自動標註，生成 .lab 檔案。
 
-### 2. 完整處理（標註 + F0 + 工程文件）
+### 2. 完整處理（標註 + F0 + 工程檔案）
 
-執行 MFA 對齊、F0 提取，並產生工程文件。
+執行 Qwen3-FA 對齊、F0 提取，並生成工程檔案。
 
-### 3. 僅產生工程（WAV + LAB）
+### 3. 僅生成工程（WAV + LAB）
 
-使用現有的 WAV + LAB 產生工程文件，不再重複做完整標註流程。
+使用已有的 WAV + LAB 生成工程檔案，不再重複做完整標註流程。
 
-### 📋 系統需求
+### 📋 系統要求
 Python 3.8+
 
 Node.js 16+
@@ -123,40 +128,26 @@ Node.js 16+
 
 1GB 可用磁碟空間
 
-### 🔧 安裝 MFA
-```
-pip install montreal-forced-aligner
-```
-
-# 下載語言模型
-```
-mfa model download acoustic cmn # 中文
-mfa model download acoustic eng # 英語
-mfa model download acoustic jpn # 日語
-mfa model download acoustic kor # 韓語
-mfa model download acoustic yue # 粵語
-```
-
 ## 📖 使用流程
 ### 僅標註（快速）
 
 1. 開啟本應用
 
-2. 上傳音訊文件
+2. 上傳音訊檔案
 
-3. 輸入文字
+3. 輸入文本
 
 4. 選擇語言
 
 5. 點選開始標註
 
-6. 下載產生的 .lab
+6. 下載生成的 .lab
 
-### 完整處理（標註 + F0 + 工程文件）
+### 完整處理（標註 + F0 + 工程檔案）
 
-1. 上傳音訊文件
+1. 上傳音訊檔案
 
-2. 輸入文字
+2. 輸入文本
 
 3. 選擇語言
 
@@ -164,9 +155,9 @@ mfa model download acoustic yue # 粵語
 
 5. 點選開始處理
 
-6. 下載產生的工程文件
+6. 下載生成的工程檔案
 
-### 僅產生工程（WAV + LAB）
+### 僅生成工程（WAV + LAB）
 
 1. 準備好 WAV 和對應的 LAB
 
@@ -176,58 +167,64 @@ mfa model download acoustic yue # 粵語
 
 4. 點選生成
 
-5. 下載工程文件
+5. 下載工程檔案
 
 ### 📝 輸出內容
 根據處理模式，應用可輸出：
 
-- .lab 時間對齊文件
-- F0 音高訊息
-- 歌聲合成工程文件
+- .lab 時間對齊檔案
+- F0 音高資訊
+- 歌聲合成工程檔案
 
 ### 📁 目錄結構
 ```
-backend/ 後端服務
-frontend/ 前端介面
-setup.bat Windows 環境安裝腳本
-run.bat Windows 啟動腳本
-setup.sh Linux / Mac 環境安裝腳本
-run.sh Linux / Mac 啟動腳本
+backend/                後端：4 個 Flask 程序（app.py 主服務 :5850，
+                         qwen3_server.py :5851，nemo_server.py :5852，
+                         qwen3tts_server.py :5853），各自獨立虛擬環境，
+                         通過本地 HTTP 通訊，避免依賴衝突
+frontend/                前端介面（Vue 3 + Element Plus + TypeScript）
+launcher.py               打包釋出形態下的程序編排 / 系統托盤 / 原生視窗
+setup.bat / run.bat        Windows 環境安裝 / 啟動指令碼
+setup.sh / run.sh          Linux / Mac 環境安裝 / 啟動指令碼
+Docs/ARCHITECTURE.md      詳細技術架構與程式碼剖析報告
 ```
 
-## ⚠️ 免責聲明
+> 更完整的模組級目錄說明（每個檔案負責什麼、彼此如何呼叫）見
+> [Docs/ARCHITECTURE.md](./Docs/ARCHITECTURE.md#3-目錄結構詳解)。
 
-本項目用於以下用途：
+## ⚠️ 免責宣告
 
-- 音訊自動對齊（MFA）
-- 音高擷取（PyWORLD / F0）
-- 歌聲合成工程文件生成
+本專案用於以下用途：
+
+- 音訊自動對齊（Qwen3-FA）
+- 音高提取（PyWORLD / F0）
+- 歌聲合成工程檔案生成
 
 ---
 
 ### 📌 功能限制
 
-本工具僅作為“SVS 工作流程輔助工具”，不具備以下能力：
+本工具僅作為“SVS 工作流輔助工具”，不具備以下能力：
 
-- 不進行語音合成（TTS / SVS）
+- 不進行歌聲合成（SVS）
 - 不訓練或修改聲庫模型
-- 不取代任何歌聲合成軟體
+- 不替代任何歌聲合成軟體
 
 ---
 
 ### 📁 使用責任
 
-使用本工具產生的結果（包括 `.lab`、F0 資料及工程文件）：
+使用本工具生成的結果（包括 `.lab`、F0 資料及工程檔案）：
 
 - 由使用者自行負責其合法性與用途
-- 使用前請確認所使用音訊及聲庫的授權範圍
+- 使用前請確認所用音訊及聲庫的授權範圍
 - 若涉及第三方聲庫，請遵守其官方使用條款
 
 ---
 
 ### 🎭 聲庫與標註說明
 
-如聲庫或合成系統要求註明來源，請根據對應協議標註（是否要標明演技指導取決於轉換成工程文件後的聲庫的聲音是否被識別有原樣本特徵，如果被識別有原樣本特徵，請根據對應協議標註），例如：
+如聲庫或合成系統要求註明來源，請根據對應協議標註（是否要標明演技指導取決於轉換成工程檔案後的聲庫的聲音是否被識別有原樣本特徵，如果被識別有原樣本特徵，請根據對應協議標註），例如：
 
 - “使用聲庫：XXX”
 - “演技指導：XXX”
@@ -236,13 +233,22 @@ run.sh Linux / Mac 啟動腳本
 
 ### 📌 版權說明
 
-本項目不聲明對使用者輸入資料或產生內容的所有權。
+本專案不宣告對使用者輸入資料或生成內容的所有權。
 
-資料版權歸使用者所有，取決於所使用原始樣本轉換成工程文件後的聲庫的聲音，是否被識別有原始樣本特徵。如果使用第三方原始樣本被識別有原始樣本特徵，則可能被視為第三方的衍生作品。
+資料版權歸使用者所有，具體取決於所使用原樣本轉換成工程檔案後的聲庫的聲音，是否被識別有原樣本特徵。如果使用第三方原樣本被識別有原樣本特徵，則可能被視為第三方的衍生作品。
 
 ---
 
 ## 📝 許可證
-MIT License
 
-包括非「軟體」部分的文件（僅原創部分有效）
+本專案的軟體部分，包括原始碼及其他屬於軟體組成部分的檔案，採用 **MIT License**。
+
+除另有說明外，本專案中由作者原創的非軟體內容，例如原創文件、原創示例、說明文字及其他非軟體作品，採用 **CC0 1.0 Universal**。
+
+第三方模型、字典、聲庫、資料集、第三方軟體及其衍生檔案仍遵循各自的許可證或授權條款；本專案採用的 MIT License 和 CC0 1.0 Universal 不改變這些第三方內容原有的授權方式。
+
+**許可證適用範圍說明：**
+
+* 軟體及原始碼：MIT License
+* 作者原創的非軟體內容：CC0 1.0 Universal
+* 第三方內容：遵循其各自的許可證或授權條款
