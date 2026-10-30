@@ -1,0 +1,119 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# SVS Lab Tools / SVS Lab Aligner - fixed main environment
+# Target: Python 3.10 / Windows x64
+# IMPORTANT: WhisperX and NeMo are intentionally NOT installed here.
+# They run as separate HTTP server environments to avoid dependency conflicts.
+# Qwen3-ASR / Qwen3-ForcedAligner (qwen-asr package) ARE installed here and run
+# in-process (see the "Qwen3-ASR / Qwen3-ForcedAligner" section below for why).
+
+# Core
+numpy==1.26.4
+setuptools==81.0.0
+
+# 【新增】字幕烧录成视频（burn_subtitles_to_video，见 subtitle_processor.py）
+# 用 Pillow 在 Python 侧把字幕文字画成图片再拼接成视频，不再依赖 ffmpeg
+# 的 subtitles/drawtext 滤镜（这两个都是可选编译项，实测用户环境的
+# ffmpeg 构建没有 subtitles 滤镜）。9.0 起有 stroke_width/stroke_fill
+# 描边参数，这里画字幕黑边白字要用到。
+Pillow>=9.0.0
+
+# PyTorch - CUDA 11.8 default
+# For CUDA, replace BOTH torch and torchaudio with matching CUDA builds.
+torch==2.3.1+cpu
+torchaudio==2.3.1+cpu
+
+# Web/API
+flask==2.3.3
+flask-cors==4.0.0
+requests==2.34.2
+tqdm==4.70.0
+
+# Audio / DSP
+soundfile==0.12.1
+librosa==0.11.0
+resampy==0.4.3
+pyworld==0.3.5
+torchcrepe==0.0.24
+
+# MFA / text
+montreal-forced-aligner==3.3.9
+# 【修复】MFA 3.3.9 的 db.py 里硬编码 `from pgvector.sqlalchemy import Vector`，
+# 但它自己的 wheel 元数据（Requires-Dist）并没有声明依赖 pgvector，属于
+# 上游打包遗漏，pip 装 montreal-forced-aligner 时不会连带装上，必须在这里
+# 显式列出，否则一 import montreal_forced_aligner 就会
+# ModuleNotFoundError: No module named 'pgvector'。
+pgvector==0.3.6
+textgrid==1.5
+pypinyin>=0.53.0
+pycantonese>=5.0.0
+sudachipy>=0.6.8
+sudachidict-core>=20240409
+jamo>=0.4.1
+nltk>=3.10.2
+num2words>=0.5.14
+g2p_en>=2.1.0
+
+# 【修复】MFA 的 tokenization/spacy.py 在实际跑对齐前会按语言检查专用分词器
+# 是否已安装，缺哪个就直接报 ImportError 中断当前任务（不是安装失败，是运行
+# 时才报）。本项目支持的语言里，中文 (cmn → Language.chinese) 和韩语 (kor)
+# 用到的包这里之前没有声明，日语 (jpn) 靠上面已有的 sudachipy 侥幸覆盖；
+# 粤语 (yue → Language.yue) 这个检查函数里没有对应分支，不受影响。以下几行
+# 是 MFA 官方错误信息里点名要装的包，装完这两个语言就都不会再触发这个
+# ImportError 了：
+#   中文: pip install spacy-pkuseg dragonmapper hanziconv
+#   韩语: pip install python-mecab-ko jamo   (jamo 上面已有)
+spacy-pkuseg==1.0.1
+dragonmapper==0.3.0
+hanziconv==0.3.2
+python-mecab-ko==1.3.7
+
+# ====================== WhisperX ======================
+# NOTE: whisperx is intentionally NOT installed here (removed — this is the
+# other half of the 2026-08 architecture swap described below). WhisperX now
+# runs exclusively inside the separate whisperx_server.py process
+# (.whisperx_env, see requirements-whisperx.txt) and is called over HTTP on
+# 127.0.0.1:5854 — alt_aligners.py's WhisperXAligner class is a thin HTTP
+# client (POST /transcribe, POST /align), matching the pattern
+# Qwen3ASRAligner/Qwen3ForcedAligner use below. This env never needs
+# whisperx/faster-whisper/ctranslate2 installed.
+#
+# Why it moved out: whisperx==3.2.0 requires faster-whisper==1.0.0 +
+# ctranslate2==4.4.0, which in turn requires tokenizers<0.16 and therefore
+# transformers==4.39.3 — a hard-pin that directly conflicted with qwen-asr's
+# own hard-pin of transformers==4.57.6 (see the Qwen3-ASR section below).
+# Both packages have historically never relaxed these pins, so no amount of
+# pip backtracking could satisfy both inside one environment at once.
+
+# ====================== Qwen3-ASR / Qwen3-ForcedAligner ======================
+# 【2026-08 架构调整】此前 qwen-asr 因为版本冲突（见上面 WhisperX 一节）被
+# 排除在这个环境之外，只能运行在独立的 qwen3_server.py 进程
+# （.qwen3_env）里，通过 HTTP 调用。现在 WhisperX 已经迁出这个环境，
+# qwen-asr 的 transformers==4.57.6 精确锁定不再与任何其它包冲突，可以
+# 直接安装进这个主环境，Qwen3-ASR 和 Qwen3-ForcedAligner 都改为在
+# app.py 进程内本地加载（qwen3_server.py 已下线，见 alt_aligners.py 里
+# Qwen3ASRAligner / Qwen3ForcedAligner 类顶部的迁移说明）。
+qwen-asr==0.0.6
+# qwen-asr 自身在 PyPI 上精确锁定了 transformers==4.57.6 /
+# accelerate==1.12.0（见其 requires_dist），下面两行的宽松下限不会与
+# 之冲突，pip 解析时最终会以 qwen-asr 的精确锁定版本为准；这里保留
+# 宽松下限只是为了在 qwen-asr 未来放宽自己的锁定范围时仍有一个基本
+# 版本保障，不需要跟着精确改动。
+transformers==4.57.6
+accelerate==1.12.0
+
+# Traditional -> Simplified Chinese conversion
+opencc-python-reimplemented>=0.1.7
+
+# Edge TTS / Windows SAPI helper
+edge-tts>=7.0.0
+pywin32>=306; sys_platform == "win32"
+
+# Project file formats
+ruamel.yaml==0.19.1
+mido==1.3.3
+
+# NOTE:
+# kalpy-kaldi is intentionally NOT installed by pip here.
+# The upstream package is a Kaldi binding and recommends conda-forge Kaldi/Kalpy.
+# Install it separately in the MFA environment if your setup script requires it.

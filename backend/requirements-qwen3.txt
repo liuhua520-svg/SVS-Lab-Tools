@@ -1,0 +1,16 @@
+# requirements-qwen3.txt — 已废弃（2026-08）
+#
+# 【2026-08 架构调整】qwen3_server.py 独立服务已下线。Qwen3-ASR /
+# Qwen3-ForcedAligner（qwen-asr 包）现在直接安装进主环境 .mfa_env
+# （见 requirements.txt 里的 "Qwen3-ASR / Qwen3-ForcedAligner" 一节），
+# 在 app.py 进程内本地加载，不再需要一个独立的 .qwen3_env。
+#
+# WhisperX 反过来迁出为独立服务 whisperx_server.py（.whisperx_env），
+# 依赖见 requirements-whisperx.txt。
+#
+# 如果你的发布目录下还有旧的 runtime/qwen3_env（或 .qwen3_env）目录、
+# 或者 launcher.py 的 SERVICES 列表里还残留旧的 "qwen3" 条目，可以直接
+# 删除，不再需要。
+#
+# 保留这个文件本身只是为了避免任何仍然引用 "requirements-qwen3.txt"
+# 这个文件名的旧脚本/文档在文件缺失时报错；这里不再列出任何依赖。
